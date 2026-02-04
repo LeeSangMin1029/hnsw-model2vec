@@ -1,0 +1,85 @@
+[workspace]
+members = [
+    "crates/v-hnsw-core",
+    "crates/v-hnsw-distance",
+    "crates/v-hnsw-quantize",
+    "crates/v-hnsw-graph",
+    "crates/v-hnsw-gpu",
+    "crates/v-hnsw-storage",
+    "crates/v-hnsw-tokenizer",
+    "crates/v-hnsw-search",
+    "crates/v-hnsw-embed",
+    "crates/v-hnsw",
+    "crates/v-hnsw-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LeeSangMin1029/v-hnsw"
+
+[workspace.dependencies]
+# Internal crates
+v-hnsw-core = { path = "crates/v-hnsw-core" }
+v-hnsw-distance = { path = "crates/v-hnsw-distance" }
+v-hnsw-quantize = { path = "crates/v-hnsw-quantize" }
+v-hnsw-graph = { path = "crates/v-hnsw-graph" }
+v-hnsw-gpu = { path = "crates/v-hnsw-gpu" }
+v-hnsw-storage = { path = "crates/v-hnsw-storage" }
+v-hnsw-tokenizer = { path = "crates/v-hnsw-tokenizer" }
+v-hnsw-search = { path = "crates/v-hnsw-search" }
+v-hnsw-embed = { path = "crates/v-hnsw-embed" }
+
+# Error handling
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "2"
+
+# Parallelism
+rayon = "1"
+parking_lot = "0.12"
+crossbeam = "0.8"
+
+# GPU
+cubecl = "0.9"
+
+# Storage
+memmap2 = "0.9"
+crc32fast = "1"
+
+# Tokenizer (Korean)
+lindera = "0.39"
+lindera-tokenizer = "0.39"
+lindera-dictionary = { version = "0.39", features = ["ko-dic"] }
+unicode-normalization = "0.1"
+
+# Logging
+tracing = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Arrow / Parquet
+arrow = { version = "54", default-features = false, features = ["ipc"] }
+parquet = { version = "54", default-features = false, features = ["arrow"] }
+
+# Dev dependencies
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+# NOTE: cargo showed bincode 3.0.0, criterion 0.8.1 available
+# bincode 3 used; criterion stays at 0.5 (0.8 has breaking API changes)
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+panic = "deny"
+expect_used = "warn"
+todo = "warn"
+

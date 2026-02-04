@@ -1,0 +1,18 @@
+[package]
+name = "v-hnsw-quantize"
+description = "Vector quantization (SQ8, PQ, BQ) for v-hnsw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+v-hnsw-distance.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

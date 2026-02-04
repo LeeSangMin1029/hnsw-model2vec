@@ -1,0 +1,5 @@
+/target
+.fastembed_cache/
+.omc/
+testdb/
+*.db

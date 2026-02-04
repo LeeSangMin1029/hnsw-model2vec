@@ -1,0 +1,15 @@
+[package]
+name = "v-hnsw-core"
+description = "Core traits, types, and error definitions for v-hnsw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+bincode.workspace = true
+
+[lints]
+workspace = true

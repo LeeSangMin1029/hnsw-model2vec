@@ -1,0 +1,22 @@
+[package]
+name = "v-hnsw-storage"
+description = "Persistence layer (mmap, WAL) for v-hnsw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+memmap2.workspace = true
+serde.workspace = true
+bincode.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+crc32fast.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

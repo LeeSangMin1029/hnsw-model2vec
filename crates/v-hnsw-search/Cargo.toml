@@ -1,0 +1,21 @@
+[package]
+name = "v-hnsw-search"
+description = "Hybrid search (Dense + BM25 + RRF) for v-hnsw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+v-hnsw-graph.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+
+[dev-dependencies]
+v-hnsw-distance.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

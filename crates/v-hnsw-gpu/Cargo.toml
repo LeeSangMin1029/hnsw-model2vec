@@ -1,0 +1,24 @@
+[package]
+name = "v-hnsw-gpu"
+description = "GPU acceleration via CubeCL for v-hnsw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+v-hnsw-distance.workspace = true
+cubecl.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+cuda = ["cubecl/cuda"]
+wgpu = ["cubecl/wgpu"]
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

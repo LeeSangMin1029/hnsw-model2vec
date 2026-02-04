@@ -1,0 +1,28 @@
+[package]
+name = "v-hnsw"
+description = "Local vector database library with GPU acceleration, HNSW indexing, and Korean language support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+v-hnsw-distance.workspace = true
+v-hnsw-quantize.workspace = true
+v-hnsw-graph.workspace = true
+v-hnsw-gpu = { workspace = true, optional = true }
+v-hnsw-storage.workspace = true
+v-hnsw-tokenizer = { workspace = true, optional = true }
+v-hnsw-search.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[features]
+default = ["korean"]
+gpu = ["dep:v-hnsw-gpu"]
+korean = ["dep:v-hnsw-tokenizer"]
+
+[lints]
+workspace = true

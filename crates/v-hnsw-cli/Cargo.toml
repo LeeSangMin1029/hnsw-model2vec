@@ -1,0 +1,48 @@
+[package]
+name = "v-hnsw-cli"
+description = "CLI tool for v-hnsw vector database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "v-hnsw"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+v-hnsw-core.workspace = true
+v-hnsw-graph.workspace = true
+v-hnsw-distance.workspace = true
+v-hnsw-storage.workspace = true
+v-hnsw-search.workspace = true
+v-hnsw-embed.workspace = true
+v-hnsw-tokenizer = { path = "../v-hnsw-tokenizer" }
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+
+# Progress bars
+indicatif = "0.17"
+
+# Ctrl+C handling
+ctrlc = "3.4"
+
+# Arrow / Parquet
+arrow.workspace = true
+parquet.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

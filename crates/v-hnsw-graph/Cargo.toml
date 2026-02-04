@@ -1,0 +1,25 @@
+[package]
+name = "v-hnsw-graph"
+description = "HNSW graph implementation for v-hnsw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+v-hnsw-distance.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "hnsw"
+harness = false
+
+[lints]
+workspace = true
