@@ -10,5 +10,5 @@ use super::insert;
 ///
 /// This is an alias for the insert command.
 pub fn run(path: PathBuf, input: PathBuf) -> Result<()> {
-    insert::run(path, input, "vector", false, "text", "", 128, "cpu", false)
+    insert::run(path, input, "vector", false, "text", "minishlab/potion-multilingual-128M", 128)
 }

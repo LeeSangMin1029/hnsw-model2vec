@@ -10,7 +10,6 @@ members = [
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
     "crates/v-hnsw-chunk",
-    "crates/v-hnsw-rerank",
     "crates/v-hnsw",
     "crates/v-hnsw-cli",
 ]
@@ -35,7 +34,6 @@ v-hnsw-tokenizer = { path = "crates/v-hnsw-tokenizer" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
 v-hnsw-chunk = { path = "crates/v-hnsw-chunk" }
-v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 
 # Error handling
 thiserror = "2"

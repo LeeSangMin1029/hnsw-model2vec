@@ -12,12 +12,13 @@ use indicatif::{ProgressBar, ProgressStyle};
 use v_hnsw_chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_core::{Payload, PayloadStore, PayloadValue, VectorIndex, VectorStore};
 use v_hnsw_distance::CosineDistance;
-use v_hnsw_embed::{Device, EmbeddingModel, FastEmbedModel, ModelType};
+use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
-use v_hnsw_search::{Bm25Index, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use super::create::DbConfig;
+use super::file_index;
 use crate::is_interrupted;
 
 /// Input type detected from the path.
@@ -65,23 +66,17 @@ fn detect_input_type(path: &Path) -> Result<InputType> {
     }
 }
 
-/// Create default model configuration.
-fn default_model() -> ModelType {
-    ModelType::default() // MultilingualE5Base
-}
+/// Default model2vec model ID.
+pub const DEFAULT_MODEL: &str = "minishlab/potion-multilingual-128M";
 
-/// Create embedding model with auto device detection.
-fn create_model() -> Result<FastEmbedModel> {
-    let model_type = default_model();
-    let device = Device::auto();
+/// Create embedding model (model2vec).
+pub fn create_model() -> Result<Model2VecModel> {
+    println!("Loading model2vec model: {}", DEFAULT_MODEL);
 
-    println!("Loading embedding model: {} (dim={}, device={})",
-             model_type.model_name(), model_type.dimension(), device.name());
+    let model = Model2VecModel::from_pretrained(DEFAULT_MODEL)
+        .context("Failed to load model2vec model")?;
 
-    let model = FastEmbedModel::with_device(model_type, device)
-        .context("Failed to load embedding model")?;
-
-    println!("Model loaded.");
+    println!("Model loaded (dim={}).", model.dim());
     Ok(model)
 }
 
@@ -121,7 +116,7 @@ fn ensure_database(path: &Path, dim: usize, model_name: &str) -> Result<StorageE
             metric: "cosine".to_string(),
             m: 16,
             ef_construction: 200,
-            korean: false,
+            korean: true,
             embed_model: Some(model_name.to_string()),
         };
         db_config.save(path)?;
@@ -138,7 +133,7 @@ fn ensure_database(path: &Path, dim: usize, model_name: &str) -> Result<StorageE
 }
 
 /// Build progress bar with standard template.
-fn make_progress_bar(total: u64) -> Result<ProgressBar> {
+pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -150,7 +145,7 @@ fn make_progress_bar(total: u64) -> Result<ProgressBar> {
 }
 
 /// Build payload from source info.
-fn make_payload(source: &str, title: Option<&str>, tags: &[String], chunk_index: usize, chunk_total: usize) -> Payload {
+pub fn make_payload(source: &str, title: Option<&str>, tags: &[String], chunk_index: usize, chunk_total: usize) -> Payload {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -173,7 +168,7 @@ fn make_payload(source: &str, title: Option<&str>, tags: &[String], chunk_index:
 }
 
 /// Generate a stable ID from source path and chunk index.
-fn generate_id(source: &str, chunk_index: usize) -> u64 {
+pub fn generate_id(source: &str, chunk_index: usize) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -184,7 +179,7 @@ fn generate_id(source: &str, chunk_index: usize) -> u64 {
 }
 
 /// Embed texts with length-sorted batching to minimize padding waste.
-fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+pub fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -207,6 +202,7 @@ fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<Vec<
 }
 
 /// A record for batch processing.
+#[derive(Clone)]
 struct AddRecord {
     id: u64,
     text: String,
@@ -221,7 +217,7 @@ struct AddRecord {
 fn process_markdown_folder(
     db_path: &Path,
     input_path: &Path,
-    model: &FastEmbedModel,
+    model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64, u64)> {
     let chunker = MarkdownChunker::new(ChunkConfig {
@@ -249,8 +245,9 @@ fn process_markdown_folder(
 
     println!("Found {} markdown files", md_files.len());
 
-    // First pass: collect all chunks
+    // First pass: collect all chunks and track file metadata
     let mut records: Vec<AddRecord> = Vec::new();
+    let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new(); // path -> (mtime, size, chunk_ids)
 
     for md_path in &md_files {
         if is_interrupted() {
@@ -270,8 +267,14 @@ fn process_markdown_folder(
         let tags = frontmatter.as_ref().map(|f| f.tags.clone()).unwrap_or_default();
         let chunk_total = chunks.len();
 
+        // Get file metadata
+        let mtime = file_index::get_file_mtime(md_path).unwrap_or(0);
+        let size = file_index::get_file_size(md_path).unwrap_or(0);
+        let mut chunk_ids = Vec::new();
+
         for chunk in chunks {
             let id = generate_id(&source, chunk.chunk_index);
+            chunk_ids.push(id);
             records.push(AddRecord {
                 id,
                 text: chunk.text,
@@ -282,19 +285,31 @@ fn process_markdown_folder(
                 chunk_total,
             });
         }
+
+        // Store metadata for this file
+        file_metadata_map.insert(source, (mtime, size, chunk_ids));
     }
 
     println!("Total chunks to process: {}", records.len());
 
     // Process in batches
-    process_records(db_path, records, model, engine)
+    let result = process_records(db_path, records, model, engine)?;
+
+    // Save file metadata index
+    let mut file_index = file_index::load_file_index(db_path)?;
+    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
+        file_index.update_file(path, mtime, size, chunk_ids);
+    }
+    file_index::save_file_index(db_path, &file_index)?;
+
+    Ok(result)
 }
 
 /// Process JSONL file.
 fn process_jsonl(
     db_path: &Path,
     input_path: &Path,
-    model: &FastEmbedModel,
+    model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64, u64)> {
     use std::io::{BufRead, BufReader};
@@ -381,7 +396,7 @@ fn process_jsonl(
 fn process_parquet(
     db_path: &Path,
     input_path: &Path,
-    model: &FastEmbedModel,
+    model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64, u64)> {
     use arrow::array::{Array, StringArray, UInt64Array};
@@ -469,85 +484,132 @@ fn process_parquet(
     process_records(db_path, records, model, engine)
 }
 
-/// Process records in batches with embedding.
+/// Embedded batch ready for storage insertion.
+struct EmbeddedBatch {
+    records: Vec<AddRecord>,
+    embeddings: Vec<Vec<f32>>,
+}
+
+/// Process records in batches with embedding using pipeline parallelism.
+/// Producer thread: prepare texts + embedding
+/// Consumer thread: storage insertion
 fn process_records(
     _db_path: &Path,
     records: Vec<AddRecord>,
-    model: &FastEmbedModel,
+    model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64, u64)> {
     if records.is_empty() {
         return Ok((0, 0, 0));
     }
 
-    let batch_size = 64; // Reasonable batch size for GPU
-    let max_chars = 2500; // Covers 512 token limit for most models
+    let batch_size = 256; // model2vec is CPU-based, can handle larger batches
+    let max_chars = 8000; // model2vec uses simple tokenization
 
     let pb = make_progress_bar(records.len() as u64)?;
     let start = Instant::now();
 
-    let mut inserted = 0u64;
-    let skipped = 0u64;
-    let mut errors = 0u64;
+    // Bounded channel: buffer batches so producer can stay ahead during storage I/O
+    let (sender, receiver) = crossbeam::channel::bounded::<EmbeddedBatch>(4);
 
-    for chunk in records.chunks(batch_size) {
-        if is_interrupted() {
-            pb.abandon_with_message("Interrupted");
-            break;
-        }
+    // Pipeline: Producer embeds, Consumer inserts
+    let result = std::thread::scope(|scope| {
+        let pb_ref = &pb;
 
-        // Prepare texts for embedding (truncate if needed)
-        let texts: Vec<String> = chunk
-            .iter()
-            .map(|r| {
-                if r.text.len() > max_chars {
-                    let mut end = max_chars;
-                    while !r.text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    r.text[..end].to_string()
-                } else {
-                    r.text.clone()
+        // Producer thread: prepare texts + embed on GPU
+        let producer = scope.spawn(move || -> anyhow::Result<u64> {
+            let mut producer_errors = 0u64;
+
+            for chunk in records.chunks(batch_size) {
+                if is_interrupted() {
+                    break;
                 }
-            })
-            .collect();
 
-        // Embed batch
-        let embeddings = match embed_sorted(model, &texts) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("Embedding error: {e}");
-                errors += chunk.len() as u64;
-                pb.inc(chunk.len() as u64);
-                continue;
+                // Prepare texts for embedding (truncate if needed)
+                let texts: Vec<String> = chunk
+                    .iter()
+                    .map(|r| {
+                        if r.text.len() > max_chars {
+                            let mut end = max_chars;
+                            while !r.text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            r.text[..end].to_string()
+                        } else {
+                            r.text.clone()
+                        }
+                    })
+                    .collect();
+
+                // Embed batch on GPU
+                let embeddings = match embed_sorted(model, &texts) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("Embedding error: {e}");
+                        producer_errors += chunk.len() as u64;
+                        pb_ref.inc(chunk.len() as u64);
+                        continue;
+                    }
+                };
+
+                // Send to consumer
+                let batch = EmbeddedBatch {
+                    records: chunk.to_vec(),
+                    embeddings,
+                };
+
+                if sender.send(batch).is_err() {
+                    break; // Consumer dropped
+                }
             }
-        };
 
-        // Insert into storage
-        let items: Vec<(u64, &[f32], Payload, &str)> = chunk
-            .iter()
-            .zip(embeddings.iter())
-            .map(|(rec, emb)| {
-                let payload = make_payload(
-                    &rec.source,
-                    rec.title.as_deref(),
-                    &rec.tags,
-                    rec.chunk_index,
-                    rec.chunk_total,
-                );
-                (rec.id, emb.as_slice(), payload, rec.text.as_str())
-            })
-            .collect();
+            drop(sender); // Signal completion
+            Ok(producer_errors)
+        });
 
-        if let Err(e) = engine.insert_batch(&items) {
-            eprintln!("Insert error: {e}");
-            errors += chunk.len() as u64;
-        } else {
-            inserted += chunk.len() as u64;
+        // Consumer (this thread): receive batches + insert into storage
+        let mut inserted = 0u64;
+        let mut consumer_errors = 0u64;
+
+        for batch in receiver {
+            if is_interrupted() {
+                break;
+            }
+
+            // Insert into storage
+            let items: Vec<(u64, &[f32], Payload, &str)> = batch
+                .records
+                .iter()
+                .zip(batch.embeddings.iter())
+                .map(|(rec, emb)| {
+                    let payload = make_payload(
+                        &rec.source,
+                        rec.title.as_deref(),
+                        &rec.tags,
+                        rec.chunk_index,
+                        rec.chunk_total,
+                    );
+                    (rec.id, emb.as_slice(), payload, rec.text.as_str())
+                })
+                .collect();
+
+            if let Err(e) = engine.insert_batch(&items) {
+                eprintln!("Insert error: {e}");
+                consumer_errors += batch.records.len() as u64;
+            } else {
+                inserted += batch.records.len() as u64;
+            }
+
+            pb_ref.inc(batch.records.len() as u64);
         }
 
-        pb.inc(chunk.len() as u64);
-    }
+        // Wait for producer and get its error count
+        let producer_errors = producer.join().unwrap_or_else(|_| Ok(0)).unwrap_or(0);
+
+        (inserted, producer_errors + consumer_errors)
+    });
+
+    let (inserted, errors) = result;
 
     if !is_interrupted() {
         pb.finish_with_message("Done");
@@ -561,16 +623,13 @@ fn process_records(
     println!();
     println!("Add completed:");
     println!("  Inserted: {inserted}");
-    if skipped > 0 {
-        println!("  Skipped:  {skipped}");
-    }
     println!("  Errors:   {errors}");
     println!("  Elapsed:  {:.2}s", elapsed.as_secs_f64());
     if inserted > 0 {
         println!("  Rate:     {:.0} items/s", inserted as f64 / elapsed.as_secs_f64());
     }
 
-    Ok((inserted, skipped, errors))
+    Ok((inserted, 0, errors))
 }
 
 /// Build and save HNSW and BM25 indexes.
@@ -614,7 +673,7 @@ fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> Resu
     // Build BM25 index
     println!("  Building BM25 index...");
     let bm25_path = path.join("bm25.bin");
-    let mut bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::new(WhitespaceTokenizer::new());
+    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let payload_store = engine.payload_store();
 
     for id in vector_store.id_map().keys() {
@@ -647,7 +706,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
 
     // Create model
     let model = create_model()?;
-    let model_name = default_model().short_name();
+    let model_name = DEFAULT_MODEL;
 
     // Ensure database exists
     let mut engine = ensure_database(&db_path, model.dim(), model_name)?;

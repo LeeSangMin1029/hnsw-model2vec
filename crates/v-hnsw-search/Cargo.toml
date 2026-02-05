@@ -9,10 +9,15 @@ license.workspace = true
 [dependencies]
 v-hnsw-core.workspace = true
 v-hnsw-graph.workspace = true
+v-hnsw-tokenizer = { workspace = true, optional = true }
 parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 bincode.workspace = true
 tracing.workspace = true
+
+[features]
+default = []
+korean = ["v-hnsw-tokenizer"]
 
 [dev-dependencies]
 v-hnsw-distance.workspace = true

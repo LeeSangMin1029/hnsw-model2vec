@@ -161,9 +161,6 @@ v-hnsw search my-db --vector "0.1,0.2,..." --k 10 --ef 500
 # 텍스트로 검색 (BM25)
 v-hnsw search my-db --text "키워드 검색" --k 10
 
-# 리랭킹 포함 하이브리드 검색
-v-hnsw search my-db --vector "..." --text "쿼리" --rerank
-
 # 시맨틱 검색 (쿼리 자동 임베딩)
 v-hnsw vsearch my-db "검색 쿼리" --show-text
 ```
@@ -230,7 +227,6 @@ crates/
 ├── v-hnsw-search    # 하이브리드 검색 (HNSW + BM25 + RRF)
 ├── v-hnsw-embed     # 임베딩 모델 (fastembed)
 ├── v-hnsw-chunk     # 마크다운 시맨틱 청킹
-├── v-hnsw-rerank    # Cross-Encoder 리랭킹
 ├── v-hnsw-tokenizer # 한국어 형태소 분석 (Lindera)
 └── v-hnsw-cli       # CLI 바이너리
 ```

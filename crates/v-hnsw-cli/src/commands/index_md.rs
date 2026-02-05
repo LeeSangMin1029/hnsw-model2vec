@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use v_hnsw_chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_core::VectorIndex;
 use v_hnsw_distance::CosineDistance;
-use v_hnsw_embed::{EmbeddingModel, FastEmbedModel, ModelType};
+use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
 
 use crate::is_interrupted;
@@ -73,7 +73,7 @@ pub fn run(
     // Step 4: Initialize embedding model
     println!("\nInitializing embedding model...");
     let model_start = Instant::now();
-    let model = FastEmbedModel::with_model(ModelType::AllMiniLML6V2)
+    let model = Model2VecModel::new()
         .context("Failed to initialize embedding model")?;
     println!(
         "Model: {} (dim={}), init time: {:.2}s",
@@ -261,7 +261,7 @@ fn chunk_documents_with_chunker(
 }
 
 /// Generate embeddings for texts.
-fn embed_texts(model: &FastEmbedModel, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+fn embed_texts(model: &Model2VecModel, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
     let mut all_embeddings = Vec::with_capacity(texts.len());
 
     let pb = ProgressBar::new(texts.len() as u64);

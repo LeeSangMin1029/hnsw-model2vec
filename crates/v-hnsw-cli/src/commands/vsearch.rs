@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use v_hnsw_core::VectorIndex;
 use v_hnsw_distance::CosineDistance;
-use v_hnsw_embed::{EmbeddingModel, FastEmbedModel, ModelType};
+use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::HnswGraph;
 
 use super::create::DbConfig;
@@ -39,24 +39,6 @@ pub struct VSearchParams {
     pub ef: usize,
     pub model: Option<String>,  // Optional - auto-detect from config
     pub show_text: bool,
-}
-
-/// Parse model name to ModelType.
-fn parse_model_type(name: &str) -> Result<ModelType> {
-    match name.to_lowercase().as_str() {
-        "all-mini-lm-l6-v2" | "minilm" => Ok(ModelType::AllMiniLML6V2),
-        "all-mini-lm-l12-v2" => Ok(ModelType::AllMiniLML12V2),
-        "bge-small-en-v1.5" | "bge-small" => Ok(ModelType::BGESmallENV15),
-        "bge-base-en-v1.5" | "bge-base" => Ok(ModelType::BGEBaseENV15),
-        "bge-large-en-v1.5" | "bge-large" => Ok(ModelType::BGELargeENV15),
-        "multilingual-e5-small" | "e5-small" => Ok(ModelType::MultilingualE5Small),
-        "multilingual-e5-base" | "e5-base" => Ok(ModelType::MultilingualE5Base),
-        "multilingual-e5-large" | "e5-large" => Ok(ModelType::MultilingualE5Large),
-        other => anyhow::bail!(
-            "Unknown model: '{}'. Available: all-mini-lm-l6-v2, bge-small-en-v1.5, bge-base-en-v1.5, multilingual-e5-small, etc.",
-            other
-        ),
-    }
 }
 
 /// Run the vsearch command.
@@ -104,10 +86,12 @@ pub fn run(params: VSearchParams) -> Result<()> {
 
     let start = Instant::now();
 
-    // Initialize embedding model
-    let model_type = parse_model_type(&model_name)?;
-    let embed_model = FastEmbedModel::with_model(model_type)
-        .context("Failed to initialize embedding model")?;
+    // Initialize embedding model (model2vec only)
+    println!("Loading model2vec: {model_name}");
+    let embed_model: Box<dyn EmbeddingModel> = Box::new(
+        Model2VecModel::from_pretrained(&model_name)
+            .context("Failed to initialize model2vec model")?
+    );
 
     // Check dimension matches
     if embed_model.dim() != config.dim {
@@ -121,11 +105,8 @@ pub fn run(params: VSearchParams) -> Result<()> {
 
     // Embed the query
     let query_embedding = embed_model
-        .embed(&[query.as_str()])
-        .context("Failed to embed query")?
-        .into_iter()
-        .next()
-        .context("No embedding returned")?;
+        .embed_query(&query)
+        .context("Failed to embed query")?;
 
     // Load HNSW index
     let hnsw: HnswGraph<CosineDistance> = HnswGraph::load(&hnsw_path, CosineDistance)

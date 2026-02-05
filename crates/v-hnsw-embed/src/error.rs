@@ -19,15 +19,3 @@ pub enum EmbedError {
     #[error("model download failed: {0}")]
     Download(String),
 }
-
-impl From<fastembed::Error> for EmbedError {
-    fn from(err: fastembed::Error) -> Self {
-        // Categorize fastembed errors appropriately
-        let msg = err.to_string();
-        if msg.contains("download") || msg.contains("network") {
-            Self::Download(msg)
-        } else {
-            Self::ModelInit(msg)
-        }
-    }
-}

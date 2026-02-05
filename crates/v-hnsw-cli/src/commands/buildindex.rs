@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use v_hnsw_core::{PayloadStore, VectorIndex, VectorStore};
 use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
-use v_hnsw_search::{Bm25Index, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -77,7 +77,7 @@ pub fn run(path: PathBuf) -> Result<()> {
     let bm25_path = path.join("bm25.bin");
     println!("  Building BM25 index...");
 
-    let mut bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::new(WhitespaceTokenizer::new());
+    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let payload_store = engine.payload_store();
 
     let mut text_count = 0;

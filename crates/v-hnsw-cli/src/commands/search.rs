@@ -8,9 +8,8 @@ use serde::Serialize;
 use v_hnsw_core::{DistanceMetric, PayloadStore, VectorIndex, VectorStore};
 use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
-use v_hnsw_search::{Bm25Index, HybridSearchConfig, Reranker, SimpleHybridSearcher, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
-use v_hnsw_rerank::{CrossEncoderConfig, CrossEncoderReranker, RerankerModel};
 
 use super::create::DbConfig;
 
@@ -46,9 +45,6 @@ pub struct SearchParams {
     pub k: usize,
     pub ef: usize,
     pub collection: String,
-    pub rerank: bool,
-    pub rerank_model: String,
-    pub rerank_top: Option<usize>,
 }
 
 /// Run the search command.
@@ -60,9 +56,6 @@ pub fn run(params: SearchParams) -> Result<()> {
         k,
         ef,
         collection: _collection,
-        rerank,
-        rerank_model,
-        rerank_top,
     } = params;
     // At least one of vector or text must be provided
     if vector.is_none() && text.is_none() {
@@ -92,23 +85,15 @@ pub fn run(params: SearchParams) -> Result<()> {
         None
     };
 
-    // Validate reranking only works with hybrid search
-    if rerank && (vector.is_none() || text.is_none()) {
-        anyhow::bail!("Reranking requires both --vector and --text for hybrid search");
-    }
-
-    // Determine rerank candidate count
-    let rerank_candidates = rerank_top.unwrap_or(k * 3);
-
     // Execute search based on metric
     let start = Instant::now();
-    let mut results = match config.metric.as_str() {
+    let results = match config.metric.as_str() {
         "cosine" => search_with_metric::<CosineDistance>(
             &path,
             &config,
             query_vector.clone(),
             text.clone(),
-            if rerank { rerank_candidates } else { k },
+            k,
             ef,
             CosineDistance,
         )?,
@@ -117,7 +102,7 @@ pub fn run(params: SearchParams) -> Result<()> {
             &config,
             query_vector.clone(),
             text.clone(),
-            if rerank { rerank_candidates } else { k },
+            k,
             ef,
             L2Distance,
         )?,
@@ -126,51 +111,12 @@ pub fn run(params: SearchParams) -> Result<()> {
             &config,
             query_vector.clone(),
             text.clone(),
-            if rerank { rerank_candidates } else { k },
+            k,
             ef,
             DotProductDistance,
         )?,
         other => anyhow::bail!("Unknown metric: {other}"),
     };
-
-    // Apply reranking if enabled
-    if rerank {
-        let query_text = text.as_ref().ok_or_else(|| anyhow::anyhow!("Text query required for reranking"))?;
-
-        // Open storage to get document texts
-        let engine = StorageEngine::open(&path)
-            .with_context(|| format!("failed to open database at {}", path.display()))?;
-        let payload_store = engine.payload_store();
-
-        // Build candidates for reranking
-        let mut candidates = Vec::new();
-        for (id, score) in &results {
-            if let Ok(Some(doc_text)) = payload_store.get_text(*id) {
-                candidates.push((*id, *score, doc_text));
-            }
-        }
-
-        // Create reranker
-        let model = match rerank_model.as_str() {
-            "minilm" => RerankerModel::MsMiniLM,
-            "bge" => RerankerModel::BgeBase,
-            other => anyhow::bail!("Unknown rerank model: {other}. Use 'minilm' or 'bge'"),
-        };
-
-        let config = CrossEncoderConfig::new(model);
-        let reranker = CrossEncoderReranker::new(config)
-            .with_context(|| "failed to create reranker")?;
-
-        // Rerank
-        let reranked = reranker.rerank(query_text, &candidates)
-            .with_context(|| "reranking failed")?;
-
-        // Use reranked results
-        results = reranked;
-
-        // Take top k
-        results.truncate(k);
-    }
 
     let elapsed = start.elapsed();
 
@@ -247,12 +193,12 @@ fn search_with_metric<D: DistanceMetric + Clone>(
         // Sparse-only search (BM25)
         (None, Some(text)) => {
             // Load or build BM25 index
-            let bm25: Bm25Index<WhitespaceTokenizer> = if bm25_path.exists() {
+            let bm25: Bm25Index<KoreanBm25Tokenizer> = if bm25_path.exists() {
                 Bm25Index::load(&bm25_path)
                     .with_context(|| format!("failed to load BM25 index from {}", bm25_path.display()))?
             } else {
                 // Fallback: build from storage (slow)
-                let mut bm25 = Bm25Index::new(WhitespaceTokenizer::new());
+                let mut bm25 = Bm25Index::new(KoreanBm25Tokenizer::new());
 
                 let vector_store = engine.vector_store();
                 let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
@@ -273,12 +219,12 @@ fn search_with_metric<D: DistanceMetric + Clone>(
         // Hybrid search
         (Some(vec), Some(text)) => {
             // Load or build BM25 index
-            let bm25: Bm25Index<WhitespaceTokenizer> = if bm25_path.exists() {
+            let bm25: Bm25Index<KoreanBm25Tokenizer> = if bm25_path.exists() {
                 Bm25Index::load(&bm25_path)
                     .with_context(|| format!("failed to load BM25 index from {}", bm25_path.display()))?
             } else {
                 // Fallback: build from storage (slow)
-                let mut bm25 = Bm25Index::new(WhitespaceTokenizer::new());
+                let mut bm25 = Bm25Index::new(KoreanBm25Tokenizer::new());
 
                 let vector_store = engine.vector_store();
                 let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();

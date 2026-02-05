@@ -23,6 +23,8 @@ pub struct FilePayloadStore {
     text_index: HashMap<PointId, (u64, u32)>,
     /// Secondary index: source path -> set of PointIds
     source_index: HashMap<String, HashSet<PointId>>,
+    /// Secondary index: tag -> set of PointIds
+    tag_index: HashMap<String, HashSet<PointId>>,
     /// In-memory payload cache for WAL buffer
     pending_payloads: HashMap<PointId, Payload>,
     /// In-memory text cache for WAL buffer
@@ -57,6 +59,7 @@ impl FilePayloadStore {
             payload_index: HashMap::new(),
             text_index: HashMap::new(),
             source_index: HashMap::new(),
+            tag_index: HashMap::new(),
             pending_payloads: HashMap::new(),
             pending_texts: HashMap::new(),
         })
@@ -89,6 +92,7 @@ impl FilePayloadStore {
             payload_index: HashMap::new(),
             text_index: HashMap::new(),
             source_index: HashMap::new(),
+            tag_index: HashMap::new(),
             pending_payloads: HashMap::new(),
             pending_texts: HashMap::new(),
         })
@@ -113,6 +117,14 @@ impl FilePayloadStore {
             .or_default()
             .insert(id);
 
+        // Update tag index
+        for tag in &payload.tags {
+            self.tag_index
+                .entry(tag.clone())
+                .or_default()
+                .insert(id);
+        }
+
         Ok(())
     }
 
@@ -135,6 +147,15 @@ impl FilePayloadStore {
             .entry(payload.source.clone())
             .or_default()
             .insert(id);
+
+        // Update tag index
+        for tag in &payload.tags {
+            self.tag_index
+                .entry(tag.clone())
+                .or_default()
+                .insert(id);
+        }
+
         self.pending_payloads.insert(id, payload);
     }
 
@@ -171,6 +192,46 @@ impl FilePayloadStore {
             .unwrap_or_default()
     }
 
+    /// Get all point IDs with a given tag.
+    pub fn points_by_tag(&self, tag: &str) -> Vec<PointId> {
+        self.tag_index
+            .get(tag)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get all point IDs matching ALL given tags (AND logic).
+    pub fn points_by_tags(&self, tags: &[String]) -> Vec<PointId> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
+
+        // Start with first tag's points
+        let mut result: Option<HashSet<PointId>> = None;
+
+        for tag in tags {
+            if let Some(points) = self.tag_index.get(tag) {
+                match &mut result {
+                    None => {
+                        // First tag: start with its points
+                        result = Some(points.clone());
+                    }
+                    Some(current) => {
+                        // Subsequent tags: keep only intersection
+                        current.retain(|id| points.contains(id));
+                    }
+                }
+            } else {
+                // Tag not found: no points can match all tags
+                return Vec::new();
+            }
+        }
+
+        result
+            .map(|set| set.into_iter().collect())
+            .unwrap_or_default()
+    }
+
     /// Mark a point as removed (remove from all indices and buffers).
     pub fn mark_removed(&mut self, id: PointId) {
         self.payload_index.remove(&id);
@@ -180,6 +241,11 @@ impl FilePayloadStore {
 
         // Remove from source index
         for points in self.source_index.values_mut() {
+            points.remove(&id);
+        }
+
+        // Remove from tag index
+        for points in self.tag_index.values_mut() {
             points.remove(&id);
         }
     }
@@ -209,6 +275,21 @@ impl FilePayloadStore {
             .map_err(|e| VhnswError::Payload(format!("failed to encode text index: {e}")))?;
         std::fs::write(text_idx_path, text_data)?;
 
+        // Save tag index
+        self.save_tag_index()?;
+
+        Ok(())
+    }
+
+    /// Save tag index to disk.
+    fn save_tag_index(&self) -> Result<()> {
+        let tag_idx_path = self.payload_path.with_file_name("tag_index.dat");
+        let config = bincode::config::standard();
+
+        let tag_data = bincode::encode_to_vec(&self.tag_index, config)
+            .map_err(|e| VhnswError::Payload(format!("failed to encode tag index: {e}")))?;
+        std::fs::write(tag_idx_path, tag_data)?;
+
         Ok(())
     }
 
@@ -234,6 +315,9 @@ impl FilePayloadStore {
                 .map_err(|e| VhnswError::Payload(format!("failed to decode text index: {e}")))?;
         self.text_index = index;
 
+        // Load tag index
+        self.load_tag_index()?;
+
         // Rebuild source index from payload index
         self.source_index.clear();
         for (&id, &(offset, length)) in &self.payload_index {
@@ -245,6 +329,42 @@ impl FilePayloadStore {
             }
         }
 
+        Ok(())
+    }
+
+    /// Load tag index from disk.
+    fn load_tag_index(&mut self) -> Result<()> {
+        let tag_idx_path = self.payload_path.with_file_name("tag_index.dat");
+
+        // If tag index doesn't exist, rebuild it from payloads
+        if !tag_idx_path.exists() {
+            self.rebuild_tag_index()?;
+            return Ok(());
+        }
+
+        let config = bincode::config::standard();
+        let tag_data = std::fs::read(tag_idx_path)?;
+        let (index, _): (HashMap<String, HashSet<PointId>>, usize) =
+            bincode::decode_from_slice(&tag_data, config)
+                .map_err(|e| VhnswError::Payload(format!("failed to decode tag index: {e}")))?;
+        self.tag_index = index;
+
+        Ok(())
+    }
+
+    /// Rebuild tag index from payload index (used during migration or if tag index is missing).
+    fn rebuild_tag_index(&mut self) -> Result<()> {
+        self.tag_index.clear();
+        for (&id, &(offset, length)) in &self.payload_index {
+            if let Ok(Some(payload)) = self.read_payload_at(offset, length) {
+                for tag in &payload.tags {
+                    self.tag_index
+                        .entry(tag.clone())
+                        .or_default()
+                        .insert(id);
+                }
+            }
+        }
         Ok(())
     }
 

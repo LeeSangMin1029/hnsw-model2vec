@@ -16,9 +16,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use v_hnsw_core::{PayloadStore, VectorIndex};
 use v_hnsw_distance::CosineDistance;
-use v_hnsw_embed::{Device, EmbeddingModel, FastEmbedModel, ModelType};
+use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::HnswGraph;
-use v_hnsw_search::{Bm25Index, HybridSearchConfig, SimpleHybridSearcher, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -54,6 +54,8 @@ struct SearchParams {
     query: String,
     #[serde(default = "default_k")]
     k: usize,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 fn default_k() -> usize {
@@ -75,21 +77,6 @@ struct SearchResult {
 struct SearchResponse {
     results: Vec<SearchResult>,
     elapsed_ms: f64,
-}
-
-/// Parse model name to ModelType.
-fn parse_model_type(name: &str) -> Result<ModelType> {
-    match name.to_lowercase().as_str() {
-        "all-mini-lm-l6-v2" | "minilm" => Ok(ModelType::AllMiniLML6V2),
-        "all-mini-lm-l12-v2" => Ok(ModelType::AllMiniLML12V2),
-        "bge-small-en-v1.5" | "bge-small" => Ok(ModelType::BGESmallENV15),
-        "bge-base-en-v1.5" | "bge-base" => Ok(ModelType::BGEBaseENV15),
-        "bge-large-en-v1.5" | "bge-large" => Ok(ModelType::BGELargeENV15),
-        "multilingual-e5-small" | "e5-small" => Ok(ModelType::MultilingualE5Small),
-        "multilingual-e5-base" | "e5-base" => Ok(ModelType::MultilingualE5Base),
-        "multilingual-e5-large" | "e5-large" => Ok(ModelType::MultilingualE5Large),
-        other => anyhow::bail!("Unknown model: '{}'", other),
-    }
 }
 
 /// Hash a path to create a unique identifier.
@@ -168,8 +155,8 @@ pub fn is_daemon_running(db_path: &Path) -> bool {
 
 /// Loaded daemon state.
 struct DaemonState {
-    embed_model: FastEmbedModel,
-    searcher: SimpleHybridSearcher<CosineDistance, WhitespaceTokenizer>,
+    embed_model: Model2VecModel,
+    searcher: SimpleHybridSearcher<CosineDistance, KoreanBm25Tokenizer>,
     engine: StorageEngine,
 }
 
@@ -194,14 +181,11 @@ impl DaemonState {
             anyhow::anyhow!("No embedding model specified in database config.")
         })?;
 
-        // Initialize embedding model
-        let model_type = parse_model_type(&model_name)?;
-        let device = Device::auto();
-
-        eprintln!("[daemon] Loading model: {} (device={})", model_type.model_name(), device.name());
+        // Initialize embedding model (model2vec)
+        eprintln!("[daemon] Loading model2vec: {}", model_name);
         let t0 = Instant::now();
-        let embed_model = FastEmbedModel::with_device(model_type, device)
-            .context("Failed to initialize embedding model")?;
+        let embed_model = Model2VecModel::from_pretrained(&model_name)
+            .context("Failed to initialize model2vec model")?;
         eprintln!("[daemon] Model loaded: {:.0}ms", t0.elapsed().as_millis());
 
         // Check dimension
@@ -226,7 +210,7 @@ impl DaemonState {
 
         // Load BM25 index
         eprintln!("[daemon] Loading BM25 index...");
-        let bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::load(&bm25_path)
+        let bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load(&bm25_path)
             .context("Failed to load BM25 index")?;
         eprintln!("[daemon] BM25 loaded");
 
@@ -252,7 +236,7 @@ impl DaemonState {
         })
     }
 
-    fn search(&self, query: &str, k: usize) -> Result<SearchResponse> {
+    fn search(&self, query: &str, k: usize, tags: Vec<String>) -> Result<SearchResponse> {
         let start = Instant::now();
 
         // Embed the query
@@ -264,11 +248,21 @@ impl DaemonState {
             .context("No embedding returned")?;
 
         // Perform hybrid search
-        let results = self.searcher.search(&query_embedding, query, k)
+        let mut results = self.searcher.search(&query_embedding, query, k)
             .context("Hybrid search failed")?;
 
         // Get payload store
         let payload_store = self.engine.payload_store();
+
+        // Apply tag filtering if specified
+        if !tags.is_empty() {
+            let allowed_ids = payload_store.points_by_tags(&tags);
+            let allowed_set: std::collections::HashSet<_> = allowed_ids.into_iter().collect();
+            results.retain(|(id, _)| allowed_set.contains(id));
+        }
+
+        // Normalize scores to 0-1 range (top result = 1.0)
+        let max_score = results.first().map(|(_, s)| *s).unwrap_or(1.0);
 
         // Build results with text
         let results_with_text: Vec<SearchResult> = results
@@ -288,7 +282,7 @@ impl DaemonState {
 
                 SearchResult {
                     id,
-                    score,
+                    score: if max_score > 0.0 { score / max_score } else { 0.0 },
                     text,
                     source,
                     title,
@@ -331,7 +325,7 @@ fn handle_client(
             let params: SearchParams = serde_json::from_value(request.params)
                 .context("Invalid search params")?;
 
-            match state.search(&params.query, params.k) {
+            match state.search(&params.query, params.k, params.tags) {
                 Ok(result) => JsonRpcResponse {
                     id: request.id,
                     result: Some(serde_json::to_value(result)?),

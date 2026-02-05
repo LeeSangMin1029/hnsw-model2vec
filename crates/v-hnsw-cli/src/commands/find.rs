@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use v_hnsw_core::{PayloadStore, VectorIndex};
 use v_hnsw_distance::CosineDistance;
-use v_hnsw_embed::{Device, EmbeddingModel, FastEmbedModel, ModelType};
+use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::HnswGraph;
-use v_hnsw_search::{Bm25Index, HybridSearchConfig, SimpleHybridSearcher, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -59,26 +59,8 @@ struct JsonRpcError {
     message: String,
 }
 
-/// Parse model name to ModelType.
-fn parse_model_type(name: &str) -> Result<ModelType> {
-    match name.to_lowercase().as_str() {
-        "all-mini-lm-l6-v2" | "minilm" => Ok(ModelType::AllMiniLML6V2),
-        "all-mini-lm-l12-v2" => Ok(ModelType::AllMiniLML12V2),
-        "bge-small-en-v1.5" | "bge-small" => Ok(ModelType::BGESmallENV15),
-        "bge-base-en-v1.5" | "bge-base" => Ok(ModelType::BGEBaseENV15),
-        "bge-large-en-v1.5" | "bge-large" => Ok(ModelType::BGELargeENV15),
-        "multilingual-e5-small" | "e5-small" => Ok(ModelType::MultilingualE5Small),
-        "multilingual-e5-base" | "e5-base" => Ok(ModelType::MultilingualE5Base),
-        "multilingual-e5-large" | "e5-large" => Ok(ModelType::MultilingualE5Large),
-        other => anyhow::bail!(
-            "Unknown model: '{}'. Available: all-mini-lm-l6-v2, bge-small-en-v1.5, bge-base-en-v1.5, multilingual-e5-small, etc.",
-            other
-        ),
-    }
-}
-
 /// Try to connect to the daemon for a given database.
-fn try_daemon_search(db_path: &PathBuf, query: &str, k: usize) -> Result<FindOutput> {
+fn try_daemon_search(db_path: &PathBuf, query: &str, k: usize, tags: &[String]) -> Result<FindOutput> {
     // Canonicalize the path for consistent port file lookup
     let canonical_path = db_path.canonicalize()
         .with_context(|| format!("Database not found: {}", db_path.display()))?;
@@ -97,13 +79,19 @@ fn try_daemon_search(db_path: &PathBuf, query: &str, k: usize) -> Result<FindOut
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
     // Send search request
+    let mut params = serde_json::json!({
+        "query": query,
+        "k": k
+    });
+
+    if !tags.is_empty() {
+        params["tags"] = serde_json::json!(tags);
+    }
+
     let request = serde_json::json!({
         "id": 1,
         "method": "search",
-        "params": {
-            "query": query,
-            "k": k
-        }
+        "params": params
     });
 
     writeln!(stream, "{}", serde_json::to_string(&request)?)?;
@@ -205,14 +193,14 @@ fn spawn_daemon(db_path: &PathBuf) -> Result<()> {
 }
 
 /// Run the find command.
-pub fn run(db_path: PathBuf, query: String, k: usize) -> Result<()> {
+pub fn run(db_path: PathBuf, query: String, k: usize, tags: Vec<String>) -> Result<()> {
     // Check database exists
     if !db_path.exists() {
         anyhow::bail!("Database not found at {}", db_path.display());
     }
 
     // Try daemon mode first
-    match try_daemon_search(&db_path, &query, k) {
+    match try_daemon_search(&db_path, &query, k, &tags) {
         Ok(output) => {
             // Add query info
             let output = FindOutput {
@@ -234,7 +222,7 @@ pub fn run(db_path: PathBuf, query: String, k: usize) -> Result<()> {
     // Try to spawn daemon
     if spawn_daemon(&db_path).is_ok() {
         // Retry with daemon
-        match try_daemon_search(&db_path, &query, k) {
+        match try_daemon_search(&db_path, &query, k, &tags) {
             Ok(output) => {
                 let output = FindOutput {
                     query: query.clone(),
@@ -256,11 +244,11 @@ pub fn run(db_path: PathBuf, query: String, k: usize) -> Result<()> {
     }
 
     // Fallback: direct search (original implementation)
-    run_direct(db_path, query, k)
+    run_direct(db_path, query, k, tags)
 }
 
 /// Direct search without daemon (fallback).
-fn run_direct(db_path: PathBuf, query: String, k: usize) -> Result<()> {
+fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>) -> Result<()> {
     // Load config
     let config = DbConfig::load(&db_path)?;
 
@@ -289,15 +277,12 @@ fn run_direct(db_path: PathBuf, query: String, k: usize) -> Result<()> {
         )
     })?;
 
-    // Initialize embedding model with auto device detection
-    let model_type = parse_model_type(&model_name)?;
-    let device = Device::auto();
-
+    // Initialize embedding model (model2vec)
     let t0 = Instant::now();
-    eprintln!("Loading model: {} (device={})", model_type.model_name(), device.name());
+    eprintln!("Loading model2vec: {}", model_name);
 
-    let embed_model = FastEmbedModel::with_device(model_type, device)
-        .context("Failed to initialize embedding model")?;
+    let embed_model = Model2VecModel::from_pretrained(&model_name)
+        .context("Failed to initialize model2vec model")?;
     eprintln!("  Model loaded: {:.0}ms", t0.elapsed().as_millis());
 
     // Check dimension matches
@@ -328,7 +313,7 @@ fn run_direct(db_path: PathBuf, query: String, k: usize) -> Result<()> {
 
     // Load BM25 index
     let t3 = Instant::now();
-    let bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::load(&bm25_path)
+    let bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load(&bm25_path)
         .context("Failed to load BM25 index")?;
     eprintln!("  BM25 load: {:.0}ms", t3.elapsed().as_millis());
 
@@ -349,7 +334,7 @@ fn run_direct(db_path: PathBuf, query: String, k: usize) -> Result<()> {
 
     // Perform hybrid search
     let t4 = Instant::now();
-    let results = searcher.search(&query_embedding, &query, k)
+    let mut results = searcher.search(&query_embedding, &query, k)
         .context("Hybrid search failed")?;
     eprintln!("  Search: {:.0}ms", t4.elapsed().as_millis());
 
@@ -357,6 +342,18 @@ fn run_direct(db_path: PathBuf, query: String, k: usize) -> Result<()> {
     let engine = StorageEngine::open(&db_path)
         .context("Failed to open storage")?;
     let payload_store = engine.payload_store();
+
+    // Apply tag filtering if specified
+    if !tags.is_empty() {
+        let t5 = Instant::now();
+        let allowed_ids = payload_store.points_by_tags(&tags);
+        let allowed_set: std::collections::HashSet<_> = allowed_ids.into_iter().collect();
+        results.retain(|(id, _)| allowed_set.contains(id));
+        eprintln!("  Tag filter: {:.0}ms ({} results after filtering)", t5.elapsed().as_millis(), results.len());
+    }
+
+    // Normalize scores to 0-1 range (top result = 1.0)
+    let max_score = results.first().map(|(_, s)| *s).unwrap_or(1.0);
 
     // Build results with text
     let results_with_text: Vec<FindResult> = results
@@ -378,7 +375,7 @@ fn run_direct(db_path: PathBuf, query: String, k: usize) -> Result<()> {
 
             FindResult {
                 id,
-                score,
+                score: if max_score > 0.0 { score / max_score } else { 0.0 },
                 text,
                 source,
                 title,

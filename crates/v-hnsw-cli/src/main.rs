@@ -62,24 +62,18 @@ enum Commands {
         /// Vector column name for Parquet files.
         #[arg(long, default_value = "vector")]
         vector_column: String,
-        /// Auto-embed text using fastembed model (skips vector column requirement).
+        /// Auto-embed text using model2vec (skips vector column requirement).
         #[arg(long)]
         embed: bool,
         /// Text column name to embed (used with --embed).
         #[arg(long, default_value = "text")]
         text_column: String,
-        /// Embedding model to use (used with --embed).
-        #[arg(long, default_value = "all-mini-lm-l6-v2")]
+        /// Model2Vec model ID from HuggingFace (used with --embed).
+        #[arg(long, default_value = "minishlab/potion-multilingual-128M")]
         model: String,
         /// Batch size for embedding (used with --embed).
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "1024")]
         batch_size: usize,
-        /// Device for embedding inference (cpu, cuda, cuda:N, directml, directml:N).
-        #[arg(long, default_value = "cpu")]
-        device: String,
-        /// Use FP16 model via direct ort Session (faster, less VRAM).
-        #[arg(long)]
-        fp16: bool,
     },
     /// Search for nearest neighbors.
     Search {
@@ -100,15 +94,6 @@ enum Commands {
         /// Collection to search in.
         #[arg(long, default_value = "default")]
         collection: String,
-        /// Enable cross-encoder reranking.
-        #[arg(long)]
-        rerank: bool,
-        /// Cross-encoder model (minilm or bge).
-        #[arg(long, default_value = "minilm")]
-        rerank_model: String,
-        /// Number of candidates to rerank (default: 3x k).
-        #[arg(long)]
-        rerank_top: Option<usize>,
     },
     /// Delete a point by ID.
     Delete {
@@ -227,6 +212,13 @@ enum Commands {
         /// Input file or folder (folder with .md files, .jsonl, or .parquet).
         input: PathBuf,
     },
+    /// Incrementally update database with changed files.
+    Update {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Input folder to scan for changes.
+        input: PathBuf,
+    },
     /// Search database with hybrid HNSW + BM25 (auto-load model from config).
     Find {
         /// Path to the database directory.
@@ -236,6 +228,9 @@ enum Commands {
         /// Number of results to return.
         #[arg(short, long, default_value = "10")]
         k: usize,
+        /// Filter by tags (can be specified multiple times, AND logic).
+        #[arg(long)]
+        tag: Vec<String>,
     },
     /// Start daemon server for fast embedding search.
     Serve {
@@ -304,9 +299,7 @@ fn main() -> Result<()> {
             text_column,
             model,
             batch_size,
-            device,
-            fp16,
-        } => commands::insert::run(path, input, &vector_column, embed, &text_column, &model, batch_size, &device, fp16),
+        } => commands::insert::run(path, input, &vector_column, embed, &text_column, &model, batch_size),
         Commands::Search {
             path,
             vector,
@@ -314,9 +307,6 @@ fn main() -> Result<()> {
             k,
             ef,
             collection,
-            rerank,
-            rerank_model,
-            rerank_top,
         } => commands::search::run(commands::search::SearchParams {
             path,
             vector,
@@ -324,9 +314,6 @@ fn main() -> Result<()> {
             k,
             ef,
             collection,
-            rerank,
-            rerank_model,
-            rerank_top,
         }),
         Commands::Delete { path, id } => commands::delete::run(path, id),
         Commands::Bench { path, queries, k } => commands::bench::run(path, queries, k),
@@ -365,7 +352,8 @@ fn main() -> Result<()> {
             show_text,
         }),
         Commands::Add { db, input } => commands::add::run(db, input),
-        Commands::Find { db, query, k } => commands::find::run(db, query, k),
+        Commands::Update { db, input } => commands::update::run(db, input),
+        Commands::Find { db, query, k, tag } => commands::find::run(db, query, k, tag),
         Commands::Serve { db, port, timeout, background } => commands::serve::run(db, port, timeout, background),
     }
 }

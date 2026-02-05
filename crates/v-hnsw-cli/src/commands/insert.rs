@@ -8,53 +8,14 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use v_hnsw_core::{Payload, PayloadStore, VectorIndex, VectorStore};
 use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
-use v_hnsw_embed::{Device, EmbeddingModel, FastEmbedModel, ModelType, OrtEmbedModel, OrtModelConfig};
+use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
-use v_hnsw_search::{Bm25Index, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use super::create::DbConfig;
 use super::readers::{self, ReaderConfig};
 use crate::is_interrupted;
-
-/// Parse a model name string into a [`ModelType`].
-fn parse_model_type(name: &str) -> Result<ModelType> {
-    match name.to_lowercase().as_str() {
-        "all-mini-lm-l6-v2" | "minilm" => Ok(ModelType::AllMiniLML6V2),
-        "all-mini-lm-l12-v2" => Ok(ModelType::AllMiniLML12V2),
-        "bge-small-en-v1.5" | "bge-small" => Ok(ModelType::BGESmallENV15),
-        "bge-base-en-v1.5" | "bge-base" => Ok(ModelType::BGEBaseENV15),
-        "bge-large-en-v1.5" | "bge-large" => Ok(ModelType::BGELargeENV15),
-        "multilingual-e5-small" | "e5-small" => Ok(ModelType::MultilingualE5Small),
-        "multilingual-e5-base" | "e5-base" => Ok(ModelType::MultilingualE5Base),
-        "multilingual-e5-large" | "e5-large" => Ok(ModelType::MultilingualE5Large),
-        _ => anyhow::bail!("unknown embedding model: '{name}'. Available: all-mini-lm-l6-v2, all-mini-lm-l12-v2, bge-small-en-v1.5, bge-base-en-v1.5, bge-large-en-v1.5, multilingual-e5-small, multilingual-e5-base, multilingual-e5-large"),
-    }
-}
-
-/// Parse a device string into a [`Device`].
-///
-/// Accepted formats: `"cpu"`, `"cuda"`, `"cuda:0"`, `"directml"`, `"directml:0"`.
-#[allow(unused_variables)]
-fn parse_device(s: &str) -> Result<Device> {
-    let s = s.to_lowercase();
-    let (name, device_id) = match s.split_once(':') {
-        Some((n, i)) => (n, Some(i.parse::<i32>().with_context(|| format!("invalid device id: '{i}'"))?)),
-        None => (s.as_str(), None),
-    };
-    match name {
-        "cpu" => Ok(Device::Cpu),
-        #[cfg(feature = "cuda")]
-        "cuda" => Ok(Device::Cuda(device_id.unwrap_or(0))),
-        #[cfg(feature = "directml")]
-        "directml" | "dml" => Ok(Device::DirectML(device_id.unwrap_or(0))),
-        #[cfg(not(feature = "cuda"))]
-        "cuda" => anyhow::bail!("CUDA support not enabled. Rebuild with: cargo build --features cuda"),
-        #[cfg(not(feature = "directml"))]
-        "directml" | "dml" => anyhow::bail!("DirectML support not enabled. Rebuild with: cargo build --features directml"),
-        _ => anyhow::bail!("unknown device: '{s}'. Available: cpu, cuda, cuda:N, directml, directml:N"),
-    }
-}
 
 /// Auto-create the database when it does not exist (embed mode only).
 fn auto_create_db(path: &PathBuf, dim: usize, embed_model: Option<&str>) -> Result<StorageEngine> {
@@ -213,7 +174,7 @@ fn build_and_save_indexes(path: &PathBuf, engine: &StorageEngine, config: &DbCon
     // Build BM25 index
     println!("  Building BM25 index...");
     let bm25_path = path.join("bm25.bin");
-    let mut bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::new(WhitespaceTokenizer::new());
+    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let payload_store = engine.payload_store();
 
     for id in vector_store.id_map().keys() {
@@ -242,42 +203,24 @@ struct EmbeddedBatch {
 
 /// Run insert with automatic embedding using a pipelined architecture.
 ///
-/// A producer thread reads input records and embeds them on the GPU,
+/// A producer thread reads input records and embeds them,
 /// while the consumer thread (main) inserts them into the storage engine.
-/// This keeps both GPU and storage I/O busy concurrently.
-#[allow(clippy::too_many_arguments)]
+/// This keeps both embedding and storage I/O busy concurrently.
 fn run_embed(
     path: PathBuf,
     input: PathBuf,
     text_column: &str,
     model_name: &str,
     batch_size: usize,
-    device: &str,
-    fp16: bool,
 ) -> Result<()> {
-    let device = parse_device(device)?;
-
-    // Select model: FP16 direct ort vs fastembed
-    let (model, dim, _model_display, max_chars): (Box<dyn EmbeddingModel>, usize, String, usize) = if fp16 {
-        let config = OrtModelConfig::minilm_fp16();
-        let max_chars = config.max_char_hint();
-        let dim = config.dim;
-        let display = format!("{} (FP16, dim={dim}, device={device:?})", config.model_id);
-        println!("Loading embedding model: {display}");
-        let m = OrtEmbedModel::with_device(config, device)
-            .map_err(|e| anyhow::anyhow!("failed to load FP16 model: {e}"))?;
-        (Box::new(m), dim, display, max_chars)
-    } else {
-        let model_type = parse_model_type(model_name)?;
-        let dim = model_type.dimension();
-        let display = format!("{} (dim={dim}, device={device:?})", model_type.model_name());
-        println!("Loading embedding model: {display}");
-        let m = FastEmbedModel::with_device(model_type, device)
-            .map_err(|e| anyhow::anyhow!("failed to load embedding model: {e}"))?;
-        // fastembed models: 2500 chars covers 512 token limit
-        (Box::new(m), dim, display, 2500)
-    };
-    println!("Model loaded.");
+    // Load model2vec model
+    println!("Loading model2vec model: {model_name}");
+    let model = Model2VecModel::from_pretrained(model_name)
+        .map_err(|e| anyhow::anyhow!("failed to load model2vec model: {e}"))?;
+    let dim = model.dim();
+    // model2vec uses simple tokenization, so character limit is generous
+    let max_chars = 8000;
+    println!("Model loaded (dim={dim}).");
 
     // Open or create DB.
     let mut engine = if path.exists() {
@@ -295,6 +238,7 @@ fn run_embed(
     } else {
         auto_create_db(&path, dim, Some(model_name))?
     };
+    let model: Box<dyn EmbeddingModel> = Box::new(model);
 
     // Open reader (no vector column needed).
     let reader_cfg = ReaderConfig {
@@ -566,7 +510,6 @@ fn run_standard(path: PathBuf, input: PathBuf, vector_column: &str) -> Result<()
 // ---------------------------------------------------------------------------
 
 /// Run the insert command.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     path: PathBuf,
     input: PathBuf,
@@ -575,11 +518,9 @@ pub fn run(
     text_column: &str,
     model_name: &str,
     batch_size: usize,
-    device: &str,
-    fp16: bool,
 ) -> Result<()> {
     if embed {
-        run_embed(path, input, text_column, model_name, batch_size, device, fp16)
+        run_embed(path, input, text_column, model_name, batch_size)
     } else {
         run_standard(path, input, vector_column)
     }

@@ -1,6 +1,6 @@
 [package]
 name = "v-hnsw-embed"
-description = "Embedding model integration for v-hnsw using fastembed-rs"
+description = "Embedding model integration for v-hnsw using model2vec"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,16 +8,8 @@ license.workspace = true
 
 [dependencies]
 v-hnsw-core.workspace = true
-fastembed = "5"
-ort.workspace = true
 thiserror.workspace = true
-tokenizers = { version = "0.22", default-features = false }
-hf-hub = "0.4"
-
-[features]
-default = []
-cuda = ["ort/cuda"]
-directml = ["ort/directml"]
+model2vec-rs = "0.1"
 
 [lints]
 workspace = true

@@ -10,7 +10,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use v_hnsw_core::VectorIndex;
 use v_hnsw_distance::CosineDistance;
-use v_hnsw_embed::{EmbeddingModel, FastEmbedModel, ModelType};
+use v_hnsw_embed::{Model2VecModel, EmbeddingModel};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
 
 use crate::is_interrupted;
@@ -85,7 +85,7 @@ pub fn run(
     // Step 3: Initialize embedding model
     println!("\nInitializing embedding model...");
     let model_start = Instant::now();
-    let model = FastEmbedModel::with_model(ModelType::AllMiniLML6V2)
+    let model = Model2VecModel::new()
         .context("Failed to initialize embedding model")?;
     let model_init_time = model_start.elapsed();
     println!(
@@ -274,7 +274,7 @@ fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
 }
 
 /// Generate embeddings for all chunks.
-fn embed_chunks(model: &FastEmbedModel, chunks: &[String]) -> Result<Vec<Vec<f32>>> {
+fn embed_chunks(model: &Model2VecModel, chunks: &[String]) -> Result<Vec<Vec<f32>>> {
     let mut all_embeddings = Vec::with_capacity(chunks.len());
 
     let pb = ProgressBar::new(chunks.len() as u64);
