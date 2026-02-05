@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use crate::error::EmbedError;
 use crate::model::{EmbeddingModel, Result};
 use fastembed::{EmbeddingModel as FastEmbedModelEnum, InitOptions, TextEmbedding};
+use ort::execution_providers::ExecutionProviderDispatch;
 
 /// Supported embedding model types.
 ///
@@ -85,12 +86,131 @@ impl ModelType {
 }
 
 impl Default for ModelType {
-    /// Returns the default model type: AllMiniLML6V2.
+    /// Returns the default model type: MultilingualE5Base.
     ///
-    /// This model provides a good balance of quality, speed, and model size,
-    /// making it suitable for most use cases.
+    /// This model supports 100+ languages including Korean and English,
+    /// with 768 dimensions for good quality. It's the recommended default
+    /// for an all-in-one solution.
     fn default() -> Self {
-        Self::AllMiniLML6V2
+        Self::MultilingualE5Base
+    }
+}
+
+impl ModelType {
+    /// Returns the short name for CLI display.
+    #[must_use]
+    pub const fn short_name(self) -> &'static str {
+        match self {
+            Self::BGESmallENV15 => "bge-small-en-v1.5",
+            Self::BGEBaseENV15 => "bge-base-en-v1.5",
+            Self::BGELargeENV15 => "bge-large-en-v1.5",
+            Self::AllMiniLML6V2 => "all-mini-lm-l6-v2",
+            Self::AllMiniLML12V2 => "all-mini-lm-l12-v2",
+            Self::MultilingualE5Small => "multilingual-e5-small",
+            Self::MultilingualE5Base => "multilingual-e5-base",
+            Self::MultilingualE5Large => "multilingual-e5-large",
+        }
+    }
+}
+
+/// Device selection for embedding model inference.
+///
+/// Controls which hardware accelerator (execution provider) is used
+/// for ONNX Runtime inference. GPU options require the corresponding
+/// cargo feature to be enabled.
+///
+/// # Features
+///
+/// - `cuda` feature: enables `Device::Cuda`
+/// - `directml` feature: enables `Device::DirectML`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Device {
+    /// CPU inference (always available).
+    #[default]
+    Cpu,
+
+    /// NVIDIA CUDA GPU inference.
+    ///
+    /// Requires the `cuda` cargo feature. The `i32` parameter is
+    /// the CUDA device ID (0 for the first GPU).
+    #[cfg(feature = "cuda")]
+    Cuda(i32),
+
+    /// DirectML GPU inference (Windows).
+    ///
+    /// Requires the `directml` cargo feature. The `i32` parameter is
+    /// the DirectML device ID (0 for the first GPU).
+    #[cfg(feature = "directml")]
+    DirectML(i32),
+}
+
+impl Device {
+    /// Automatically detect the best available device.
+    ///
+    /// Priority: CUDA > DirectML > CPU
+    /// Uses device ID 0 for GPU devices.
+    #[must_use]
+    pub fn auto() -> Self {
+        #[cfg(feature = "cuda")]
+        {
+            // Try CUDA first
+            return Self::Cuda(0);
+        }
+
+        #[cfg(feature = "directml")]
+        {
+            // Try DirectML on Windows
+            return Self::DirectML(0);
+        }
+
+        #[allow(unreachable_code)]
+        Self::Cpu
+    }
+
+    /// Returns a human-readable name for this device.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            #[cfg(feature = "cuda")]
+            Self::Cuda(_) => "CUDA",
+            #[cfg(feature = "directml")]
+            Self::DirectML(_) => "DirectML",
+        }
+    }
+
+    /// Convert the device selection into ONNX Runtime execution providers.
+    ///
+    /// GPU providers are configured with `fail_silently()` so that if the
+    /// GPU is unavailable, inference falls back to CPU automatically.
+    pub(crate) fn to_execution_providers(self) -> Vec<ExecutionProviderDispatch> {
+        match self {
+            Self::Cpu => vec![],
+            #[cfg(feature = "cuda")]
+            Self::Cuda(device_id) => {
+                use ort::ep::{self, ArenaExtendStrategy};
+                vec![ep::CUDA::default()
+                    .with_device_id(device_id)
+                    // Ampere (sm_86) TF32 tensor core acceleration
+                    .with_tf32(true)
+                    // Heuristic conv search avoids slow first-run exhaustive benchmark
+                    .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Heuristic)
+                    // Allow cuDNN to use maximum workspace for best algorithm selection
+                    .with_conv_max_workspace(true)
+                    // SameAsRequested avoids over-allocating VRAM on 6GB cards
+                    .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+                    .build()
+                    .error_on_failure()]
+            }
+            #[cfg(feature = "directml")]
+            Self::DirectML(device_id) => {
+                use ort::execution_providers::DirectMLExecutionProvider;
+                vec![DirectMLExecutionProvider::default()
+                    .with_device_id(device_id)
+                    .build()
+                    .error_on_failure()]
+            }
+        }
     }
 }
 
@@ -178,10 +298,51 @@ impl FastEmbedModel {
         })
     }
 
+    /// Creates a new FastEmbedModel with the specified device for hardware acceleration.
+    ///
+    /// # Arguments
+    ///
+    /// * `model_type` - The type of embedding model to use
+    /// * `device` - The device to run inference on (CPU, CUDA, or DirectML)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model fails to initialize, download, or if
+    /// the requested execution provider is not available.
+    pub fn with_device(model_type: ModelType, device: Device) -> Result<Self> {
+        let execution_providers = device.to_execution_providers();
+        let options = InitOptions::new(model_type.to_fastembed())
+            .with_show_download_progress(true)
+            .with_execution_providers(execution_providers);
+
+        let inner = TextEmbedding::try_new(options)?;
+
+        Ok(Self {
+            inner: Mutex::new(inner),
+            model_type,
+        })
+    }
+
     /// Returns the model type being used.
     #[must_use]
     pub const fn model_type(&self) -> ModelType {
         self.model_type
+    }
+}
+
+impl FastEmbedModel {
+    /// Creates a new FastEmbedModel with automatic configuration.
+    ///
+    /// Uses the default model (MultilingualE5Base) and automatically
+    /// detects the best available device (CUDA > DirectML > CPU).
+    ///
+    /// This is the recommended way to create a model for most use cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model fails to initialize or download.
+    pub fn auto() -> Result<Self> {
+        Self::with_device(ModelType::default(), Device::auto())
     }
 }
 
@@ -199,8 +360,11 @@ impl EmbeddingModel for FastEmbedModel {
             .lock()
             .map_err(|e| EmbedError::EmbeddingFailed(format!("lock poisoned: {e}")))?;
 
+        // Pass the full batch size so fastembed processes all texts
+        // in a single ONNX session.run() call (no internal re-batching).
+        // The caller is responsible for choosing an appropriate batch size.
         inner
-            .embed(texts_owned, None)
+            .embed(texts_owned, Some(texts.len()))
             .map_err(|e| EmbedError::EmbeddingFailed(e.to_string()))
     }
 

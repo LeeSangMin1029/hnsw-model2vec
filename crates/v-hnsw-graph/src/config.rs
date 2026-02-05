@@ -3,7 +3,7 @@
 use v_hnsw_core::{Dim, VhnswError};
 
 /// Configuration for an HNSW graph.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct HnswConfig {
     /// Vector dimensionality.
     pub dim: Dim,

@@ -345,6 +345,51 @@ impl MmapVectorStore {
         self.capacity
     }
 
+    /// Insert multiple vectors in a batch, writing the header only once at the end.
+    ///
+    /// Auto-grows capacity if needed before inserting.
+    pub fn insert_batch(&mut self, batch: &[(PointId, &[f32])]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // Count how many genuinely new points need fresh slots
+        let new_count = batch
+            .iter()
+            .filter(|(id, _)| !self.id_to_slot.contains_key(id))
+            .count() as u32;
+
+        // Pre-grow if needed
+        let available = self.capacity.saturating_sub(self.next_slot) + self.free_slots.len() as u32;
+        if new_count > available {
+            let needed = (self.next_slot + new_count).saturating_sub(self.free_slots.len() as u32);
+            let new_cap = needed.max(self.capacity.saturating_mul(2));
+            self.grow(new_cap)?;
+        }
+
+        // Insert each vector
+        for &(id, vector) in batch {
+            if vector.len() != self.dim {
+                return Err(VhnswError::DimensionMismatch {
+                    expected: self.dim,
+                    got: vector.len(),
+                });
+            }
+            if let Some(&existing_slot) = self.id_to_slot.get(&id) {
+                self.write_slot(existing_slot, vector)?;
+            } else {
+                let slot = self.allocate_slot()?;
+                self.write_slot(slot, vector)?;
+                self.id_to_slot.insert(id, slot);
+                self.live_count += 1;
+            }
+        }
+
+        // Write header once for the whole batch
+        self.write_header()?;
+        Ok(())
+    }
+
     /// Grow capacity by remapping with a larger file.
     ///
     /// # Errors
@@ -403,8 +448,16 @@ impl VectorStore for MmapVectorStore {
         if let Some(&existing_slot) = self.id_to_slot.get(&id) {
             self.write_slot(existing_slot, vector)?;
         } else {
-            // Allocate new slot
-            let slot = self.allocate_slot()?;
+            // Allocate new slot, auto-growing if capacity is exhausted
+            let slot = match self.allocate_slot() {
+                Ok(s) => s,
+                Err(VhnswError::IndexFull { .. }) => {
+                    let new_cap = self.capacity.saturating_mul(2).max(self.capacity + 1);
+                    self.grow(new_cap)?;
+                    self.allocate_slot()?
+                }
+                Err(e) => return Err(e),
+            };
             self.write_slot(slot, vector)?;
             self.id_to_slot.insert(id, slot);
             self.live_count += 1;

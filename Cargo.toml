@@ -9,6 +9,8 @@ members = [
     "crates/v-hnsw-tokenizer",
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
+    "crates/v-hnsw-chunk",
+    "crates/v-hnsw-rerank",
     "crates/v-hnsw",
     "crates/v-hnsw-cli",
 ]
@@ -32,13 +34,15 @@ v-hnsw-storage = { path = "crates/v-hnsw-storage" }
 v-hnsw-tokenizer = { path = "crates/v-hnsw-tokenizer" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
+v-hnsw-chunk = { path = "crates/v-hnsw-chunk" }
+v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 
 # Error handling
 thiserror = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-bincode = "2"
+bincode = { version = "2", features = ["serde"] }
 
 # Parallelism
 rayon = "1"
@@ -47,6 +51,7 @@ crossbeam = "0.8"
 
 # GPU
 cubecl = "0.9"
+ort = "=2.0.0-rc.11"
 
 # Storage
 memmap2 = "0.9"
@@ -66,7 +71,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Arrow / Parquet
 arrow = { version = "54", default-features = false, features = ["ipc"] }
-parquet = { version = "54", default-features = false, features = ["arrow"] }
+parquet = { version = "54", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
 
 # Dev dependencies
 proptest = "1"

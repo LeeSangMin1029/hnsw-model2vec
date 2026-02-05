@@ -43,11 +43,13 @@
 //! - [`result`] - Search result types
 //! - [`db`] - Main VectorDb facade and builder
 
+mod collection;
 mod config;
 mod db;
 mod result;
 
 // Public API exports
+pub use collection::MultiCollectionDb;
 pub use config::{Metric, Quantization};
 pub use db::{VectorDb, VectorDbBuilder};
 pub use result::SearchResult;
@@ -78,7 +80,7 @@ pub use v_hnsw_tokenizer::{
 pub use v_hnsw_quantize::{PqEncoded, PqQuantizer, Sq8Encoded, Sq8Quantizer};
 
 // Re-export storage types
-pub use v_hnsw_storage::{FilePayloadStore, MmapVectorStore, StorageConfig, StorageEngine, Wal};
+pub use v_hnsw_storage::{Collection, FilePayloadStore, MmapVectorStore, StorageConfig, StorageEngine, Wal};
 
 #[cfg(test)]
 mod tests {

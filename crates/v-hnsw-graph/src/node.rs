@@ -8,7 +8,7 @@ use crate::delta::DeltaNeighbors;
 ///
 /// Each node stores its point ID, the maximum layer it exists on,
 /// its neighbor lists per layer, and a deletion tombstone flag.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub(crate) struct Node {
     /// The point identifier for this node.
     #[allow(dead_code)]

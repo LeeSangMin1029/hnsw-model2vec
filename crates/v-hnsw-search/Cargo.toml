@@ -11,6 +11,7 @@ v-hnsw-core.workspace = true
 v-hnsw-graph.workspace = true
 parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
+bincode.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -15,7 +15,8 @@ use super::{InputRecord, VectorReader};
 /// Column indices resolved once on open.
 struct ColumnMap {
     id: Option<usize>,
-    vector: usize,
+    /// `None` when in embed mode (vector not required).
+    vector: Option<usize>,
     text: Option<usize>,
     source: Option<usize>,
 }
@@ -25,7 +26,7 @@ pub struct ParquetReader {
     row_count: usize,
     file_path: std::path::PathBuf,
     col_map: ColumnMap,
-    vector_column: String,
+    vector_column: Option<String>,
 }
 
 /// Case-insensitive column lookup.
@@ -38,7 +39,11 @@ fn find_col(schema: &arrow::datatypes::Schema, name: &str) -> Option<usize> {
 }
 
 impl ParquetReader {
-    pub fn open(path: &Path, vector_column: &str) -> Result<Self> {
+    /// Open a Parquet file for reading.
+    ///
+    /// * `vector_column` — column containing the vector; `None` in embed mode.
+    /// * `text_column`   — column name to use for the text field.
+    pub fn open(path: &Path, vector_column: Option<&str>, text_column: &str) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("cannot open {}", path.display()))?;
         let file_reader = SerializedFileReader::new(file)
@@ -56,30 +61,49 @@ impl ParquetReader {
             .with_context(|| "cannot build parquet reader")?;
         let schema = builder.schema().clone();
 
-        let vector_idx = find_col(&schema, vector_column).ok_or_else(|| {
-            anyhow::anyhow!(
-                "parquet file has no '{vector_column}' column — available: {}",
+        let vector_idx = match vector_column {
+            Some(vc) => {
+                let idx = find_col(&schema, vc).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "parquet file has no '{vc}' column — available: {}",
+                        schema
+                            .fields()
+                            .iter()
+                            .map(|f: &arrow::datatypes::FieldRef| f.name().as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+                Some(idx)
+            }
+            None => find_col(&schema, "vector"), // optional in embed mode
+        };
+
+        let col_map = ColumnMap {
+            id: find_col(&schema, "id"),
+            vector: vector_idx,
+            text: find_col(&schema, text_column),
+            source: find_col(&schema, "source"),
+        };
+
+        // In embed mode the text column must exist.
+        if vector_column.is_none() && col_map.text.is_none() {
+            anyhow::bail!(
+                "parquet file has no '{text_column}' column (required for --embed) — available: {}",
                 schema
                     .fields()
                     .iter()
                     .map(|f: &arrow::datatypes::FieldRef| f.name().as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            )
-        })?;
-
-        let col_map = ColumnMap {
-            id: find_col(&schema, "id"),
-            vector: vector_idx,
-            text: find_col(&schema, "text"),
-            source: find_col(&schema, "source"),
-        };
+            );
+        }
 
         Ok(Self {
             row_count,
             file_path: path.to_path_buf(),
             col_map,
-            vector_column: vector_column.to_owned(),
+            vector_column: vector_column.map(str::to_owned),
         })
     }
 
@@ -107,7 +131,7 @@ impl VectorReader for ParquetReader {
         let col_map_vector = self.col_map.vector;
         let col_map_text = self.col_map.text;
         let col_map_source = self.col_map.source;
-        let vec_col_name = self.vector_column.clone();
+        let vec_col_name = self.vector_column.clone().unwrap_or_default();
 
         // Global auto-increment for rows missing an id column.
         let mut global_row: u64 = 0;
@@ -129,8 +153,9 @@ impl VectorReader for ParquetReader {
                     let id_col: Option<Arc<dyn Array>> =
                         col_map_id.map(|i| Arc::clone(batch.column(i)));
 
-                    // --- vector column ---
-                    let vec_col = Arc::clone(batch.column(col_map_vector));
+                    // --- vector column (may be absent in embed mode) ---
+                    let vec_col: Option<Arc<dyn Array>> =
+                        col_map_vector.map(|i| Arc::clone(batch.column(i)));
 
                     // --- text column ---
                     let text_col: Option<Arc<dyn Array>> =
@@ -147,16 +172,19 @@ impl VectorReader for ParquetReader {
                             None => global_row + row as u64,
                         };
 
-                        // vector
-                        let vector = match extract_vector(vec_col.as_ref(), row) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                out.push(Err(anyhow::anyhow!(
-                                    "row {}: failed to read '{vec_col_name}': {e}",
-                                    global_row + row as u64
-                                )));
-                                continue;
-                            }
+                        // vector (empty when column is absent — embed mode fills it later)
+                        let vector = match &vec_col {
+                            Some(vc) => match extract_vector(vc.as_ref(), row) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    out.push(Err(anyhow::anyhow!(
+                                        "row {}: failed to read '{vec_col_name}': {e}",
+                                        global_row + row as u64
+                                    )));
+                                    continue;
+                                }
+                            },
+                            None => Vec::new(),
                         };
 
                         // text

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use v_hnsw_core::{Dim, PointId, VectorStore, VhnswError};
 
 /// A simple in-memory vector store backed by a `HashMap`.
+#[derive(Clone, bincode::Encode, bincode::Decode)]
 pub struct InMemoryVectorStore {
     dim: Dim,
     vectors: HashMap<PointId, Vec<f32>>,

@@ -11,7 +11,7 @@ use std::arch::x86_64::*;
 /// L2 squared distance metric.
 ///
 /// Computes `sum((a[i] - b[i])^2)` with SIMD acceleration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, bincode::Encode, bincode::Decode)]
 pub struct L2Distance;
 
 impl DistanceMetric for L2Distance {

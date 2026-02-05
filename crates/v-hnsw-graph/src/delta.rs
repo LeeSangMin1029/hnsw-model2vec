@@ -8,7 +8,7 @@ use v_hnsw_core::PointId;
 /// between consecutive sorted IDs as varints. For typical HNSW graphs where
 /// neighbor IDs are moderately spaced, this saves ~60-75% memory compared
 /// to `Vec<PointId>` (u64).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, bincode::Encode, bincode::Decode)]
 pub(crate) struct DeltaNeighbors {
     /// LEB128-encoded data: `[first_id_varint, delta1_varint, delta2_varint, ...]`
     data: Vec<u8>,

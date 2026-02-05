@@ -11,7 +11,7 @@ use std::arch::x86_64::*;
 /// Negative dot product distance metric.
 ///
 /// Returns `-dot(a, b)` so that higher similarity = lower distance.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, bincode::Encode, bincode::Decode)]
 pub struct DotProductDistance;
 
 impl DistanceMetric for DotProductDistance {

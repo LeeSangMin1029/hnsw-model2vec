@@ -175,6 +175,58 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Insert a batch of points atomically (BatchBegin / inserts / BatchEnd).
+    ///
+    /// Uses `wal.append_batch()` and `vectors.insert_batch()` to reduce
+    /// per-record overhead. Checkpoint check runs once per batch.
+    pub fn insert_batch(
+        &mut self,
+        batch: &[(PointId, &[f32], Payload, &str)],
+    ) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let batch_id = self.next_batch_id;
+        self.next_batch_id += 1;
+
+        // Build WAL records: BatchBegin + N Inserts + BatchEnd
+        let mut wal_records = Vec::with_capacity(batch.len() + 2);
+        wal_records.push(WalRecord::BatchBegin { batch_id });
+        for &(id, vector, ref payload, text) in batch {
+            wal_records.push(WalRecord::Insert {
+                id,
+                vector: vector.to_vec(),
+                payload: payload.clone(),
+                text: text.to_string(),
+            });
+        }
+        wal_records.push(WalRecord::BatchEnd { batch_id });
+
+        // Single WAL write
+        self.wal.append_batch(&wal_records)?;
+
+        // Batch vector insert (single header write)
+        let vec_batch: Vec<(PointId, &[f32])> =
+            batch.iter().map(|&(id, v, _, _)| (id, v)).collect();
+        self.vectors.insert_batch(&vec_batch)?;
+
+        // Buffer payloads and texts
+        for &(id, _, ref payload, text) in batch {
+            self.payloads.buffer_payload(id, payload.clone());
+            self.payloads.buffer_text(id, text.to_string());
+        }
+
+        self.ops_since_checkpoint += batch.len();
+
+        // Auto-checkpoint once per batch
+        if self.ops_since_checkpoint >= self.config.checkpoint_threshold {
+            self.checkpoint()?;
+        }
+
+        Ok(())
+    }
+
     /// Remove a point and all associated data.
     pub fn remove(&mut self, id: PointId) -> Result<()> {
         // Write to WAL first

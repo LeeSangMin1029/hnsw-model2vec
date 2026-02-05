@@ -23,11 +23,29 @@ pub struct InputRecord {
 }
 
 /// Common interface for all vector file readers.
-pub trait VectorReader {
+pub trait VectorReader: Send {
     /// Total number of records (or best estimate).
     fn count(&mut self) -> Result<usize>;
     /// Lazily iterate over records.
     fn records(&mut self) -> Box<dyn Iterator<Item = Result<InputRecord>> + '_>;
+}
+
+/// Reader configuration.
+pub struct ReaderConfig<'a> {
+    /// Vector column name. `None` in embed mode (vector not required).
+    pub vector_column: Option<&'a str>,
+    /// Text column name override (default: `"text"`).
+    pub text_column: &'a str,
+}
+
+impl<'a> ReaderConfig<'a> {
+    /// Shorthand for the common non-embed case.
+    pub fn with_vector(vector_column: &'a str) -> Self {
+        Self {
+            vector_column: Some(vector_column),
+            text_column: "text",
+        }
+    }
 }
 
 /// Open a reader appropriate for `path`, auto-detected by extension.
@@ -35,7 +53,7 @@ pub trait VectorReader {
 /// * `.jsonl` / `.ndjson` -> [`jsonl::JsonlReader`]
 /// * `.parquet`            -> [`parquet::ParquetReader`]
 /// * `.fvecs` / `.bvecs`   -> [`fvecs::FvecsReader`]
-pub fn open_reader(path: &Path, vector_column: &str) -> Result<Box<dyn VectorReader>> {
+pub fn open_reader(path: &Path, cfg: &ReaderConfig<'_>) -> Result<Box<dyn VectorReader>> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -49,11 +67,14 @@ pub fn open_reader(path: &Path, vector_column: &str) -> Result<Box<dyn VectorRea
             Ok(Box::new(r))
         }
         "parquet" => {
-            let r = parquet::ParquetReader::open(path, vector_column)
+            let r = parquet::ParquetReader::open(path, cfg.vector_column, cfg.text_column)
                 .with_context(|| format!("opening Parquet reader for {}", path.display()))?;
             Ok(Box::new(r))
         }
         "fvecs" | "bvecs" => {
+            if cfg.vector_column.is_none() {
+                anyhow::bail!("--embed mode is not supported with fvecs/bvecs files (no text column)");
+            }
             let r = fvecs::FvecsReader::open(path)
                 .with_context(|| format!("opening fvecs/bvecs reader for {}", path.display()))?;
             Ok(Box::new(r))

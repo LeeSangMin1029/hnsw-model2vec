@@ -51,7 +51,15 @@ pub use reranker::{LengthBoostReranker, PassthroughReranker, Reranker};
 /// Tokenizer trait for text processing.
 ///
 /// Implementations convert text into a sequence of tokens for BM25 indexing.
-pub trait Tokenizer: Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> {
+pub trait Tokenizer:
+    Clone
+    + Send
+    + Sync
+    + serde::Serialize
+    + for<'de> serde::Deserialize<'de>
+    + bincode::Encode
+    + bincode::Decode<()>
+{
     /// Tokenize text into a list of tokens.
     ///
     /// Tokens should be normalized (e.g., lowercased, stemmed) for best results.
@@ -61,7 +69,9 @@ pub trait Tokenizer: Send + Sync + serde::Serialize + for<'de> serde::Deserializ
 /// A simple whitespace tokenizer.
 ///
 /// Splits on whitespace and lowercases tokens. Suitable for basic use cases.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode,
+)]
 pub struct WhitespaceTokenizer;
 
 impl WhitespaceTokenizer {
@@ -82,7 +92,9 @@ impl Tokenizer for WhitespaceTokenizer {
 /// A simple tokenizer that splits on whitespace and punctuation.
 ///
 /// More thorough than `WhitespaceTokenizer` as it also removes punctuation.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode,
+)]
 pub struct SimpleTokenizer;
 
 impl SimpleTokenizer {

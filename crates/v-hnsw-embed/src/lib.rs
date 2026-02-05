@@ -61,10 +61,12 @@
 mod error;
 mod fastembed;
 mod model;
+pub mod ort_embed;
 
 #[cfg(test)]
 mod tests;
 
 pub use crate::error::EmbedError;
-pub use crate::fastembed::{FastEmbedModel, ModelType};
+pub use crate::fastembed::{Device, FastEmbedModel, ModelType};
 pub use crate::model::{EmbeddingModel, Result};
+pub use crate::ort_embed::{OrtEmbedModel, OrtModelConfig};

@@ -118,6 +118,37 @@ impl Wal {
         Ok(())
     }
 
+    /// Append multiple records in a single buffered write.
+    ///
+    /// All records are encoded into one contiguous buffer and written with a
+    /// single `write_all` call, reducing per-record syscall overhead.
+    pub fn append_batch(&mut self, records: &[WalRecord]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let config = bincode::config::standard();
+        let mut buf = Vec::with_capacity(records.len() * 128);
+
+        for record in records {
+            let data = bincode::encode_to_vec(record, config)
+                .map_err(|e| VhnswError::Wal(format!("bincode encode failed: {e}")))?;
+            let crc = crc32fast::hash(&data);
+            let length = data.len() as u32;
+
+            buf.extend_from_slice(&crc.to_le_bytes());
+            buf.extend_from_slice(&length.to_le_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        self.writer
+            .write_all(&buf)
+            .map_err(|e| VhnswError::Wal(format!("failed to write batch: {e}")))?;
+
+        self.records_since_checkpoint += records.len();
+        Ok(())
+    }
+
     /// Replay all records since the last checkpoint.
     ///
     /// Skips corrupt records and incomplete batches.

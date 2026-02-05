@@ -23,6 +23,9 @@ pub struct DbConfig {
     pub ef_construction: usize,
     /// Whether Korean tokenizer is enabled.
     pub korean: bool,
+    /// Embedding model used (for vsearch auto-detection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_model: Option<String>,
 }
 
 impl DbConfig {
@@ -104,6 +107,7 @@ pub fn run(
         m,
         ef_construction: ef,
         korean,
+        embed_model: None,  // Set later when inserting with --embed
     };
     db_config.save(&path)?;
 

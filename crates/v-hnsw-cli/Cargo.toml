@@ -19,6 +19,8 @@ v-hnsw-storage.workspace = true
 v-hnsw-search.workspace = true
 v-hnsw-embed.workspace = true
 v-hnsw-tokenizer = { path = "../v-hnsw-tokenizer" }
+v-hnsw-rerank = { path = "../v-hnsw-rerank" }
+v-hnsw-chunk = { path = "../v-hnsw-chunk" }
 
 # CLI
 clap = { workspace = true, features = ["derive"] }
@@ -33,6 +35,9 @@ anyhow = "1"
 # Progress bars
 indicatif = "0.17"
 
+# Pipeline parallelism
+crossbeam.workspace = true
+
 # Ctrl+C handling
 ctrlc = "3.4"
 
@@ -40,9 +45,20 @@ ctrlc = "3.4"
 arrow.workspace = true
 parquet.workspace = true
 
+# Directory walking
+walkdir = "2"
+
+# Cache directory
+directories = "5"
+
 # Logging
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+cuda = ["v-hnsw-embed/cuda"]
+directml = ["v-hnsw-embed/directml"]
 
 [lints]
 workspace = true

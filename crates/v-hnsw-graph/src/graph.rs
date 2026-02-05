@@ -1,12 +1,25 @@
 //! Main HNSW graph structure and `VectorIndex` implementation.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorIndex, VhnswError};
 
 use crate::config::HnswConfig;
 use crate::node::Node;
 use crate::store::InMemoryVectorStore;
+
+/// Serializable representation of HnswGraph (excludes distance metric).
+#[derive(bincode::Encode, bincode::Decode)]
+struct HnswGraphSerialized {
+    config: HnswConfig,
+    nodes: HashMap<PointId, Node>,
+    store: InMemoryVectorStore,
+    entry_point: Option<PointId>,
+    max_layer: LayerId,
+    count: usize,
+    rng_state: u64,
+}
 
 /// An in-memory Hierarchical Navigable Small World graph.
 ///
@@ -30,6 +43,7 @@ pub struct HnswGraph<D: DistanceMetric> {
     pub(crate) store: InMemoryVectorStore,
     pub(crate) entry_point: Option<PointId>,
     pub(crate) max_layer: LayerId,
+    #[allow(dead_code)]
     pub(crate) distance: D,
     pub(crate) count: usize,
     /// Internal PRNG state for layer assignment.
@@ -84,6 +98,62 @@ impl<D: DistanceMetric> HnswGraph<D> {
     /// Get the current entry point, if any.
     pub fn entry_point(&self) -> Option<PointId> {
         self.entry_point
+    }
+
+    /// Save graph to file (bincode format).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be created or written to.
+    pub fn save(&self, path: impl AsRef<Path>) -> v_hnsw_core::Result<()> {
+        use std::io::Write;
+
+        let serialized = HnswGraphSerialized {
+            config: self.config.clone(),
+            nodes: self.nodes.clone(),
+            store: self.store.clone(),
+            entry_point: self.entry_point,
+            max_layer: self.max_layer,
+            count: self.count,
+            rng_state: self.rng_state,
+        };
+
+        let file = std::fs::File::create(path)
+            .map_err(|e| VhnswError::Storage(e))?;
+        let mut writer = std::io::BufWriter::new(file);
+        bincode::encode_into_std_write(&serialized, &mut writer, bincode::config::standard())
+            .map_err(|e| VhnswError::Storage(std::io::Error::other(format!("serialize failed: {e}"))))?;
+        writer.flush().map_err(|e| VhnswError::Storage(e))?;
+        Ok(())
+    }
+
+    /// Load graph from file.
+    ///
+    /// The distance metric must be provided since it may not be serializable
+    /// or may need to be reconstructed with specific runtime configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or deserialized.
+    pub fn load(path: impl AsRef<Path>, distance: D) -> v_hnsw_core::Result<Self> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| VhnswError::Storage(e))?;
+        let mut reader = std::io::BufReader::new(file);
+        let serialized = bincode::decode_from_std_read::<HnswGraphSerialized, _, _>(
+            &mut reader,
+            bincode::config::standard()
+        ).map_err(|e| VhnswError::Storage(std::io::Error::other(format!("deserialize failed: {e}"))))?;
+
+        Ok(Self {
+            config: serialized.config,
+            nodes: serialized.nodes,
+            store: serialized.store,
+            entry_point: serialized.entry_point,
+            max_layer: serialized.max_layer,
+            distance,
+            count: serialized.count,
+            rng_state: serialized.rng_state,
+        })
     }
 }
 
@@ -296,6 +366,47 @@ mod tests {
             avg_recall > 0.90,
             "Average recall@{k} = {avg_recall:.3}, expected > 0.90"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_load() -> v_hnsw_core::Result<()> {
+        let dim = 16;
+        let config = HnswConfig::builder().dim(dim).m(8).build()?;
+        let mut graph = HnswGraph::with_seed(config, L2Distance, 42);
+
+        // Insert test vectors
+        for i in 0..50 {
+            let vec = test_vector(i, dim);
+            graph.insert(i, &vec)?;
+        }
+
+        // Save to temporary file
+        let temp_path = std::env::temp_dir().join("test_hnsw_save_load.bin");
+        graph.save(&temp_path)?;
+
+        // Load from file
+        let loaded_graph = HnswGraph::load(&temp_path, L2Distance)?;
+
+        // Verify loaded graph matches original
+        assert_eq!(loaded_graph.len(), graph.len());
+        assert_eq!(loaded_graph.max_layer(), graph.max_layer());
+        assert_eq!(loaded_graph.entry_point(), graph.entry_point());
+
+        // Verify search results match
+        let query = test_vector(25, dim);
+        let original_results = graph.search(&query, 10, 50)?;
+        let loaded_results = loaded_graph.search(&query, 10, 50)?;
+
+        assert_eq!(original_results.len(), loaded_results.len());
+        for (orig, loaded) in original_results.iter().zip(loaded_results.iter()) {
+            assert_eq!(orig.0, loaded.0); // Same point IDs
+            assert!((orig.1 - loaded.1).abs() < 1e-6); // Same distances
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
 
         Ok(())
     }

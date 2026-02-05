@@ -1,15 +1,16 @@
 //! BM25 inverted index implementation.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use v_hnsw_core::PointId;
+use v_hnsw_core::{PointId, VhnswError};
 
 use crate::bm25::scorer::Bm25Params;
 use crate::Tokenizer;
 
 /// A posting entry containing document ID and term frequency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct Posting {
     /// Document/point identifier.
     pub doc_id: PointId,
@@ -18,7 +19,7 @@ pub struct Posting {
 }
 
 /// Posting list for a single term.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct PostingList {
     /// Documents containing this term.
     pub postings: Vec<Posting>,
@@ -56,6 +57,20 @@ impl PostingList {
     pub fn df(&self) -> u32 {
         self.postings.len() as u32
     }
+}
+
+/// Serializable representation of BM25Index using Vec instead of HashMap.
+/// bincode 2.x has issues with HashMap serialization, so we convert to Vec for storage.
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+struct Bm25IndexData<T> {
+    tokenizer: T,
+    /// Postings stored as Vec<(term, posting_list)> for bincode compatibility.
+    postings: Vec<(String, PostingList)>,
+    /// Doc lengths stored as Vec<(doc_id, length)> for bincode compatibility.
+    doc_lengths: Vec<(PointId, u32)>,
+    total_length: u64,
+    total_docs: usize,
+    params: Bm25Params,
 }
 
 /// BM25 inverted index for sparse text search.
@@ -237,6 +252,63 @@ impl<T: Tokenizer> Bm25Index<T> {
     pub fn get_posting_list(&self, term: &str) -> Option<&PostingList> {
         self.postings.get(term)
     }
+
+    /// Save index to file (bincode format).
+    ///
+    /// # Errors
+    ///
+    /// Returns `VhnswError::Storage` if serialization or file I/O fails.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), VhnswError> {
+        use std::io::Write;
+
+        // Convert HashMap to Vec for bincode 2.x compatibility
+        let data = Bm25IndexData {
+            tokenizer: self.tokenizer.clone(),
+            postings: self.postings.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            doc_lengths: self.doc_lengths.iter().map(|(k, v)| (*k, *v)).collect(),
+            total_length: self.total_length,
+            total_docs: self.total_docs,
+            params: self.params,
+        };
+
+        // Serialize to Vec first to avoid any buffering issues
+        let bytes = bincode::encode_to_vec(&data, bincode::config::standard()).map_err(|e| {
+            VhnswError::Storage(std::io::Error::other(format!("serialize failed: {e}")))
+        })?;
+
+        let mut file = std::fs::File::create(path.as_ref())?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Load index from file.
+    ///
+    /// # Errors
+    ///
+    /// Returns `VhnswError::Storage` if deserialization or file I/O fails.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path.as_ref())?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+
+        let (data, _): (Bm25IndexData<T>, usize) =
+            bincode::decode_from_slice(&bytes, bincode::config::standard()).map_err(|e| {
+                VhnswError::Storage(std::io::Error::other(format!("deserialize failed: {e}")))
+            })?;
+
+        // Convert Vec back to HashMap
+        Ok(Self {
+            tokenizer: data.tokenizer,
+            postings: data.postings.into_iter().collect(),
+            doc_lengths: data.doc_lengths.into_iter().collect(),
+            total_length: data.total_length,
+            total_docs: data.total_docs,
+            params: data.params,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +316,7 @@ mod tests {
     use super::*;
 
     /// Simple whitespace tokenizer for testing.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
     struct WhitespaceTokenizer;
 
     impl Tokenizer for WhitespaceTokenizer {
@@ -332,5 +404,37 @@ mod tests {
 
         pl.remove(1);
         assert_eq!(pl.df(), 1);
+    }
+
+    #[test]
+    fn test_save_load() {
+        use std::env;
+
+        let mut index = Bm25Index::new(WhitespaceTokenizer);
+        index.add_document(1, "hello world");
+        index.add_document(2, "hello rust");
+        index.add_document(3, "rust programming");
+
+        // Save to temp file
+        let temp_path = env::temp_dir().join("test_bm25_index.bin");
+        index.save(&temp_path).expect("Failed to save index");
+
+        // Load from file
+        let loaded_index: Bm25Index<WhitespaceTokenizer> =
+            Bm25Index::load(&temp_path).expect("Failed to load index");
+
+        // Verify index state
+        assert_eq!(loaded_index.len(), 3);
+        assert_eq!(loaded_index.document_frequency("hello"), 2);
+        assert_eq!(loaded_index.document_frequency("rust"), 2);
+        assert_eq!(loaded_index.document_frequency("world"), 1);
+        assert_eq!(loaded_index.document_frequency("programming"), 1);
+
+        // Verify search works
+        let results = loaded_index.search("hello", 10);
+        assert_eq!(results.len(), 2);
+
+        // Cleanup
+        let _ = std::fs::remove_file(temp_path);
     }
 }

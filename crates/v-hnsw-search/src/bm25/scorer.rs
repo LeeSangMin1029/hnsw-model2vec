@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// BM25 scoring parameters.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct Bm25Params {
     /// Term frequency saturation parameter (default: 1.2).
     pub k1: f32,

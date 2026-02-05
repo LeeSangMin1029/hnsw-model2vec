@@ -13,7 +13,9 @@ use super::{InputRecord, VectorReader};
 #[derive(Debug, Deserialize)]
 struct JsonlRecord {
     id: u64,
-    vector: Vec<f32>,
+    /// Dense vector. Optional in embed mode (generated from text).
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
@@ -76,7 +78,7 @@ impl VectorReader for JsonlReader {
             };
             Some(Ok(InputRecord {
                 id: rec.id,
-                vector: rec.vector,
+                vector: rec.vector.unwrap_or_default(),
                 text: rec.text,
                 source: rec.source,
                 tags: rec.tags,

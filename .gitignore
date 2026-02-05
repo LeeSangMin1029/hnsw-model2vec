@@ -1,5 +1,55 @@
+# Build artifacts
 /target
-.fastembed_cache/
-.omc/
-testdb/
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust
+Cargo.lock
+**/*.rs.bk
+
+# Test databases and data
+*-db/
 *.db
+testdb/
+datasets/
+test_*.jsonl
+test_*.parquet
+
+# Cache
+.fastembed_cache/
+.cache/
+
+# OMC (oh-my-claudecode) state
+.omc/
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/skills/
+
+# Windows artifacts
+nul
+Thumbs.db
+*.exe.stackdump
+
+# macOS
+.DS_Store
+
+# Scripts (local utilities)
+check-disk.ps1
+
+# Logs
+*.log
+logs/
+
+# Model cache (downloaded models)
+models/
+*.onnx
+
+# Daemon state
+*.pid
+*.port

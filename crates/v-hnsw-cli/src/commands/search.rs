@@ -8,8 +8,9 @@ use serde::Serialize;
 use v_hnsw_core::{DistanceMetric, PayloadStore, VectorIndex, VectorStore};
 use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
 use v_hnsw_graph::{HnswConfig, HnswGraph};
-use v_hnsw_search::{Bm25Index, HybridSearchConfig, SimpleHybridSearcher, WhitespaceTokenizer};
+use v_hnsw_search::{Bm25Index, HybridSearchConfig, Reranker, SimpleHybridSearcher, WhitespaceTokenizer};
 use v_hnsw_storage::StorageEngine;
+use v_hnsw_rerank::{CrossEncoderConfig, CrossEncoderReranker, RerankerModel};
 
 use super::create::DbConfig;
 
@@ -37,14 +38,32 @@ fn parse_vector(s: &str) -> Result<Vec<f32>> {
         .collect()
 }
 
+/// Search command parameters.
+pub struct SearchParams {
+    pub path: PathBuf,
+    pub vector: Option<String>,
+    pub text: Option<String>,
+    pub k: usize,
+    pub ef: usize,
+    pub collection: String,
+    pub rerank: bool,
+    pub rerank_model: String,
+    pub rerank_top: Option<usize>,
+}
+
 /// Run the search command.
-pub fn run(
-    path: PathBuf,
-    vector: Option<String>,
-    text: Option<String>,
-    k: usize,
-    ef: usize,
-) -> Result<()> {
+pub fn run(params: SearchParams) -> Result<()> {
+    let SearchParams {
+        path,
+        vector,
+        text,
+        k,
+        ef,
+        collection: _collection,
+        rerank,
+        rerank_model,
+        rerank_top,
+    } = params;
     // At least one of vector or text must be provided
     if vector.is_none() && text.is_none() {
         anyhow::bail!("At least one of --vector or --text must be provided");
@@ -73,38 +92,86 @@ pub fn run(
         None
     };
 
+    // Validate reranking only works with hybrid search
+    if rerank && (vector.is_none() || text.is_none()) {
+        anyhow::bail!("Reranking requires both --vector and --text for hybrid search");
+    }
+
+    // Determine rerank candidate count
+    let rerank_candidates = rerank_top.unwrap_or(k * 3);
+
     // Execute search based on metric
     let start = Instant::now();
-    let results = match config.metric.as_str() {
+    let mut results = match config.metric.as_str() {
         "cosine" => search_with_metric::<CosineDistance>(
             &path,
             &config,
-            query_vector,
-            text,
-            k,
+            query_vector.clone(),
+            text.clone(),
+            if rerank { rerank_candidates } else { k },
             ef,
             CosineDistance,
         )?,
         "l2" => search_with_metric::<L2Distance>(
             &path,
             &config,
-            query_vector,
-            text,
-            k,
+            query_vector.clone(),
+            text.clone(),
+            if rerank { rerank_candidates } else { k },
             ef,
             L2Distance,
         )?,
         "dot" => search_with_metric::<DotProductDistance>(
             &path,
             &config,
-            query_vector,
-            text,
-            k,
+            query_vector.clone(),
+            text.clone(),
+            if rerank { rerank_candidates } else { k },
             ef,
             DotProductDistance,
         )?,
         other => anyhow::bail!("Unknown metric: {other}"),
     };
+
+    // Apply reranking if enabled
+    if rerank {
+        let query_text = text.as_ref().ok_or_else(|| anyhow::anyhow!("Text query required for reranking"))?;
+
+        // Open storage to get document texts
+        let engine = StorageEngine::open(&path)
+            .with_context(|| format!("failed to open database at {}", path.display()))?;
+        let payload_store = engine.payload_store();
+
+        // Build candidates for reranking
+        let mut candidates = Vec::new();
+        for (id, score) in &results {
+            if let Ok(Some(doc_text)) = payload_store.get_text(*id) {
+                candidates.push((*id, *score, doc_text));
+            }
+        }
+
+        // Create reranker
+        let model = match rerank_model.as_str() {
+            "minilm" => RerankerModel::MsMiniLM,
+            "bge" => RerankerModel::BgeBase,
+            other => anyhow::bail!("Unknown rerank model: {other}. Use 'minilm' or 'bge'"),
+        };
+
+        let config = CrossEncoderConfig::new(model);
+        let reranker = CrossEncoderReranker::new(config)
+            .with_context(|| "failed to create reranker")?;
+
+        // Rerank
+        let reranked = reranker.rerank(query_text, &candidates)
+            .with_context(|| "reranking failed")?;
+
+        // Use reranked results
+        results = reranked;
+
+        // Take top k
+        results.truncate(k);
+    }
+
     let elapsed = start.elapsed();
 
     // Output as JSON
@@ -137,27 +204,38 @@ fn search_with_metric<D: DistanceMetric + Clone>(
     let engine = StorageEngine::open(path)
         .with_context(|| format!("failed to open database at {}", path.display()))?;
 
-    // Create HNSW config
-    let hnsw_config = HnswConfig::builder()
-        .dim(config.dim)
-        .m(config.m)
-        .ef_construction(config.ef_construction)
-        .build()
-        .with_context(|| "failed to create HNSW config")?;
+    // Check for pre-built index files
+    let hnsw_path = path.join("hnsw.bin");
+    let bm25_path = path.join("bm25.bin");
 
-    // Build HNSW graph from storage
-    let mut hnsw: HnswGraph<D> = HnswGraph::new(hnsw_config, distance);
+    // Load or build HNSW graph
+    let hnsw: HnswGraph<D> = if hnsw_path.exists() {
+        HnswGraph::load(&hnsw_path, distance)
+            .with_context(|| format!("failed to load HNSW index from {}", hnsw_path.display()))?
+    } else {
+        // Fallback: build from storage (slow)
+        let hnsw_config = HnswConfig::builder()
+            .dim(config.dim)
+            .m(config.m)
+            .ef_construction(config.ef_construction)
+            .build()
+            .with_context(|| "failed to create HNSW config")?;
 
-    // Load vectors from storage into graph
-    let vector_store = engine.vector_store();
-    let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
+        let mut hnsw = HnswGraph::new(hnsw_config, distance);
 
-    for id in &ids {
-        if let Ok(vec) = vector_store.get(*id) {
-            // Ignore errors during load - point might be deleted
-            let _ = hnsw.insert(*id, vec);
+        // Load vectors from storage into graph
+        let vector_store = engine.vector_store();
+        let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
+
+        for id in &ids {
+            if let Ok(vec) = vector_store.get(*id) {
+                // Ignore errors during load - point might be deleted
+                let _ = hnsw.insert(*id, vec);
+            }
         }
-    }
+
+        hnsw
+    };
 
     match (query_vector, query_text) {
         // Dense-only search
@@ -168,42 +246,59 @@ fn search_with_metric<D: DistanceMetric + Clone>(
         }
         // Sparse-only search (BM25)
         (None, Some(text)) => {
-            // Build BM25 index from stored texts
-            let mut bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::new(WhitespaceTokenizer::new());
+            // Load or build BM25 index
+            let bm25: Bm25Index<WhitespaceTokenizer> = if bm25_path.exists() {
+                Bm25Index::load(&bm25_path)
+                    .with_context(|| format!("failed to load BM25 index from {}", bm25_path.display()))?
+            } else {
+                // Fallback: build from storage (slow)
+                let mut bm25 = Bm25Index::new(WhitespaceTokenizer::new());
 
-            let payload_store = engine.payload_store();
-            for id in &ids {
-                if let Ok(Some(doc_text)) = payload_store.get_text(*id) {
-                    bm25.add_document(*id, &doc_text);
+                let vector_store = engine.vector_store();
+                let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
+                let payload_store = engine.payload_store();
+
+                for id in &ids {
+                    if let Ok(Some(doc_text)) = payload_store.get_text(*id) {
+                        bm25.add_document(*id, &doc_text);
+                    }
                 }
-            }
+
+                bm25
+            };
 
             let results = bm25.search(&text, k);
             Ok(results)
         }
         // Hybrid search
         (Some(vec), Some(text)) => {
-            // Build BM25 index
-            let bm25: Bm25Index<WhitespaceTokenizer> = Bm25Index::new(WhitespaceTokenizer::new());
+            // Load or build BM25 index
+            let bm25: Bm25Index<WhitespaceTokenizer> = if bm25_path.exists() {
+                Bm25Index::load(&bm25_path)
+                    .with_context(|| format!("failed to load BM25 index from {}", bm25_path.display()))?
+            } else {
+                // Fallback: build from storage (slow)
+                let mut bm25 = Bm25Index::new(WhitespaceTokenizer::new());
+
+                let vector_store = engine.vector_store();
+                let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
+                let payload_store = engine.payload_store();
+
+                for id in &ids {
+                    if let Ok(Some(doc_text)) = payload_store.get_text(*id) {
+                        bm25.add_document(*id, &doc_text);
+                    }
+                }
+
+                bm25
+            };
 
             // Create hybrid searcher config
             let hybrid_config = HybridSearchConfig::builder()
                 .ef_search(ef)
                 .build();
 
-            let mut searcher = SimpleHybridSearcher::new(hnsw, bm25, hybrid_config);
-
-            // Load documents into BM25
-            let payload_store = engine.payload_store();
-            for id in &ids {
-                let text_data = payload_store
-                    .get_text(*id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                // Add to sparse index only (dense already added above)
-                searcher.sparse_index_mut().add_document(*id, &text_data);
-            }
+            let searcher = SimpleHybridSearcher::new(hnsw, bm25, hybrid_config);
 
             let results = searcher.search(&vec, &text, k)
                 .with_context(|| "hybrid search failed")?;

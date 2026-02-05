@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use v_hnsw_chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_core::VectorIndex;
 use v_hnsw_distance::CosineDistance;
 use v_hnsw_embed::{EmbeddingModel, FastEmbedModel, ModelType};
@@ -56,7 +57,13 @@ pub fn run(
 
     // Step 3: Chunk documents
     println!("\nChunking documents ({} chars, {} overlap)...", chunk_size, chunk_overlap);
-    let chunks = chunk_documents(&documents, chunk_size, chunk_overlap);
+    let chunker = MarkdownChunker::new(ChunkConfig {
+        target_size: chunk_size,
+        overlap: chunk_overlap,
+        min_size: 50,
+        include_heading_context: true,
+    });
+    let chunks = chunk_documents_with_chunker(&documents, &chunker);
     println!("Created {} chunks", chunks.len());
 
     if chunks.is_empty() {
@@ -228,43 +235,25 @@ fn parse_markdown_file(path: &Path) -> Result<(Option<String>, String)> {
     Ok((title, lines.join("\n")))
 }
 
-/// Chunk documents with overlap.
-fn chunk_documents(
+/// Chunk documents using the MarkdownChunker from v-hnsw-chunk.
+fn chunk_documents_with_chunker(
     documents: &[Document],
-    chunk_size: usize,
-    overlap: usize,
+    chunker: &MarkdownChunker,
 ) -> Vec<(u64, String)> {
     let mut chunks = Vec::new();
     let mut chunk_id = 0u64;
 
     for doc in documents {
-        let chars: Vec<char> = doc.content.chars().collect();
-        if chars.is_empty() {
+        if doc.content.is_empty() {
             continue;
         }
 
-        let step = if chunk_size > overlap {
-            chunk_size - overlap
-        } else {
-            chunk_size
-        };
+        // Use the semantic chunker
+        let semantic_chunks = chunker.chunk(&doc.content);
 
-        let mut start = 0;
-        while start < chars.len() {
-            let end = std::cmp::min(start + chunk_size, chars.len());
-            let chunk: String = chars[start..end].iter().collect();
-
-            // Only keep chunks with meaningful content
-            let trimmed = chunk.trim();
-            if trimmed.len() >= 50 {
-                chunks.push((chunk_id, trimmed.to_string()));
-                chunk_id += 1;
-            }
-
-            if end >= chars.len() {
-                break;
-            }
-            start += step;
+        for semantic_chunk in semantic_chunks {
+            chunks.push((chunk_id, semantic_chunk.text));
+            chunk_id += 1;
         }
     }
 

@@ -1,0 +1,25 @@
+[package]
+name = "v-hnsw-rerank"
+description = "Cross-encoder reranking for v-hnsw search results"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+v-hnsw-core.workspace = true
+v-hnsw-search.workspace = true
+ort.workspace = true
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+hf-hub = "0.4"
+thiserror.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+
+[lints]
+workspace = true
