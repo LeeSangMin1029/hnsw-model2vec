@@ -8,12 +8,16 @@ license.workspace = true
 
 [dependencies]
 v-hnsw-core.workspace = true
-v-hnsw-distance.workspace = true
-parking_lot.workspace = true
 rayon.workspace = true
 tracing.workspace = true
-serde.workspace = true
 bincode.workspace = true
+cubecl = { workspace = true, optional = true }
+
+[features]
+default = []
+gpu = ["dep:cubecl"]
+cuda = ["gpu", "cubecl/cuda"]
+wgpu = ["gpu", "cubecl/wgpu"]
 
 [dev-dependencies]
 proptest.workspace = true

@@ -10,11 +10,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use v_hnsw_chunk::{ChunkConfig, MarkdownChunker};
+use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_core::VectorIndex;
-use v_hnsw_distance::CosineDistance;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{CosineDistance, HnswConfig, HnswGraph};
 
 use crate::is_interrupted;
 

@@ -8,11 +8,11 @@
 //! ```no_run
 //! use v_hnsw_embed::{Model2VecModel, EmbeddingModel};
 //!
-//! // Create a model with default model (minilm-l6-v2)
-//! let model = Model2VecModel::try_new()?;
+//! // Create a model with the default model (potion-multilingual-128M)
+//! let model = Model2VecModel::new()?;
 //!
 //! // Or specify a model explicitly
-//! let model = Model2VecModel::with_model("minishlab/potion-base-8M")?;
+//! let model = Model2VecModel::from_pretrained("minishlab/potion-base-8M")?;
 //!
 //! // Embed documents
 //! let docs = &["Document one", "Document two"];

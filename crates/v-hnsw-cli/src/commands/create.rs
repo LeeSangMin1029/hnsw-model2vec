@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
-use crate::MetricType;
+use crate::cli::MetricType;
 
 /// Database metadata stored in config.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]

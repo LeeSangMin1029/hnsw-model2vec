@@ -30,7 +30,7 @@ struct HnswGraphSerialized {
 ///
 /// ```ignore
 /// use v_hnsw_graph::{HnswConfig, HnswGraph};
-/// use v_hnsw_distance::L2Distance;
+/// use v_hnsw_graph::L2Distance;
 ///
 /// let config = HnswConfig::builder().dim(128).build()?;
 /// let mut graph = HnswGraph::new(config, L2Distance);
@@ -119,11 +119,11 @@ impl<D: DistanceMetric> HnswGraph<D> {
         };
 
         let file = std::fs::File::create(path)
-            .map_err(|e| VhnswError::Storage(e))?;
+            .map_err(VhnswError::Storage)?;
         let mut writer = std::io::BufWriter::new(file);
         bincode::encode_into_std_write(&serialized, &mut writer, bincode::config::standard())
             .map_err(|e| VhnswError::Storage(std::io::Error::other(format!("serialize failed: {e}"))))?;
-        writer.flush().map_err(|e| VhnswError::Storage(e))?;
+        writer.flush().map_err(VhnswError::Storage)?;
         Ok(())
     }
 
@@ -137,7 +137,7 @@ impl<D: DistanceMetric> HnswGraph<D> {
     /// Returns an error if the file cannot be opened or deserialized.
     pub fn load(path: impl AsRef<Path>, distance: D) -> v_hnsw_core::Result<Self> {
         let file = std::fs::File::open(path)
-            .map_err(|e| VhnswError::Storage(e))?;
+            .map_err(VhnswError::Storage)?;
         let mut reader = std::io::BufReader::new(file);
         let serialized = bincode::decode_from_std_read::<HnswGraphSerialized, _, _>(
             &mut reader,
@@ -195,7 +195,7 @@ impl<D: DistanceMetric> VectorIndex for HnswGraph<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use v_hnsw_distance::L2Distance;
+    use crate::distance::L2Distance;
 
     /// Generate a deterministic test vector for the given point id and dimension.
     fn test_vector(point_id: u64, dim: usize) -> Vec<f32> {

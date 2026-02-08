@@ -9,9 +9,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use v_hnsw_core::VectorIndex;
-use v_hnsw_distance::CosineDistance;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::HnswGraph;
+use v_hnsw_graph::{CosineDistance, HnswGraph};
 
 use super::create::DbConfig;
 
@@ -126,7 +125,7 @@ pub fn run(params: VSearchParams) -> Result<()> {
         results
             .into_iter()
             .map(|(id, score)| {
-                let text = v_hnsw_core::PayloadStore::get_text(&*payload_store, id)
+                let text = v_hnsw_core::PayloadStore::get_text(payload_store, id)
                     .ok()
                     .flatten();
                 VSearchResult { id, score, text }

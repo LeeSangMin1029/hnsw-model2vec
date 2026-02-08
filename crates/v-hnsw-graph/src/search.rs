@@ -4,7 +4,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 
 use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorStore, VhnswError};
-use v_hnsw_distance::prefetch_read;
+use crate::distance::prefetch_read;
 
 use crate::graph::HnswGraph;
 

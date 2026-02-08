@@ -328,13 +328,20 @@ impl MmapVectorStore {
         let max_slot = map.values().copied().max().unwrap_or(0);
         self.next_slot = max_slot.saturating_add(1);
 
-        // Rebuild free_slots: slots below next_slot that aren't in the map
+        // Rebuild free_slots: O(n+m) using HashSet instead of O(n*m)
+        let used_slots: std::collections::HashSet<u32> = map.values().copied().collect();
         self.free_slots.clear();
         for slot in 0..self.next_slot {
-            if !map.values().any(|&s| s == slot) {
+            if !used_slots.contains(&slot) {
                 self.free_slots.push(slot);
             }
         }
+
+        tracing::debug!(
+            used = map.len(),
+            free = self.free_slots.len(),
+            "restored id_map"
+        );
 
         self.live_count = map.len();
         self.id_to_slot = map;
@@ -404,18 +411,25 @@ impl MmapVectorStore {
             )));
         }
 
+        tracing::warn!(
+            old_capacity = self.capacity,
+            new_capacity,
+            "growing mmap store"
+        );
+
         let new_file_size = HEADER_SIZE + (new_capacity as usize) * self.slot_size;
 
-        // Drop the old mmap first
-        drop(std::mem::replace(
-            &mut self.mmap,
-            unsafe { MmapMut::map_mut(&self.file)? },
-        ));
+        // Flush before dropping old mmap
+        self.mmap.flush()?;
 
-        // Resize the file
+        // Replace with a tiny anonymous mmap so the old file-backed mmap is dropped
+        let empty = MmapMut::map_anon(1).map_err(VhnswError::Storage)?;
+        drop(std::mem::replace(&mut self.mmap, empty));
+
+        // Resize the file (no mmap holds the file now)
         self.file.set_len(new_file_size as u64)?;
 
-        // Create new mmap
+        // Create new mmap over the resized file
         self.mmap = unsafe { MmapMut::map_mut(&self.file)? };
         self.capacity = new_capacity;
 

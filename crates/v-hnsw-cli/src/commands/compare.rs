@@ -9,9 +9,8 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use v_hnsw_core::VectorIndex;
-use v_hnsw_distance::CosineDistance;
 use v_hnsw_embed::{Model2VecModel, EmbeddingModel};
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{CosineDistance, HnswConfig, HnswGraph};
 
 use crate::is_interrupted;
 

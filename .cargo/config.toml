@@ -1,9 +1,11 @@
 [build]
-# Enable SIMD optimizations for the host CPU
-# Uncomment the line below for maximum performance on your machine:
-# rustflags = ["-C", "target-cpu=native"]
+# Limit parallel jobs to half cores — prevents CPU starvation during compilation
+jobs = 8
+# Deploy builds: RUSTC_WRAPPER=sccache cargo build --release
+# sccache disabled by default — conflicts with incremental compilation
 
 [target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
 rustflags = ["-C", "target-feature=+avx2"]
 
 [target.x86_64-unknown-linux-gnu]

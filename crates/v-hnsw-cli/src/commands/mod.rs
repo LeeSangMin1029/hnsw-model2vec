@@ -1,5 +1,7 @@
 //! CLI command implementations.
 
+pub mod common;
+pub mod dict;
 pub mod add;
 pub mod bench;
 pub mod buildindex;

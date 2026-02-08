@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 use v_hnsw_core::VectorIndex;
-use v_hnsw_distance::L2Distance;
+use crate::distance::L2Distance;
 
 use crate::{HnswConfig, HnswGraph};
 

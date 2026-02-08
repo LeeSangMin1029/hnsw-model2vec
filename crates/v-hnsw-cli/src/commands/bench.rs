@@ -5,8 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, VectorIndex, VectorStore};
-use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{CosineDistance, DotProductDistance, HnswConfig, HnswGraph, L2Distance};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;

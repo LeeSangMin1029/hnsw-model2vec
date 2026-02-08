@@ -5,8 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{PayloadStore, VectorIndex, VectorStore};
-use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{CosineDistance, DotProductDistance, HnswConfig, HnswGraph, L2Distance};
 use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::StorageEngine;
 
@@ -77,16 +76,17 @@ pub fn run(path: PathBuf) -> Result<()> {
     let bm25_path = path.join("bm25.bin");
     println!("  Building BM25 index...");
 
+    super::common::ensure_korean_dict()?;
     let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let payload_store = engine.payload_store();
 
     let mut text_count = 0;
     for id in &ids {
-        if let Ok(Some(text)) = payload_store.get_text(*id) {
-            if !text.is_empty() {
-                bm25.add_document(*id, &text);
-                text_count += 1;
-            }
+        if let Ok(Some(text)) = payload_store.get_text(*id)
+            && !text.is_empty()
+        {
+            bm25.add_document(*id, &text);
+            text_count += 1;
         }
     }
 

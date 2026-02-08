@@ -6,8 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use v_hnsw_core::{DistanceMetric, PayloadStore, VectorIndex, VectorStore};
-use v_hnsw_distance::{CosineDistance, DotProductDistance, L2Distance};
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{CosineDistance, DotProductDistance, HnswConfig, HnswGraph, L2Distance};
 use v_hnsw_search::{Bm25Index, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
 
@@ -60,6 +59,11 @@ pub fn run(params: SearchParams) -> Result<()> {
     // At least one of vector or text must be provided
     if vector.is_none() && text.is_none() {
         anyhow::bail!("At least one of --vector or --text must be provided");
+    }
+
+    // Ensure Korean dictionary is available for BM25 tokenization
+    if text.is_some() {
+        super::common::ensure_korean_dict()?;
     }
 
     // Check database exists

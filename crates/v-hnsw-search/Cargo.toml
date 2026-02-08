@@ -9,19 +9,18 @@ license.workspace = true
 [dependencies]
 v-hnsw-core.workspace = true
 v-hnsw-graph.workspace = true
-v-hnsw-tokenizer = { workspace = true, optional = true }
-parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 bincode.workspace = true
-tracing.workspace = true
+lindera = { version = "2.1", optional = true }
+unicode-normalization = { workspace = true, optional = true }
 
 [features]
 default = []
-korean = ["v-hnsw-tokenizer"]
+korean = ["dep:lindera", "dep:unicode-normalization"]
 
 [dev-dependencies]
-v-hnsw-distance.workspace = true
 proptest.workspace = true
+serde_json = "1"
 
 [lints]
 workspace = true

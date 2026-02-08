@@ -1,7 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use v_hnsw_core::{DistanceMetric, PointId, VectorIndex};
-use v_hnsw_distance::L2Distance;
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{HnswConfig, HnswGraph, L2Distance};
 
 /// Generate a reproducible vector using a simple seed-based function
 fn generate_vector(dim: usize, seed: usize) -> Vec<f32> {

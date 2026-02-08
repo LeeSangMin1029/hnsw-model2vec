@@ -3,22 +3,25 @@
 //! Compares modification times and file sizes against a stored file index
 //! to detect new, modified, and deleted files. Re-processes only changed files.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_chunk::{ChunkConfig, MarkdownChunker};
-use v_hnsw_core::{PayloadStore, VectorIndex, VectorStore};
-use v_hnsw_distance::CosineDistance;
+use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_embed::Model2VecModel;
-use v_hnsw_graph::{HnswConfig, HnswGraph};
-use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::StorageEngine;
 
-use super::add::{create_model, embed_sorted, generate_id, make_payload, make_progress_bar};
+use super::common;
 use super::create::DbConfig;
 use super::file_index;
 use crate::is_interrupted;
+
+/// Collected IDs for incremental index updates.
+#[derive(Default)]
+struct ChangeSet {
+    added: Vec<u64>,
+    removed: Vec<u64>,
+}
 
 /// Statistics for the update operation.
 #[derive(Debug, Default)]
@@ -38,6 +41,7 @@ struct UpdateRecord {
     tags: Vec<String>,
     chunk_index: usize,
     chunk_total: usize,
+    source_modified_at: u64,
 }
 
 /// Run the update command - incremental indexing.
@@ -56,29 +60,33 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         );
     }
 
+    tracing::info!(
+        db = %db_path.display(),
+        input = %input_path.display(),
+        "Starting update command"
+    );
     println!("Updating database: {}", db_path.display());
     println!("Input folder:      {}", input_path.display());
     println!();
 
     let start = Instant::now();
 
-    // Load existing file index
     let mut file_index = file_index::load_file_index(&db_path)?;
-    println!("Loaded file index with {} tracked files", file_index.files.len());
+    println!(
+        "Loaded file index with {} tracked files",
+        file_index.files.len()
+    );
 
-    // Open storage engine
     let mut engine = StorageEngine::open(&db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
-
-    // Create model
-    let model = create_model()?;
 
     // Scan input folder for all markdown files
     let md_files: Vec<PathBuf> = walkdir::WalkDir::new(&input_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().extension()
+            e.path()
+                .extension()
                 .map(|ext| ext == "md" || ext == "markdown")
                 .unwrap_or(false)
         })
@@ -95,6 +103,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
 
     let mut stats = UpdateStats::default();
     let mut seen_files = std::collections::HashSet::new();
+    let mut changes = ChangeSet::default();
 
     let chunker = MarkdownChunker::new(ChunkConfig {
         target_size: 1000,
@@ -103,88 +112,111 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         include_heading_context: true,
     });
 
-    // Process each file
-    for md_path in &md_files {
-        if is_interrupted() {
-            break;
-        }
+    // First pass: detect changes without embedding
+    let mut pending_files: Vec<(PathBuf, String, u64, u64)> = Vec::new();
 
-        let source = md_path.to_string_lossy().to_string();
+    for md_path in &md_files {
+        let source = common::normalize_source(md_path);
         seen_files.insert(source.clone());
 
-        // Get current file metadata
-        let mtime = file_index::get_file_mtime(md_path).unwrap_or(0);
+        let mtime = common::get_file_mtime(md_path).unwrap_or(0);
         let size = file_index::get_file_size(md_path).unwrap_or(0);
 
         if file_index.is_modified(&source, mtime, size) {
-            // File is new or modified
-            let old_meta = file_index.get_file(&source);
-
-            if old_meta.is_some() {
-                // MODIFIED: delete old chunks
-                println!("Modified: {}", md_path.display());
-                let old_ids = old_meta.unwrap().chunk_ids.clone();
-                for id in old_ids {
-                    let _ = engine.remove(id);
-                }
-                stats.modified += 1;
-            } else {
-                // NEW file
-                println!("New:      {}", md_path.display());
-                stats.new += 1;
-            }
-
-            // Re-process the file
-            let (frontmatter, chunks) = match chunker.chunk_file(md_path) {
-                Ok(result) => result,
-                Err(e) => {
-                    eprintln!("Error processing {}: {e}", md_path.display());
-                    continue;
-                }
-            };
-
-            let title = frontmatter.as_ref().and_then(|f| f.title.clone());
-            let tags = frontmatter.as_ref().map(|f| f.tags.clone()).unwrap_or_default();
-            let chunk_total = chunks.len();
-
-            let mut records: Vec<UpdateRecord> = Vec::new();
-            let mut chunk_ids = Vec::new();
-
-            for chunk in chunks {
-                let id = generate_id(&source, chunk.chunk_index);
-                chunk_ids.push(id);
-                records.push(UpdateRecord {
-                    id,
-                    text: chunk.text,
-                    source: source.clone(),
-                    title: title.clone(),
-                    tags: tags.clone(),
-                    chunk_index: chunk.chunk_index,
-                    chunk_total,
-                });
-            }
-
-            // Embed and insert
-            if !records.is_empty() {
-                process_records(&records, &model, &mut engine)?;
-            }
-
-            // Update file index
-            file_index.update_file(source, mtime, size, chunk_ids);
+            pending_files.push((md_path.clone(), source, mtime, size));
         } else {
-            // Unchanged file
             stats.unchanged += 1;
         }
     }
 
-    // Find deleted files (in index but not on disk)
+    // Detect deleted files
+    let input_prefix = common::normalize_source(&input_path);
     let deleted_files: Vec<String> = file_index
         .files
         .keys()
-        .filter(|path| !seen_files.contains(*path))
+        .filter(|path| path.starts_with(&input_prefix) && !seen_files.contains(*path))
         .cloned()
         .collect();
 
+    // Early exit: no changes at all
+    if pending_files.is_empty() && deleted_files.is_empty() {
+        file_index::save_file_index(&db_path, &file_index)?;
+        let elapsed = start.elapsed();
+        println!("No changes detected ({} files unchanged).", stats.unchanged);
+        println!("Elapsed: {:.2}s", elapsed.as_secs_f64());
+        return Ok(());
+    }
+
+    // Load model only when there are files to process
+    let model = if !pending_files.is_empty() {
+        Some(common::create_model()?)
+    } else {
+        None
+    };
+
+    // Process changed files
+    for (md_path, source, mtime, size) in &pending_files {
+        if is_interrupted() {
+            break;
+        }
+
+        let old_meta = file_index.get_file(source);
+
+        if let Some(meta) = old_meta {
+            println!("Modified: {}", md_path.display());
+            let old_ids = meta.chunk_ids.clone();
+            for id in &old_ids {
+                let _ = engine.remove(*id);
+            }
+            changes.removed.extend_from_slice(&old_ids);
+            stats.modified += 1;
+        } else {
+            println!("New:      {}", md_path.display());
+            stats.new += 1;
+        }
+
+        let (frontmatter, chunks) = match chunker.chunk_file(md_path) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Error processing {}: {e}", md_path.display());
+                continue;
+            }
+        };
+
+        let title = frontmatter.as_ref().and_then(|f| f.title.clone());
+        let tags = frontmatter
+            .as_ref()
+            .map(|f| f.tags.clone())
+            .unwrap_or_default();
+        let chunk_total = chunks.len();
+
+        let mut records: Vec<UpdateRecord> = Vec::new();
+        let mut chunk_ids = Vec::new();
+
+        for chunk in chunks {
+            let id = common::generate_id(source, chunk.chunk_index);
+            chunk_ids.push(id);
+            records.push(UpdateRecord {
+                id,
+                text: chunk.text,
+                source: source.clone(),
+                title: title.clone(),
+                tags: tags.clone(),
+                chunk_index: chunk.chunk_index,
+                chunk_total,
+                source_modified_at: *mtime,
+            });
+        }
+
+        if !records.is_empty() {
+            process_records(&records, model.as_ref().unwrap(), &mut engine)?;
+            changes.added.extend(chunk_ids.iter());
+        }
+
+        file_index.update_file(source.clone(), *mtime, *size, chunk_ids);
+    }
+
+    // Process deleted files
     if !deleted_files.is_empty() {
         println!();
         println!("Deleting {} removed files:", deleted_files.len());
@@ -194,28 +226,45 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
                 for id in &meta.chunk_ids {
                     let _ = engine.remove(*id);
                 }
+                changes.removed.extend_from_slice(&meta.chunk_ids);
             }
             file_index.files.remove(path);
             stats.deleted += 1;
         }
     }
 
-    // Checkpoint the storage
-    engine.checkpoint()
+    engine
+        .checkpoint()
         .with_context(|| "Failed to checkpoint database")?;
 
-    // Save updated file index
     file_index::save_file_index(&db_path, &file_index)?;
 
+    // Incremental index update instead of full rebuild
     println!();
-    println!("Rebuilding indexes...");
-
-    // Rebuild HNSW and BM25 indexes
     let config = DbConfig::load(&db_path)?;
-    rebuild_indexes(&db_path, &engine, &config)?;
+    common::update_indexes_incremental(
+        &db_path,
+        &engine,
+        &config,
+        &changes.added,
+        &changes.removed,
+    )?;
+
+    // Notify daemon to reload if running
+    if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {
+        println!("Daemon notified to reload indexes.");
+    }
 
     let elapsed = start.elapsed();
 
+    tracing::info!(
+        new = stats.new,
+        modified = stats.modified,
+        deleted = stats.deleted,
+        unchanged = stats.unchanged,
+        elapsed_secs = elapsed.as_secs_f64(),
+        "Update completed"
+    );
     println!();
     println!("Update completed:");
     println!("  New files:       {}", stats.new);
@@ -233,9 +282,8 @@ fn process_records(
     model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<()> {
-    let max_chars = 8000; // model2vec uses simple tokenization
+    let max_chars = 8000;
 
-    // Prepare texts for embedding (truncate if needed)
     let texts: Vec<String> = records
         .iter()
         .map(|r| {
@@ -251,97 +299,27 @@ fn process_records(
         })
         .collect();
 
-    // Embed batch
-    let embeddings = embed_sorted(model, &texts)
-        .context("Embedding failed")?;
+    let embeddings = common::embed_sorted(model, &texts).context("Embedding failed")?;
 
-    // Insert into storage
     let items: Vec<(u64, &[f32], _, &str)> = records
         .iter()
         .zip(embeddings.iter())
         .map(|(rec, emb)| {
-            let payload = make_payload(
+            let payload = common::make_payload(
                 &rec.source,
                 rec.title.as_deref(),
                 &rec.tags,
                 rec.chunk_index,
                 rec.chunk_total,
+                rec.source_modified_at,
             );
             (rec.id, emb.as_slice(), payload, rec.text.as_str())
         })
         .collect();
 
-    engine.insert_batch(&items)
+    engine
+        .insert_batch(&items)
         .context("Failed to insert batch")?;
 
-    Ok(())
-}
-
-/// Rebuild HNSW and BM25 indexes from storage.
-fn rebuild_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> Result<()> {
-    if engine.is_empty() {
-        println!("No vectors to index, skipping index rebuilding.");
-        return Ok(());
-    }
-
-    // Build HNSW graph
-    let hnsw_config = HnswConfig::builder()
-        .dim(config.dim)
-        .m(config.m)
-        .ef_construction(config.ef_construction)
-        .build()
-        .context("Failed to create HNSW config")?;
-
-    let hnsw_path = path.join("hnsw.bin");
-    let vector_store = engine.vector_store();
-
-    println!("  Building HNSW graph (M={}, ef_construction={})...", config.m, config.ef_construction);
-
-    let pb = make_progress_bar(vector_store.id_map().keys().len() as u64)?;
-
-    let mut hnsw = HnswGraph::new(hnsw_config, CosineDistance);
-    for id in vector_store.id_map().keys() {
-        if is_interrupted() {
-            pb.abandon_with_message("Interrupted during HNSW build");
-            return Ok(());
-        }
-        if let Ok(vec) = vector_store.get(*id) {
-            let _ = hnsw.insert(*id, vec);
-        }
-        pb.inc(1);
-    }
-
-    pb.finish_with_message("HNSW build complete");
-
-    hnsw.save(&hnsw_path)
-        .with_context(|| format!("Failed to save HNSW graph to {}", hnsw_path.display()))?;
-    println!("  HNSW graph saved: {}", hnsw_path.display());
-
-    // Build BM25 index
-    println!("  Building BM25 index...");
-    let bm25_path = path.join("bm25.bin");
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
-    let payload_store = engine.payload_store();
-
-    let pb = make_progress_bar(vector_store.id_map().keys().len() as u64)?;
-
-    for id in vector_store.id_map().keys() {
-        if is_interrupted() {
-            pb.abandon_with_message("Interrupted during BM25 build");
-            return Ok(());
-        }
-        if let Ok(Some(text)) = payload_store.get_text(*id) {
-            bm25.add_document(*id, &text);
-        }
-        pb.inc(1);
-    }
-
-    pb.finish_with_message("BM25 build complete");
-
-    bm25.save(&bm25_path)
-        .with_context(|| format!("Failed to save BM25 index to {}", bm25_path.display()))?;
-    println!("  BM25 index saved: {}", bm25_path.display());
-
-    println!("Index rebuilding completed.");
     Ok(())
 }

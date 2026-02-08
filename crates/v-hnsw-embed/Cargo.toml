@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-v-hnsw-core.workspace = true
 thiserror.workspace = true
 model2vec-rs = "0.1"
 

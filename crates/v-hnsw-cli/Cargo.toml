@@ -1,6 +1,6 @@
 [package]
 name = "v-hnsw-cli"
-description = "CLI tool for v-hnsw vector database"
+description = "v-hnsw vector database CLI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,12 +14,12 @@ path = "src/main.rs"
 # Internal crates
 v-hnsw-core.workspace = true
 v-hnsw-graph.workspace = true
-v-hnsw-distance.workspace = true
 v-hnsw-storage.workspace = true
 v-hnsw-search = { workspace = true, features = ["korean"] }
 v-hnsw-embed.workspace = true
-v-hnsw-tokenizer = { path = "../v-hnsw-tokenizer" }
-v-hnsw-chunk = { path = "../v-hnsw-chunk" }
+
+# Markdown chunking (inline module, replaces v-hnsw-chunk crate)
+pulldown-cmark = "0.13"
 
 # CLI
 clap = { workspace = true, features = ["derive"] }
@@ -30,6 +30,7 @@ serde_json = "1"
 
 # Error handling
 anyhow = "1"
+thiserror = "2"
 
 # Progress bars
 indicatif = "0.17"
@@ -44,11 +45,15 @@ ctrlc = "3.4"
 arrow.workspace = true
 parquet.workspace = true
 
+# Dictionary provisioning (all already in dep tree — zero additional compile)
+ureq = "2"
+flate2 = "1"
+tar = "0.4"
+md5 = "0.8"
+lindera = "2.1"
+
 # Directory walking
 walkdir = "2"
-
-# Cache directory
-directories = "5"
 
 # Logging
 tracing.workspace = true

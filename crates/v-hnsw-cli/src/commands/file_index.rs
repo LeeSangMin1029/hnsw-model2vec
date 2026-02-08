@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -101,21 +101,6 @@ pub fn save_file_index(db_path: &Path, index: &FileIndex) -> Result<()> {
         .with_context(|| format!("Failed to write file index to {}", index_path.display()))?;
 
     Ok(())
-}
-
-/// Get file modification time as Unix timestamp.
-pub fn get_file_mtime(path: &Path) -> Result<u64> {
-    let metadata = std::fs::metadata(path)
-        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
-
-    let mtime = metadata.modified()
-        .with_context(|| format!("Failed to get modification time for {}", path.display()))?;
-
-    let timestamp = mtime.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    Ok(timestamp)
 }
 
 /// Get file size in bytes.

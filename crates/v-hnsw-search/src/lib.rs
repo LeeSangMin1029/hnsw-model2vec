@@ -39,6 +39,8 @@ pub mod hybrid;
 #[cfg(feature = "korean")]
 pub mod korean_tokenizer;
 pub mod reranker;
+#[cfg(feature = "korean")]
+pub mod tokenizer;
 
 #[cfg(test)]
 mod tests;
@@ -50,7 +52,7 @@ pub use fusion::RrfFusion;
 pub use hybrid::{HybridSearcher, SimpleHybridSearcher};
 pub use reranker::{LengthBoostReranker, PassthroughReranker, Reranker};
 #[cfg(feature = "korean")]
-pub use korean_tokenizer::KoreanBm25Tokenizer;
+pub use korean_tokenizer::{KoreanBm25Tokenizer, init_korean_tokenizer};
 
 /// Tokenizer trait for text processing.
 ///

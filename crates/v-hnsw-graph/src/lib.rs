@@ -3,6 +3,10 @@
 //! Hierarchical Navigable Small World graph with concurrent insert/search,
 //! software prefetch, and delta-encoded neighbor compression.
 
+pub mod distance;
+pub mod gpu;
+pub mod quantize;
+
 mod config;
 mod delta;
 mod graph;
@@ -13,7 +17,10 @@ mod select;
 mod store;
 
 pub use config::{HnswConfig, HnswConfigBuilder};
+pub use distance::{AutoDistance, CosineDistance, DotProductDistance, L2Distance};
+pub use gpu::{GpuBackend, GpuContext, GpuDistance};
 pub use graph::HnswGraph;
+pub use quantize::{PqEncoded, PqQuantizer, Sq8Encoded, Sq8Quantizer};
 pub use store::InMemoryVectorStore;
 
 #[cfg(test)]

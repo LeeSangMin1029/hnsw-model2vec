@@ -53,3 +53,6 @@ models/
 # Daemon state
 *.pid
 *.port
+
+# AI tool configs
+.pi/

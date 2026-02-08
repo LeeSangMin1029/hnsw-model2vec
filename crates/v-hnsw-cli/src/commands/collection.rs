@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use v_hnsw_storage::{CollectionInfo, Manifest};
 
-use crate::MetricType;
+use crate::cli::MetricType;
 
 /// Run the collection create subcommand.
 pub fn create(

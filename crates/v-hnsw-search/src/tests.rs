@@ -3,8 +3,7 @@
 use std::collections::HashMap;
 
 use v_hnsw_core::{Payload, PayloadStore, PointId};
-use v_hnsw_distance::L2Distance;
-use v_hnsw_graph::{HnswConfig, HnswGraph};
+use v_hnsw_graph::{HnswConfig, HnswGraph, L2Distance};
 
 use crate::bm25::{Bm25Index, Bm25Params};
 use crate::config::HybridSearchConfig;

@@ -10,7 +10,7 @@ use model2vec_rs::model::StaticModel;
 /// Model2Vec embedding model.
 ///
 /// Uses the `minishlab/potion-multilingual-128M` model, which provides:
-/// - 1024-dimensional embeddings
+/// - 256-dimensional embeddings
 /// - Multilingual support (including Korean)
 /// - Lightweight inference without neural networks
 /// - Automatic download from HuggingFace Hub
@@ -23,7 +23,7 @@ pub struct Model2VecModel {
 impl Model2VecModel {
     /// Create a new Model2VecModel with the default multilingual model.
     ///
-    /// Uses `minishlab/potion-multilingual-128M` which produces 1024-dimensional embeddings.
+    /// Uses `minishlab/potion-multilingual-128M` which produces 256-dimensional embeddings.
     /// Downloads from HuggingFace Hub on first use; cached locally afterwards.
     ///
     /// # Errors
@@ -38,7 +38,7 @@ impl Model2VecModel {
     /// # Arguments
     ///
     /// * `model_name` - HuggingFace model identifier (e.g., "minishlab/potion-multilingual-128M")
-    ///                   or a local directory path.
+    ///   or a local directory path.
     ///
     /// # Errors
     ///
@@ -105,7 +105,7 @@ mod tests {
         let model = Model2VecModel::new();
         assert!(model.is_ok());
         let model = model.unwrap();
-        assert_eq!(model.dim(), 1024);
+        assert_eq!(model.dim(), 256);
         assert_eq!(model.name(), "minishlab/potion-multilingual-128M");
     }
 
@@ -116,7 +116,7 @@ mod tests {
         assert!(result.is_ok());
         let embeddings = result.unwrap();
         assert_eq!(embeddings.len(), 1);
-        assert_eq!(embeddings[0].len(), 1024);
+        assert_eq!(embeddings[0].len(), 256);
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         let embeddings = result.unwrap();
         assert_eq!(embeddings.len(), 3);
         for embedding in embeddings {
-            assert_eq!(embedding.len(), 1024);
+            assert_eq!(embedding.len(), 256);
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
         let result = model.embed_query("test query");
         assert!(result.is_ok());
         let embedding = result.unwrap();
-        assert_eq!(embedding.len(), 1024);
+        assert_eq!(embedding.len(), 256);
     }
 
     #[test]

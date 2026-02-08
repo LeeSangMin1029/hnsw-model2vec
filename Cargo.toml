@@ -1,16 +1,10 @@
 [workspace]
 members = [
     "crates/v-hnsw-core",
-    "crates/v-hnsw-distance",
-    "crates/v-hnsw-quantize",
     "crates/v-hnsw-graph",
-    "crates/v-hnsw-gpu",
     "crates/v-hnsw-storage",
-    "crates/v-hnsw-tokenizer",
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
-    "crates/v-hnsw-chunk",
-    "crates/v-hnsw",
     "crates/v-hnsw-cli",
 ]
 resolver = "2"
@@ -25,15 +19,10 @@ repository = "https://github.com/LeeSangMin1029/v-hnsw"
 [workspace.dependencies]
 # Internal crates
 v-hnsw-core = { path = "crates/v-hnsw-core" }
-v-hnsw-distance = { path = "crates/v-hnsw-distance" }
-v-hnsw-quantize = { path = "crates/v-hnsw-quantize" }
 v-hnsw-graph = { path = "crates/v-hnsw-graph" }
-v-hnsw-gpu = { path = "crates/v-hnsw-gpu" }
 v-hnsw-storage = { path = "crates/v-hnsw-storage" }
-v-hnsw-tokenizer = { path = "crates/v-hnsw-tokenizer" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
-v-hnsw-chunk = { path = "crates/v-hnsw-chunk" }
 
 # Error handling
 thiserror = "2"
@@ -44,21 +33,16 @@ bincode = { version = "2", features = ["serde"] }
 
 # Parallelism
 rayon = "1"
-parking_lot = "0.12"
 crossbeam = "0.8"
 
 # GPU
 cubecl = "0.9"
-ort = "=2.0.0-rc.11"
 
 # Storage
 memmap2 = "0.9"
 crc32fast = "1"
 
 # Tokenizer (Korean)
-lindera = "0.39"
-lindera-tokenizer = "0.39"
-lindera-dictionary = { version = "0.39", features = ["ko-dic"] }
 unicode-normalization = "0.1"
 
 # Logging
@@ -76,6 +60,20 @@ proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 # NOTE: cargo showed bincode 3.0.0, criterion 0.8.1 available
 # bincode 3 used; criterion stays at 0.5 (0.8 has breaking API changes)
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Local: cargo build --profile local -p v-hnsw-cli  (incremental, fast iteration)
+# Deploy: cargo build --release -p v-hnsw-cli       (full optimization)
+[profile.local]
+inherits = "release"
+incremental = true
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 16
 
 [workspace.lints.rust]
 unsafe_code = "warn"
