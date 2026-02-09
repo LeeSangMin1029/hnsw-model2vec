@@ -46,7 +46,7 @@ pub mod tokenizer;
 mod tests;
 
 // Re-exports
-pub use bm25::{Bm25Index, Bm25Params, Posting, PostingList};
+pub use bm25::{Bm25Index, Bm25Params, Bm25Snapshot, Posting, PostingList};
 pub use config::{HybridSearchConfig, HybridSearchConfigBuilder};
 pub use fusion::{ConvexFusion, RrfFusion};
 pub use hybrid::{HybridSearcher, SimpleHybridSearcher};

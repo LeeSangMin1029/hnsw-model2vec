@@ -7,6 +7,8 @@ pub(crate) mod fst_storage;
 mod index;
 mod maxscore;
 mod scorer;
+pub(crate) mod snapshot;
 
 pub use index::{Bm25Index, Posting, PostingList};
 pub use scorer::Bm25Params;
+pub use snapshot::Bm25Snapshot;

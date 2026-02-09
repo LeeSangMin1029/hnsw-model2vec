@@ -40,6 +40,7 @@ cubecl = "0.9"
 
 # Storage
 memmap2 = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
 crc32fast = "1"
 fs2 = "0.4"
 

@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use roaring::RoaringBitmap;
+use roaring::RoaringTreemap;
 use v_hnsw_core::{Payload, PayloadStore, PointId, Result, VhnswError};
 
 use crate::fsst_text::CompressedTextReader;
@@ -27,8 +27,8 @@ pub struct FilePayloadStore {
     text_index: HashMap<PointId, (u64, u32)>,
     /// Secondary index: source path -> set of PointIds
     source_index: HashMap<String, Vec<PointId>>,
-    /// Secondary index: tag -> Roaring Bitmap of PointIds (u32 range)
-    tag_index: HashMap<String, RoaringBitmap>,
+    /// Secondary index: tag -> Roaring Treemap of PointIds (u64)
+    tag_index: HashMap<String, RoaringTreemap>,
     /// In-memory payload cache for WAL buffer
     pending_payloads: HashMap<PointId, Payload>,
     /// In-memory text cache for WAL buffer
@@ -125,10 +125,9 @@ impl FilePayloadStore {
             source_points.push(id);
         }
 
-        // Update tag index (Roaring Bitmap)
-        let id32 = id as u32;
+        // Update tag index (Roaring Treemap — u64 safe)
         for tag in &payload.tags {
-            self.tag_index.entry(tag.clone()).or_default().insert(id32);
+            self.tag_index.entry(tag.clone()).or_default().insert(id);
         }
 
         Ok(())
@@ -154,10 +153,9 @@ impl FilePayloadStore {
             source_points.push(id);
         }
 
-        // Update tag index (Roaring Bitmap)
-        let id32 = id as u32;
+        // Update tag index (Roaring Treemap — u64 safe)
         for tag in &payload.tags {
-            self.tag_index.entry(tag.clone()).or_default().insert(id32);
+            self.tag_index.entry(tag.clone()).or_default().insert(id);
         }
 
         self.pending_payloads.insert(id, payload);
@@ -200,19 +198,19 @@ impl FilePayloadStore {
     pub fn points_by_tag(&self, tag: &str) -> Vec<PointId> {
         self.tag_index
             .get(tag)
-            .map(|bm| bm.iter().map(|v| v as PointId).collect())
+            .map(|bm| bm.iter().collect())
             .unwrap_or_default()
     }
 
     /// Get all point IDs matching ALL given tags (AND logic).
     ///
-    /// Uses Roaring Bitmap intersection for efficient set operations.
+    /// Uses Roaring Treemap intersection for efficient set operations.
     pub fn points_by_tags(&self, tags: &[String]) -> Vec<PointId> {
         if tags.is_empty() {
             return Vec::new();
         }
 
-        let mut result: Option<RoaringBitmap> = None;
+        let mut result: Option<RoaringTreemap> = None;
 
         for tag in tags {
             if let Some(bitmap) = self.tag_index.get(tag) {
@@ -230,7 +228,7 @@ impl FilePayloadStore {
         }
 
         result
-            .map(|bm| bm.iter().map(|v| v as PointId).collect())
+            .map(|bm| bm.iter().collect())
             .unwrap_or_default()
     }
 
@@ -262,10 +260,9 @@ impl FilePayloadStore {
             points.retain(|&pid| pid != id);
         }
 
-        // Remove from tag index (Roaring Bitmap)
-        let id32 = id as u32;
+        // Remove from tag index (Roaring Treemap)
         for bitmap in self.tag_index.values_mut() {
-            bitmap.remove(id32);
+            bitmap.remove(id);
         }
     }
 
@@ -300,12 +297,13 @@ impl FilePayloadStore {
         Ok(())
     }
 
-    /// Save tag index to disk using Roaring native serialization.
+    /// Save tag index to disk using Roaring Treemap serialization.
     fn save_tag_index(&self) -> Result<()> {
         let tag_idx_path = self.payload_path.with_file_name("tag_index.roaring");
 
-        // Format: [num_tags: u32] [tag_name_len: u32, tag_name: bytes, bitmap_len: u32, bitmap: bytes]*
+        // Format v2: [magic: u32=0x524D4150] [num_tags: u32] [tag_name_len: u32, tag_name: bytes, bitmap_len: u32, bitmap: bytes]*
         let mut buf = Vec::new();
+        buf.extend_from_slice(&TREEMAP_MAGIC.to_le_bytes());
         let num_tags = self.tag_index.len() as u32;
         buf.extend_from_slice(&num_tags.to_le_bytes());
 
@@ -316,14 +314,14 @@ impl FilePayloadStore {
 
             let mut bm_buf = Vec::new();
             bitmap.serialize_into(&mut bm_buf)
-                .map_err(|e| VhnswError::Payload(format!("failed to serialize bitmap: {e}")))?;
+                .map_err(|e| VhnswError::Payload(format!("failed to serialize treemap: {e}")))?;
             buf.extend_from_slice(&(bm_buf.len() as u32).to_le_bytes());
             buf.extend_from_slice(&bm_buf);
         }
 
         std::fs::write(tag_idx_path, buf)?;
 
-        // Remove old format if exists
+        // Remove old formats
         let old_path = self.payload_path.with_file_name("tag_index.dat");
         let _ = std::fs::remove_file(old_path);
 
@@ -373,20 +371,20 @@ impl FilePayloadStore {
         Ok(())
     }
 
-    /// Load tag index from disk (Roaring format, with legacy .dat migration).
+    /// Load tag index from disk (Treemap format, with auto-migration from old formats).
     fn load_tag_index(&mut self) -> Result<()> {
         let roaring_path = self.payload_path.with_file_name("tag_index.roaring");
-        let legacy_path = self.payload_path.with_file_name("tag_index.dat");
 
         if roaring_path.exists() {
-            // Load new Roaring format
             let data = std::fs::read(&roaring_path)?;
-            self.tag_index = deserialize_roaring_tag_index(&data)?;
-        } else if legacy_path.exists() {
-            // Rebuild from payloads (legacy format migration)
-            self.rebuild_tag_index()?;
-            // Save in new format
-            self.save_tag_index()?;
+            if is_treemap_format(&data) {
+                self.tag_index = deserialize_treemap_tag_index(&data)?;
+            } else {
+                // Old RoaringBitmap (u32) format — rebuild with correct u64 IDs
+                tracing::info!("Migrating tag index from u32 to u64 format");
+                self.rebuild_tag_index()?;
+                self.save_tag_index()?;
+            }
         } else {
             self.rebuild_tag_index()?;
         }
@@ -394,14 +392,13 @@ impl FilePayloadStore {
         Ok(())
     }
 
-    /// Rebuild tag index from payload index (used during migration or if tag index is missing).
+    /// Rebuild tag index from payload index.
     fn rebuild_tag_index(&mut self) -> Result<()> {
         self.tag_index.clear();
         for (&id, &(offset, length)) in &self.payload_index {
             if let Ok(Some(payload)) = self.read_payload_at(offset, length) {
-                let id32 = id as u32;
                 for tag in &payload.tags {
-                    self.tag_index.entry(tag.clone()).or_default().insert(id32);
+                    self.tag_index.entry(tag.clone()).or_default().insert(id);
                 }
             }
         }
@@ -492,14 +489,30 @@ impl PayloadStore for FilePayloadStore {
     }
 }
 
-/// Deserialize Roaring tag index from bytes.
-fn deserialize_roaring_tag_index(data: &[u8]) -> Result<HashMap<String, RoaringBitmap>> {
+/// Magic number for RoaringTreemap format (u64-safe).
+const TREEMAP_MAGIC: u32 = 0x524D_4150; // "RMAP"
+
+/// Check if data starts with treemap magic.
+fn is_treemap_format(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    magic == TREEMAP_MAGIC
+}
+
+/// Deserialize Roaring Treemap tag index from bytes (v2 format with magic).
+fn deserialize_treemap_tag_index(data: &[u8]) -> Result<HashMap<String, RoaringTreemap>> {
     use std::io::Cursor;
 
     let mut cursor = Cursor::new(data);
+    let mut buf4 = [0u8; 4];
+
+    // Skip magic
+    std::io::Read::read_exact(&mut cursor, &mut buf4)?;
+
     let mut tag_index = HashMap::new();
 
-    let mut buf4 = [0u8; 4];
     std::io::Read::read_exact(&mut cursor, &mut buf4)?;
     let num_tags = u32::from_le_bytes(buf4) as usize;
 
@@ -512,13 +525,13 @@ fn deserialize_roaring_tag_index(data: &[u8]) -> Result<HashMap<String, RoaringB
         let tag = String::from_utf8(tag_bytes)
             .map_err(|e| VhnswError::Payload(format!("invalid UTF-8 in tag: {e}")))?;
 
-        // Read bitmap
+        // Read treemap
         std::io::Read::read_exact(&mut cursor, &mut buf4)?;
         let bm_len = u32::from_le_bytes(buf4) as usize;
         let mut bm_data = vec![0u8; bm_len];
         std::io::Read::read_exact(&mut cursor, &mut bm_data)?;
-        let bitmap = RoaringBitmap::deserialize_from(&bm_data[..])
-            .map_err(|e| VhnswError::Payload(format!("failed to deserialize bitmap: {e}")))?;
+        let bitmap = RoaringTreemap::deserialize_from(&bm_data[..])
+            .map_err(|e| VhnswError::Payload(format!("failed to deserialize treemap: {e}")))?;
 
         tag_index.insert(tag, bitmap);
     }

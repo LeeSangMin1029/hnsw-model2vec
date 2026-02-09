@@ -11,6 +11,8 @@ v-hnsw-core.workspace = true
 v-hnsw-graph.workspace = true
 serde = { workspace = true, features = ["derive"] }
 bincode.workspace = true
+bytemuck.workspace = true
+memmap2.workspace = true
 fst = "0.4"
 lindera = { version = "2.1", optional = true }
 unicode-normalization = { workspace = true, optional = true }

@@ -7,8 +7,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use v_hnsw_embed::EmbeddingModel;
-
 use super::daemon::DaemonState;
 use super::{EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchParams};
 
@@ -78,7 +76,7 @@ pub(crate) fn handle_client(
             let params: EmbedParams =
                 serde_json::from_value(request.params).context("Invalid embed params")?;
 
-            match state.embed_model.embed(&params.texts.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
+            match state.embed(&params.texts.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
                 Ok(embeddings) => JsonRpcResponse {
                     id: request.id,
                     result: Some(serde_json::json!({"embeddings": embeddings})),

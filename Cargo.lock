@@ -5270,8 +5270,10 @@ name = "v-hnsw-graph"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bytemuck",
  "criterion",
  "cubecl",
+ "memmap2",
  "proptest",
  "rayon",
  "tracing",
@@ -5283,8 +5285,10 @@ name = "v-hnsw-search"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bytemuck",
  "fst",
  "lindera",
+ "memmap2",
  "proptest",
  "serde",
  "serde_json",

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, PayloadStore, PointId, VectorStore};
-use v_hnsw_graph::{DotProductDistance, HnswConfig, HnswGraph, L2Distance, NormalizedCosineDistance};
+use v_hnsw_graph::{DotProductDistance, HnswConfig, HnswGraph, HnswSnapshot, L2Distance, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::StorageEngine;
 
@@ -48,19 +48,21 @@ pub fn run(path: PathBuf) -> Result<()> {
 
     let payload_store = engine.payload_store();
 
+    let hnsw_snap_path = path.join("hnsw.snap");
+
     // Parallel HNSW + BM25 build
     std::thread::scope(|s| -> Result<()> {
         let hnsw_handle = s.spawn(|| -> Result<()> {
             match config.metric.as_str() {
-                "cosine" => build_hnsw(hnsw_config, NormalizedCosineDistance, vector_store, &ids, &hnsw_path),
-                "l2" => build_hnsw(hnsw_config, L2Distance, vector_store, &ids, &hnsw_path),
-                "dot" => build_hnsw(hnsw_config, DotProductDistance, vector_store, &ids, &hnsw_path),
+                "cosine" => build_hnsw(hnsw_config, NormalizedCosineDistance, vector_store, &ids, &hnsw_path, &hnsw_snap_path),
+                "l2" => build_hnsw(hnsw_config, L2Distance, vector_store, &ids, &hnsw_path, &hnsw_snap_path),
+                "dot" => build_hnsw(hnsw_config, DotProductDistance, vector_store, &ids, &hnsw_path, &hnsw_snap_path),
                 other => anyhow::bail!("Unknown metric: {other}"),
             }
         });
 
         let bm25_handle = s.spawn(|| -> Result<()> {
-            build_bm25(payload_store, &ids, &bm25_path)
+            build_bm25(payload_store, &ids, &bm25_path, &path)
         });
 
         hnsw_handle.join().expect("HNSW thread panicked")?;
@@ -98,17 +100,25 @@ fn build_hnsw<D: DistanceMetric>(
     store: &dyn VectorStore,
     ids: &[u64],
     path: &std::path::Path,
+    snap_path: &std::path::Path,
 ) -> Result<()> {
     let mut hnsw = HnswGraph::new(config, distance);
     for &id in ids {
         let _ = hnsw.build_insert(store, id);
     }
     hnsw.save(path).with_context(|| "failed to save HNSW")?;
+    HnswSnapshot::save(&hnsw, snap_path).with_context(|| "failed to save HNSW snapshot")?;
+    println!("  HNSW snapshot: {}", snap_path.display());
     Ok(())
 }
 
 /// Build BM25 index from payload text.
-fn build_bm25(payload_store: &dyn PayloadStore, ids: &[u64], path: &std::path::Path) -> Result<()> {
+fn build_bm25(
+    payload_store: &dyn PayloadStore,
+    ids: &[u64],
+    path: &std::path::Path,
+    db_dir: &std::path::Path,
+) -> Result<()> {
     let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let mut text_count = 0;
     for &id in ids {
@@ -120,6 +130,7 @@ fn build_bm25(payload_store: &dyn PayloadStore, ids: &[u64], path: &std::path::P
         }
     }
     bm25.save(path).with_context(|| "failed to save BM25")?;
-    println!("  BM25 built: {} documents", text_count);
+    bm25.save_snapshot(db_dir).with_context(|| "failed to save BM25 snapshot")?;
+    println!("  BM25 built: {} documents (+ snapshot)", text_count);
     Ok(())
 }

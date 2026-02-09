@@ -10,6 +10,25 @@ use crate::distance::prefetch_vector;
 use crate::graph::HnswGraph;
 use crate::node::Node;
 
+/// Abstract graph node access for search.
+///
+/// Implemented by `HashMap<PointId, Node>` (heap graph) and `HnswSnapshot` (mmap).
+pub trait NodeGraph {
+    /// Get the neighbor list at a given layer. Returns `None` if node doesn't exist.
+    fn neighbors(&self, id: PointId, layer: LayerId) -> Option<&[PointId]>;
+    /// Check if a node is deleted (or doesn't exist).
+    fn is_deleted(&self, id: PointId) -> bool;
+}
+
+impl NodeGraph for HashMap<PointId, Node> {
+    fn neighbors(&self, id: PointId, layer: LayerId) -> Option<&[PointId]> {
+        self.get(&id).map(|n| n.neighbors_at(layer))
+    }
+    fn is_deleted(&self, id: PointId) -> bool {
+        self.get(&id).is_none_or(|n| n.deleted)
+    }
+}
+
 /// Reusable search buffers to avoid per-query allocations.
 struct SearchBuffer {
     visited: HashSet<PointId>,
@@ -90,9 +109,9 @@ pub(crate) fn search_ext<D: DistanceMetric>(
         graph.entry_point, graph.max_layer, query, k, ef)
 }
 
-/// Internal search implementation with decomposed parameters.
-fn search_with_store<D: DistanceMetric>(
-    nodes: &HashMap<PointId, Node>,
+/// Internal search implementation, generic over node access.
+pub(crate) fn search_with_store<D: DistanceMetric, N: NodeGraph>(
+    nodes: &N,
     store: &dyn VectorStore,
     distance: &D,
     config: &crate::config::HnswConfig,
@@ -144,8 +163,8 @@ fn search_with_store<D: DistanceMetric>(
 /// Greedy descent: find the single closest node at a given layer.
 ///
 /// Shared by both search and insert paths.
-pub(crate) fn greedy_closest<D: DistanceMetric>(
-    nodes: &HashMap<PointId, Node>,
+pub(crate) fn greedy_closest<D: DistanceMetric, N: NodeGraph>(
+    nodes: &N,
     store: &dyn VectorStore,
     distance: &D,
     query: &[f32],
@@ -155,17 +174,13 @@ pub(crate) fn greedy_closest<D: DistanceMetric>(
 ) -> v_hnsw_core::Result<(PointId, f32)> {
     loop {
         let mut changed = false;
-        let neighbors = match nodes.get(&cur_id) {
-            Some(node) => node.neighbors_at(layer),
+        let neighbors = match nodes.neighbors(cur_id, layer) {
+            Some(n) => n,
             None => break,
         };
 
         for &neighbor_id in neighbors {
-            let node = match nodes.get(&neighbor_id) {
-                Some(n) => n,
-                None => continue,
-            };
-            if node.deleted {
+            if nodes.is_deleted(neighbor_id) {
                 continue;
             }
             let vec = store.get(neighbor_id)?;
@@ -194,8 +209,8 @@ pub(crate) fn greedy_closest<D: DistanceMetric>(
 /// distance for the current one.
 ///
 /// Reuses thread-local buffers to avoid per-query HashSet/BinaryHeap allocations.
-pub(crate) fn search_layer<D: DistanceMetric>(
-    nodes: &HashMap<PointId, Node>,
+pub(crate) fn search_layer<D: DistanceMetric, N: NodeGraph>(
+    nodes: &N,
     store: &dyn VectorStore,
     distance: &D,
     query: &[f32],
@@ -211,8 +226,7 @@ pub(crate) fn search_layer<D: DistanceMetric>(
             if buf.visited.insert(id) {
                 buf.candidates.push(Reverse(HeapEntry { id, dist }));
                 // Only add non-deleted nodes to results
-                let is_deleted = nodes.get(&id).is_some_and(|n| n.deleted);
-                if !is_deleted {
+                if !nodes.is_deleted(id) {
                     buf.results.push(HeapEntry { id, dist });
                 }
             }
@@ -229,8 +243,8 @@ pub(crate) fn search_layer<D: DistanceMetric>(
             }
 
             // Get neighbor list for this candidate at the given layer
-            let neighbor_ids = match nodes.get(&closest.id) {
-                Some(node) => node.neighbors_at(layer),
+            let neighbor_ids = match nodes.neighbors(closest.id, layer) {
+                Some(n) => n,
                 None => continue,
             };
 
@@ -242,10 +256,7 @@ pub(crate) fn search_layer<D: DistanceMetric>(
                 }
 
                 // Check if this node is deleted
-                let is_deleted = nodes
-                    .get(&neighbor_id)
-                    .is_none_or(|n| n.deleted);
-                if is_deleted {
+                if nodes.is_deleted(neighbor_id) {
                     continue;
                 }
 

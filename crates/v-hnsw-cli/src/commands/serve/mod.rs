@@ -183,6 +183,9 @@ pub fn run(db_path: PathBuf, port: u16, timeout_secs: u64, background: bool) -> 
             break;
         }
 
+        // Unload embedding model if idle to free ~488 MB
+        state.maybe_unload_model();
+
         match listener.accept() {
             Ok((stream, addr)) => {
                 eprintln!("[daemon] Connection from {}", addr);

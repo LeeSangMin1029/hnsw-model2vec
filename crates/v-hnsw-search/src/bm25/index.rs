@@ -420,6 +420,27 @@ impl<T: Tokenizer> Bm25Index<T> {
         Ok(())
     }
 
+    /// Save a BM25 snapshot file for mmap-based search.
+    ///
+    /// Requires HashMap mode (fresh build, not loaded from FST).
+    /// The directory must already contain `bm25_terms.fst` (from `save()`).
+    pub fn save_snapshot(&self, dir: &Path) -> Result<(), VhnswError> {
+        let TermStorage::HashMap(postings) = &self.storage else {
+            return Err(VhnswError::Storage(std::io::Error::other(
+                "snapshot requires HashMap mode (not FST)",
+            )));
+        };
+        super::snapshot::write_bm25_snap(
+            dir,
+            postings,
+            &self.doc_lengths,
+            self.total_docs,
+            self.total_length,
+            self.max_doc_id,
+            self.params,
+        )
+    }
+
     /// Load index from file. Prefers FST format if available, falls back to bincode.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
         // Try FST format first (compact, faster load)
