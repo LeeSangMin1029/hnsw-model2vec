@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, VectorIndex, VectorStore};
-use v_hnsw_graph::{CosineDistance, DotProductDistance, HnswConfig, HnswGraph, L2Distance};
+use v_hnsw_graph::{DotProductDistance, HnswConfig, HnswGraph, L2Distance, NormalizedCosineDistance};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -23,12 +23,12 @@ pub fn run(path: PathBuf, queries: usize, k: usize) -> Result<()> {
 
     // Execute benchmark based on metric
     match config.metric.as_str() {
-        "cosine" => bench_with_metric::<CosineDistance>(
+        "cosine" => bench_with_metric::<NormalizedCosineDistance>(
             &path,
             &config,
             queries,
             k,
-            CosineDistance,
+            NormalizedCosineDistance,
         )?,
         "l2" => bench_with_metric::<L2Distance>(
             &path,

@@ -34,13 +34,11 @@ impl PostingList {
     }
 
     /// Add a document to the posting list.
+    ///
+    /// Caller must ensure no duplicate `doc_id` exists (e.g. by calling
+    /// `remove_document` first). `Bm25Index::add_document` already does this.
     pub fn add(&mut self, doc_id: PointId, tf: u32) {
-        // Check if document already exists
-        if let Some(posting) = self.postings.iter_mut().find(|p| p.doc_id == doc_id) {
-            posting.tf = tf;
-        } else {
-            self.postings.push(Posting { doc_id, tf });
-        }
+        self.postings.push(Posting { doc_id, tf });
     }
 
     /// Remove a document from the posting list.
@@ -73,13 +71,33 @@ struct Bm25IndexData<T> {
     params: Bm25Params,
 }
 
+/// Internal term storage: mutable HashMap for building, or compact FST for search.
+enum TermStorage {
+    /// Mutable HashMap storage (used during index building).
+    HashMap(HashMap<String, PostingList>),
+    /// Compact FST storage (used for search after loading).
+    Fst {
+        map: fst::Map<Vec<u8>>,
+        postings: Vec<PostingList>,
+    },
+}
+
+impl std::fmt::Debug for TermStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HashMap(m) => write!(f, "HashMap({} terms)", m.len()),
+            Self::Fst { postings, .. } => write!(f, "Fst({} terms)", postings.len()),
+        }
+    }
+}
+
 /// BM25 inverted index for sparse text search.
 #[derive(Debug)]
 pub struct Bm25Index<T: Tokenizer> {
     /// The tokenizer used for text processing.
     tokenizer: T,
-    /// Inverted index: term -> posting list.
-    postings: HashMap<String, PostingList>,
+    /// Term dictionary + posting lists.
+    storage: TermStorage,
     /// Document lengths (number of tokens).
     doc_lengths: HashMap<PointId, u32>,
     /// Sum of all document lengths (for computing average).
@@ -88,6 +106,8 @@ pub struct Bm25Index<T: Tokenizer> {
     total_docs: usize,
     /// BM25 scoring parameters.
     params: Bm25Params,
+    /// Cached maximum document ID (for Vec accumulator sizing).
+    max_doc_id: u64,
 }
 
 impl<T: Tokenizer> Bm25Index<T> {
@@ -95,11 +115,12 @@ impl<T: Tokenizer> Bm25Index<T> {
     pub fn new(tokenizer: T) -> Self {
         Self {
             tokenizer,
-            postings: HashMap::new(),
+            storage: TermStorage::HashMap(HashMap::new()),
             doc_lengths: HashMap::new(),
             total_length: 0,
             total_docs: 0,
             params: Bm25Params::default(),
+            max_doc_id: 0,
         }
     }
 
@@ -107,11 +128,12 @@ impl<T: Tokenizer> Bm25Index<T> {
     pub fn with_params(tokenizer: T, k1: f32, b: f32) -> Self {
         Self {
             tokenizer,
-            postings: HashMap::new(),
+            storage: TermStorage::HashMap(HashMap::new()),
             doc_lengths: HashMap::new(),
             total_length: 0,
             total_docs: 0,
             params: Bm25Params::new(k1, b),
+            max_doc_id: 0,
         }
     }
 
@@ -143,10 +165,18 @@ impl<T: Tokenizer> Bm25Index<T> {
     ///
     /// If a document with the same ID already exists, it will be replaced.
     pub fn add_document(&mut self, doc_id: PointId, text: &str) {
+        if !matches!(self.storage, TermStorage::HashMap(_)) {
+            return; // FST mode is read-only
+        }
+
         // Remove existing document if present
         if self.doc_lengths.contains_key(&doc_id) {
             self.remove_document(doc_id);
         }
+
+        let TermStorage::HashMap(postings) = &mut self.storage else {
+            return;
+        };
 
         // Tokenize the text
         let tokens = self.tokenizer.tokenize(text);
@@ -160,19 +190,26 @@ impl<T: Tokenizer> Bm25Index<T> {
 
         // Update posting lists
         for (term, tf) in term_freqs {
-            self.postings.entry(term).or_default().add(doc_id, tf);
+            postings.entry(term).or_default().add(doc_id, tf);
         }
 
         // Update document metadata
         self.doc_lengths.insert(doc_id, doc_len);
         self.total_length += doc_len as u64;
         self.total_docs += 1;
+        if doc_id > self.max_doc_id {
+            self.max_doc_id = doc_id;
+        }
     }
 
     /// Remove a document from the index.
     ///
     /// Returns `true` if the document was found and removed.
     pub fn remove_document(&mut self, doc_id: PointId) -> bool {
+        let TermStorage::HashMap(postings) = &mut self.storage else {
+            return false; // FST mode is read-only
+        };
+
         let doc_len = match self.doc_lengths.remove(&doc_id) {
             Some(len) => len,
             None => return false,
@@ -183,18 +220,16 @@ impl<T: Tokenizer> Bm25Index<T> {
         self.total_docs = self.total_docs.saturating_sub(1);
 
         // Remove from all posting lists
-        // Keep track of empty terms to remove later
         let mut empty_terms = Vec::new();
-        for (term, posting_list) in &mut self.postings {
+        for (term, posting_list) in postings.iter_mut() {
             posting_list.remove(doc_id);
             if posting_list.postings.is_empty() {
                 empty_terms.push(term.clone());
             }
         }
 
-        // Remove empty posting lists
         for term in empty_terms {
-            self.postings.remove(&term);
+            postings.remove(&term);
         }
 
         true
@@ -203,75 +238,164 @@ impl<T: Tokenizer> Bm25Index<T> {
     /// Search for documents matching the query.
     ///
     /// Returns documents sorted by BM25 score in descending order.
+    /// Uses MaxScore pruning for 3+ term queries (FST mode),
+    /// Vec accumulator (cache-friendly) otherwise.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(PointId, f32)> {
         if self.total_docs == 0 {
             return Vec::new();
         }
-
         let query_tokens = self.tokenizer.tokenize(query);
-        if query_tokens.is_empty() {
+        let terms = self.resolve_terms(&query_tokens);
+        if terms.is_empty() {
             return Vec::new();
         }
 
-        let avg_doc_len = self.avg_doc_length();
-
-        // Collect all matching documents with scores
-        let mut scores: HashMap<PointId, f32> = HashMap::new();
-
-        for term in &query_tokens {
-            if let Some(posting_list) = self.postings.get(term) {
-                let df = posting_list.df();
-                for posting in &posting_list.postings {
-                    let doc_len = self
-                        .doc_lengths
-                        .get(&posting.doc_id)
-                        .copied()
-                        .unwrap_or(0);
-                    let score =
-                        self.params
-                            .score(posting.tf, df, doc_len, avg_doc_len, self.total_docs);
-                    *scores.entry(posting.doc_id).or_insert(0.0) += score;
-                }
-            }
+        // MaxScore for 3+ terms on FST (sorted posting lists required)
+        if terms.len() >= 3 && matches!(self.storage, TermStorage::Fst { .. }) {
+            return super::maxscore::maxscore_search(
+                &terms,
+                limit,
+                &self.params,
+                &self.doc_lengths,
+                self.avg_doc_length(),
+            );
         }
 
-        // Sort by score descending
-        let mut results: Vec<(PointId, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
-
-        results
+        self.accumulate_and_rank(&terms, limit)
     }
 
     /// Get the document frequency for a term.
     pub fn document_frequency(&self, term: &str) -> u32 {
-        self.postings.get(term).map(|pl| pl.df()).unwrap_or(0)
+        self.get_posting_list(term).map(|pl| pl.df()).unwrap_or(0)
     }
 
     /// Get the posting list for a term.
     pub fn get_posting_list(&self, term: &str) -> Option<&PostingList> {
-        self.postings.get(term)
+        match &self.storage {
+            TermStorage::HashMap(map) => map.get(term),
+            TermStorage::Fst { map, postings } => {
+                map.get(term.as_bytes()).and_then(|ord| postings.get(ord as usize))
+            }
+        }
     }
 
-    /// Save index to file (bincode format).
+    /// Score only the specified documents for the query (Dense-Guided shortcut).
     ///
-    /// # Errors
+    /// For hybrid search: HNSW provides candidate doc IDs, BM25 scores only those.
+    /// O(|doc_ids| * |terms|) instead of O(N * |terms|). Thread-safe (&self).
+    pub fn score_documents(&self, query: &str, doc_ids: &[PointId]) -> Vec<(PointId, f32)> {
+        if self.total_docs == 0 || doc_ids.is_empty() {
+            return Vec::new();
+        }
+        let query_tokens = self.tokenizer.tokenize(query);
+        let terms = self.resolve_terms(&query_tokens);
+        if terms.is_empty() {
+            return Vec::new();
+        }
+
+        let avg_doc_len = self.avg_doc_length();
+        let mut results = Vec::with_capacity(doc_ids.len());
+
+        for &doc_id in doc_ids {
+            let doc_len = self.doc_lengths.get(&doc_id).copied().unwrap_or(0);
+            let mut score = 0.0f32;
+            for &(pl, idf) in &terms {
+                // Binary search in sorted posting list (O(log df) per term)
+                if let Ok(idx) = pl.postings.binary_search_by_key(&doc_id, |p| p.doc_id) {
+                    score += idf * self.params.tf_norm(pl.postings[idx].tf, doc_len, avg_doc_len);
+                }
+            }
+            if score > 0.0 {
+                results.push((doc_id, score));
+            }
+        }
+        results
+    }
+
+    // -- Query resolution & scoring utilities --
+
+    /// Resolve query tokens to posting lists with pre-computed IDF weights.
     ///
-    /// Returns `VhnswError::Storage` if serialization or file I/O fails.
+    /// Reusable by `search()`, `score_documents()`, and `MaxScore`.
+    fn resolve_terms<'a>(&'a self, tokens: &[String]) -> Vec<(&'a PostingList, f32)> {
+        tokens
+            .iter()
+            .filter_map(|term| {
+                self.get_posting_list(term)
+                    .map(|pl| (pl, self.params.idf(pl.df(), self.total_docs)))
+            })
+            .collect()
+    }
+
+    /// Vec accumulator ceiling: 256K entries = 1MB max allocation.
+    const MAX_VEC_ACCUMULATOR_ID: u64 = 256_000;
+
+    /// Accumulate BM25 scores and return top-k results.
+    ///
+    /// Chooses Vec (cache-friendly) or HashMap (sparse IDs) accumulator
+    /// based on `max_doc_id`. All state is function-local (thread-safe).
+    fn accumulate_and_rank(
+        &self,
+        terms: &[(&PostingList, f32)],
+        limit: usize,
+    ) -> Vec<(PointId, f32)> {
+        let avg_doc_len = self.avg_doc_length();
+
+        if self.max_doc_id <= Self::MAX_VEC_ACCUMULATOR_ID {
+            let len = self.max_doc_id as usize + 1;
+            let mut scores = vec![0.0f32; len];
+            let mut touched: Vec<PointId> = Vec::with_capacity(256);
+
+            for &(pl, idf) in terms {
+                for p in &pl.postings {
+                    let id = p.doc_id as usize;
+                    if id < len {
+                        if scores[id] == 0.0 {
+                            touched.push(p.doc_id);
+                        }
+                        let doc_len = self.doc_lengths.get(&p.doc_id).copied().unwrap_or(0);
+                        scores[id] += idf * self.params.tf_norm(p.tf, doc_len, avg_doc_len);
+                    }
+                }
+            }
+
+            top_k_from_vec(&scores, touched, limit)
+        } else {
+            let mut score_map: HashMap<PointId, f32> = HashMap::new();
+            for &(pl, idf) in terms {
+                for p in &pl.postings {
+                    let doc_len = self.doc_lengths.get(&p.doc_id).copied().unwrap_or(0);
+                    *score_map.entry(p.doc_id).or_insert(0.0) +=
+                        idf * self.params.tf_norm(p.tf, doc_len, avg_doc_len);
+                }
+            }
+            top_k_from_map(score_map, limit)
+        }
+    }
+
+    /// Save index to file (bincode + FST formats).
+    ///
+    /// Writes bincode to `path` for backward compatibility, and FST files
+    /// to the parent directory for compact read-only loading.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), VhnswError> {
         use std::io::Write;
 
-        // Convert HashMap to Vec for bincode 2.x compatibility
+        let TermStorage::HashMap(postings) = &self.storage else {
+            return Err(VhnswError::Storage(std::io::Error::other(
+                "cannot save FST-mode index as bincode",
+            )));
+        };
+
+        // Write bincode format (backward compat)
         let data = Bm25IndexData {
             tokenizer: self.tokenizer.clone(),
-            postings: self.postings.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            postings: postings.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             doc_lengths: self.doc_lengths.iter().map(|(k, v)| (*k, *v)).collect(),
             total_length: self.total_length,
             total_docs: self.total_docs,
             params: self.params,
         };
 
-        // Serialize to Vec first to avoid any buffering issues
         let bytes = bincode::encode_to_vec(&data, bincode::config::standard()).map_err(|e| {
             VhnswError::Storage(std::io::Error::other(format!("serialize failed: {e}")))
         })?;
@@ -279,15 +403,50 @@ impl<T: Tokenizer> Bm25Index<T> {
         let mut file = std::fs::File::create(path.as_ref())?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+
+        // Also write FST format
+        if let Some(dir) = path.as_ref().parent() {
+            super::fst_storage::save_fst(
+                dir,
+                &self.tokenizer,
+                postings,
+                &self.doc_lengths,
+                self.total_length,
+                self.total_docs,
+                self.params,
+            )?;
+        }
+
         Ok(())
     }
 
-    /// Load index from file.
-    ///
-    /// # Errors
-    ///
-    /// Returns `VhnswError::Storage` if deserialization or file I/O fails.
+    /// Load index from file. Prefers FST format if available, falls back to bincode.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
+        // Try FST format first (compact, faster load)
+        if let Some(dir) = path.as_ref().parent() {
+            if super::fst_storage::fst_exists(dir) {
+                let fst = super::fst_storage::load_fst::<T>(dir)?;
+                return Ok(Self {
+                    tokenizer: fst.tokenizer,
+                    storage: TermStorage::Fst {
+                        map: fst.fst_map,
+                        postings: fst.postings,
+                    },
+                    doc_lengths: fst.doc_lengths,
+                    total_length: fst.total_length,
+                    total_docs: fst.total_docs,
+                    params: fst.params,
+                    max_doc_id: fst.max_doc_id,
+                });
+            }
+        }
+
+        // Fall back to bincode
+        Self::load_bincode(path)
+    }
+
+    /// Load from legacy bincode format.
+    fn load_bincode(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
         use std::io::Read;
 
         let mut file = std::fs::File::open(path.as_ref())?;
@@ -299,16 +458,41 @@ impl<T: Tokenizer> Bm25Index<T> {
                 VhnswError::Storage(std::io::Error::other(format!("deserialize failed: {e}")))
             })?;
 
-        // Convert Vec back to HashMap
+        let doc_lengths: HashMap<PointId, u32> = data.doc_lengths.into_iter().collect();
+        let max_doc_id = doc_lengths.keys().max().copied().unwrap_or(0);
+
         Ok(Self {
             tokenizer: data.tokenizer,
-            postings: data.postings.into_iter().collect(),
-            doc_lengths: data.doc_lengths.into_iter().collect(),
+            storage: TermStorage::HashMap(data.postings.into_iter().collect()),
+            doc_lengths,
             total_length: data.total_length,
             total_docs: data.total_docs,
             params: data.params,
+            max_doc_id,
         })
     }
+}
+
+// -- Top-k extraction utilities (free functions, no &self needed) --
+
+/// Extract top-k results from a Vec accumulator.
+/// Only sorts the touched subset (typically hundreds, not all docs).
+fn top_k_from_vec(scores: &[f32], touched: Vec<PointId>, limit: usize) -> Vec<(PointId, f32)> {
+    let mut results: Vec<(PointId, f32)> = touched
+        .into_iter()
+        .map(|id| (id, scores[id as usize]))
+        .collect();
+    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    results.truncate(limit);
+    results
+}
+
+/// Extract top-k results from a HashMap accumulator.
+fn top_k_from_map(scores: HashMap<PointId, f32>, limit: usize) -> Vec<(PointId, f32)> {
+    let mut results: Vec<(PointId, f32)> = scores.into_iter().collect();
+    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    results.truncate(limit);
+    results
 }
 
 #[cfg(test)]
@@ -406,35 +590,67 @@ mod tests {
         assert_eq!(pl.df(), 1);
     }
 
+    fn make_temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn cleanup_dir(dir: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn test_save_load() {
-        use std::env;
+        let dir = make_temp_dir("bm25_test_save_load");
 
         let mut index = Bm25Index::new(WhitespaceTokenizer);
         index.add_document(1, "hello world");
         index.add_document(2, "hello rust");
         index.add_document(3, "rust programming");
 
-        // Save to temp file
-        let temp_path = env::temp_dir().join("test_bm25_index.bin");
-        index.save(&temp_path).expect("Failed to save index");
+        let bm25_path = dir.join("bm25.bin");
+        index.save(&bm25_path).expect("Failed to save index");
 
-        // Load from file
-        let loaded_index: Bm25Index<WhitespaceTokenizer> =
-            Bm25Index::load(&temp_path).expect("Failed to load index");
+        let loaded: Bm25Index<WhitespaceTokenizer> =
+            Bm25Index::load(&bm25_path).expect("Failed to load index");
 
-        // Verify index state
-        assert_eq!(loaded_index.len(), 3);
-        assert_eq!(loaded_index.document_frequency("hello"), 2);
-        assert_eq!(loaded_index.document_frequency("rust"), 2);
-        assert_eq!(loaded_index.document_frequency("world"), 1);
-        assert_eq!(loaded_index.document_frequency("programming"), 1);
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.document_frequency("hello"), 2);
+        assert_eq!(loaded.document_frequency("rust"), 2);
+        assert_eq!(loaded.document_frequency("world"), 1);
+        assert_eq!(loaded.document_frequency("programming"), 1);
 
-        // Verify search works
-        let results = loaded_index.search("hello", 10);
+        let results = loaded.search("hello", 10);
         assert_eq!(results.len(), 2);
 
-        // Cleanup
-        let _ = std::fs::remove_file(temp_path);
+        cleanup_dir(&dir);
+    }
+
+    #[test]
+    fn test_fst_load_search() {
+        let dir = make_temp_dir("bm25_test_fst_search");
+
+        let mut index = Bm25Index::new(WhitespaceTokenizer);
+        index.add_document(1, "the quick brown fox");
+        index.add_document(2, "the lazy dog");
+        index.add_document(3, "quick quick fox fox");
+
+        let bm25_path = dir.join("bm25.bin");
+        index.save(&bm25_path).expect("Failed to save");
+
+        // Load prefers FST
+        let loaded: Bm25Index<WhitespaceTokenizer> =
+            Bm25Index::load(&bm25_path).expect("Failed to load FST");
+
+        assert_eq!(loaded.len(), 3);
+
+        // FST search should match HashMap search
+        let fst_results = loaded.search("quick fox", 10);
+        let hash_results = index.search("quick fox", 10);
+        assert_eq!(fst_results.len(), hash_results.len());
+        assert_eq!(fst_results[0].0, hash_results[0].0);
+
+        cleanup_dir(&dir);
     }
 }

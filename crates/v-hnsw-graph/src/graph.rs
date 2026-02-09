@@ -3,18 +3,20 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorIndex, VhnswError};
+use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorIndex, VectorStore, VhnswError};
 
 use crate::config::HnswConfig;
-use crate::node::Node;
+use crate::node::{Node, NodeSerialized};
 use crate::store::InMemoryVectorStore;
 
-/// Serializable representation of HnswGraph (excludes distance metric).
+/// Serializable representation of HnswGraph (excludes distance metric and vectors).
+///
+/// Vectors are not stored in hnsw.bin; they are restored from StorageEngine
+/// via `populate_store()` after loading.
 #[derive(bincode::Encode, bincode::Decode)]
 struct HnswGraphSerialized {
     config: HnswConfig,
-    nodes: HashMap<PointId, Node>,
-    store: InMemoryVectorStore,
+    nodes: HashMap<PointId, NodeSerialized>,
     entry_point: Option<PointId>,
     max_layer: LayerId,
     count: usize,
@@ -102,6 +104,9 @@ impl<D: DistanceMetric> HnswGraph<D> {
 
     /// Save graph to file (bincode format).
     ///
+    /// Only graph structure (nodes + config) is saved; vectors are NOT included.
+    /// This reduces file size by ~50% compared to the previous format.
+    ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be created or written to.
@@ -110,8 +115,9 @@ impl<D: DistanceMetric> HnswGraph<D> {
 
         let serialized = HnswGraphSerialized {
             config: self.config.clone(),
-            nodes: self.nodes.clone(),
-            store: self.store.clone(),
+            nodes: self.nodes.iter()
+                .map(|(&id, node)| (id, NodeSerialized::from(node)))
+                .collect(),
             entry_point: self.entry_point,
             max_layer: self.max_layer,
             count: self.count,
@@ -129,8 +135,9 @@ impl<D: DistanceMetric> HnswGraph<D> {
 
     /// Load graph from file.
     ///
-    /// The distance metric must be provided since it may not be serializable
-    /// or may need to be reconstructed with specific runtime configuration.
+    /// The loaded graph has an **empty vector store**. Call `populate_store()`
+    /// with an external `VectorStore` (e.g. `StorageEngine::vector_store()`)
+    /// before performing search or insert operations.
     ///
     /// # Errors
     ///
@@ -144,16 +151,60 @@ impl<D: DistanceMetric> HnswGraph<D> {
             bincode::config::standard()
         ).map_err(|e| VhnswError::Storage(std::io::Error::other(format!("deserialize failed: {e}"))))?;
 
+        let config = serialized.config;
+        let store = InMemoryVectorStore::with_capacity(config.dim, config.max_elements);
+
         Ok(Self {
-            config: serialized.config,
-            nodes: serialized.nodes,
-            store: serialized.store,
+            nodes: serialized.nodes.into_iter()
+                .map(|(id, ns)| (id, Node::from(ns)))
+                .collect(),
+            store,
             entry_point: serialized.entry_point,
             max_layer: serialized.max_layer,
             distance,
             count: serialized.count,
             rng_state: serialized.rng_state,
+            config,
         })
+    }
+
+    /// Populate the internal vector store from an external source.
+    ///
+    /// Must be called after `load()` before any search or insert operations
+    /// that use the internal store (i.e. `VectorIndex::search`/`insert`).
+    ///
+    /// **Prefer `search_ext()` / `build_insert()` instead** — they read
+    /// vectors directly from an external store without this copy step.
+    pub fn populate_store(&mut self, source: &dyn VectorStore) -> v_hnsw_core::Result<()> {
+        for &id in self.nodes.keys() {
+            if let Ok(vec) = source.get(id) {
+                self.store.insert(id, vec)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert a point reading its vector from an external store (no copy).
+    ///
+    /// The vector must already exist in `store` at the given `id`.
+    /// Used by buildindex to read directly from mmap, avoiding a full
+    /// vector copy into the internal `InMemoryVectorStore`.
+    pub fn build_insert(&mut self, store: &dyn VectorStore, id: PointId) -> v_hnsw_core::Result<()> {
+        crate::insert::insert_with_store(self, store, id)
+    }
+
+    /// Search using an external vector store (no `populate_store` needed).
+    ///
+    /// Reads vectors directly from `store` (e.g. mmap) during search,
+    /// eliminating the startup cost and memory overhead of `populate_store()`.
+    pub fn search_ext(
+        &self,
+        store: &dyn VectorStore,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
+        crate::search::search_ext(self, store, query, k, ef)
     }
 }
 
@@ -386,8 +437,10 @@ mod tests {
         let temp_path = std::env::temp_dir().join("test_hnsw_save_load.bin");
         graph.save(&temp_path)?;
 
-        // Load from file
-        let loaded_graph = HnswGraph::load(&temp_path, L2Distance)?;
+        // Load from file (store is empty after load)
+        let mut loaded_graph = HnswGraph::load(&temp_path, L2Distance)?;
+        // Populate vectors from the original graph's store
+        loaded_graph.populate_store(&graph.store)?;
 
         // Verify loaded graph matches original
         assert_eq!(loaded_graph.len(), graph.len());

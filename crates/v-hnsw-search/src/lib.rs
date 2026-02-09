@@ -48,7 +48,7 @@ mod tests;
 // Re-exports
 pub use bm25::{Bm25Index, Bm25Params, Posting, PostingList};
 pub use config::{HybridSearchConfig, HybridSearchConfigBuilder};
-pub use fusion::RrfFusion;
+pub use fusion::{ConvexFusion, RrfFusion};
 pub use hybrid::{HybridSearcher, SimpleHybridSearcher};
 pub use reranker::{LengthBoostReranker, PassthroughReranker, Reranker};
 #[cfg(feature = "korean")]

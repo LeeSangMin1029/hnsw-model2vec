@@ -11,10 +11,10 @@ mod dispatch;
 mod prefetch;
 
 pub use l2::L2Distance;
-pub use cosine::CosineDistance;
+pub use cosine::{CosineDistance, NormalizedCosineDistance};
 pub use dot::DotProductDistance;
 pub use dispatch::AutoDistance;
-pub use prefetch::prefetch_read;
+pub use prefetch::{prefetch_read, prefetch_vector};
 
 #[cfg(test)]
 mod tests;

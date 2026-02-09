@@ -7,6 +7,7 @@
 mod collection;
 mod collection_manager;
 mod engine;
+mod fsst_text;
 mod manifest;
 mod mmap_store;
 mod payload_store;
@@ -17,6 +18,7 @@ mod wal;
 pub use collection::Collection;
 pub use collection_manager::CollectionManager;
 pub use engine::{StorageConfig, StorageEngine};
+pub use fsst_text::compress_texts;
 pub use manifest::{CollectionInfo, Manifest, MANIFEST_VERSION};
 pub use mmap_store::MmapVectorStore;
 pub use payload_store::FilePayloadStore;

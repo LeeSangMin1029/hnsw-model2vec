@@ -31,11 +31,20 @@ pub fn prefetch_read<T>(ptr: *const T) {
     }
 }
 
-/// Prefetch a slice of f32 data for reading.
+/// Prefetch multiple cache lines of a vector for reading.
+///
+/// dim=256 → 1024 bytes → 16 cache lines (64 bytes each).
+/// Prefetches the first few cache lines to cover the hot portion.
 #[inline]
-#[allow(dead_code)]
 pub fn prefetch_vector(data: &[f32]) {
-    if !data.is_empty() {
-        prefetch_read(data.as_ptr());
+    if data.is_empty() {
+        return;
+    }
+    let ptr = data.as_ptr() as *const u8;
+    let byte_len = data.len() * 4;
+    // Prefetch up to 4 cache lines (256 bytes, covers first 64 f32)
+    let lines = (byte_len / 64).min(4);
+    for i in 0..lines {
+        prefetch_read(unsafe { ptr.add(i * 64) } as *const f32);
     }
 }

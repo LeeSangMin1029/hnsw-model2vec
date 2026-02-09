@@ -6,11 +6,11 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use v_hnsw_core::VectorIndex;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{CosineDistance, HnswGraph};
-use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer, RrfFusion};
+use v_hnsw_graph::{NormalizedCosineDistance, HnswGraph};
+use v_hnsw_search::{Bm25Index, ConvexFusion, KoreanBm25Tokenizer};
 use v_hnsw_storage::StorageEngine;
 
-use crate::commands::common::{self, SearchResultItem};
+use crate::commands::common::{self, QueryCache, SearchResultItem};
 use super::super::create::DbConfig;
 
 /// Search response from daemon.
@@ -26,9 +26,10 @@ pub(crate) struct SearchResponse {
 /// with dynamic `dense_limit` (= k * 2), consistent with direct search.
 pub(crate) struct DaemonState {
     pub embed_model: Model2VecModel,
-    hnsw: HnswGraph<CosineDistance>,
+    hnsw: HnswGraph<NormalizedCosineDistance>,
     bm25: Bm25Index<KoreanBm25Tokenizer>,
     pub engine: StorageEngine,
+    query_cache: QueryCache,
 }
 
 impl DaemonState {
@@ -63,12 +64,10 @@ impl DaemonState {
             );
         }
 
-        eprintln!("[daemon] Warming up model...");
-        let _ = embed_model.embed(&["warmup"]);
-        eprintln!("[daemon] Warmup complete");
+        let engine = StorageEngine::open(db_path).context("Failed to open storage")?;
 
         eprintln!("[daemon] Loading HNSW index...");
-        let hnsw: HnswGraph<CosineDistance> = HnswGraph::load(&hnsw_path, CosineDistance)
+        let hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
             .context("Failed to load HNSW index")?;
         eprintln!("[daemon] HNSW loaded: {} vectors", hnsw.len());
 
@@ -78,13 +77,15 @@ impl DaemonState {
             Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
         eprintln!("[daemon] BM25 loaded");
 
-        let engine = StorageEngine::open(db_path).context("Failed to open storage")?;
+        let query_cache = QueryCache::load(db_path);
+        eprintln!("[daemon] Query cache loaded: {} entries", query_cache.len());
 
         Ok(Self {
             embed_model,
             hnsw,
             bm25,
             engine,
+            query_cache,
         })
     }
 
@@ -96,14 +97,14 @@ impl DaemonState {
         eprintln!("[daemon] Reloading indexes...");
         let t0 = Instant::now();
 
+        self.engine = StorageEngine::open(db_path).context("Failed to reopen storage")?;
+
         self.hnsw =
-            HnswGraph::load(&hnsw_path, CosineDistance).context("Failed to reload HNSW index")?;
+            HnswGraph::load(&hnsw_path, NormalizedCosineDistance).context("Failed to reload HNSW index")?;
         eprintln!("[daemon] HNSW reloaded: {} vectors", self.hnsw.len());
 
         self.bm25 = Bm25Index::load(&bm25_path).context("Failed to reload BM25 index")?;
         eprintln!("[daemon] BM25 reloaded");
-
-        self.engine = StorageEngine::open(db_path).context("Failed to reopen storage")?;
 
         eprintln!(
             "[daemon] Reload complete: {:.0}ms",
@@ -112,17 +113,28 @@ impl DaemonState {
         Ok(())
     }
 
+    /// Save query cache to disk (call on shutdown).
+    pub fn save_cache(&self) -> Result<()> {
+        self.query_cache.save()
+    }
+
     /// Execute a search query with dynamic dense_limit = k * 2 for consistency with find.
-    pub fn search(&self, query: &str, k: usize, tags: Vec<String>) -> Result<SearchResponse> {
+    pub fn search(&mut self, query: &str, k: usize, tags: Vec<String>) -> Result<SearchResponse> {
         let start = Instant::now();
 
-        let query_embedding = self
-            .embed_model
-            .embed(&[query])
-            .context("Failed to embed query")?
-            .into_iter()
-            .next()
-            .context("No embedding returned")?;
+        let query_embedding = if let Some(cached) = self.query_cache.get(query) {
+            cached.clone()
+        } else {
+            let emb = self
+                .embed_model
+                .embed(&[query])
+                .context("Failed to embed query")?
+                .into_iter()
+                .next()
+                .context("No embedding returned")?;
+            self.query_cache.insert(query.to_string(), emb.clone());
+            emb
+        };
 
         let payload_store = self.engine.payload_store();
 
@@ -132,19 +144,16 @@ impl DaemonState {
 
         let dense_results = self
             .hnsw
-            .search(&query_embedding, dense_limit, 200)
+            .search_ext(self.engine.vector_store(), &query_embedding, dense_limit, 200)
             .context("HNSW search failed")?;
 
         let sparse_results = self.bm25.search(query, sparse_limit);
 
-        // Fuse with weighted RRF
-        let fusion = RrfFusion::new();
+        // Fuse with convex combination (language-aware alpha)
+        let alpha = common::fusion_alpha(query);
+        let fusion = ConvexFusion::with_alpha(alpha);
         let fetch_k = if tags.is_empty() { k } else { k * 10 };
-        let weighted_lists = vec![
-            (0.7_f32, dense_results),
-            (0.3_f32, sparse_results),
-        ];
-        let mut results = fusion.fuse_weighted(&weighted_lists, fetch_k);
+        let mut results = fusion.fuse(&dense_results, &sparse_results, fetch_k);
 
         // Apply tag filtering
         if !tags.is_empty() {

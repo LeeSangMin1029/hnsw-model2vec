@@ -20,7 +20,7 @@ pub fn run_standard(path: PathBuf, input: PathBuf, vector_column: &str) -> Resul
 
     let config = DbConfig::load(&path)?;
 
-    let mut engine = StorageEngine::open(&path)
+    let mut engine = StorageEngine::open_exclusive(&path)
         .with_context(|| format!("failed to open database at {}", path.display()))?;
 
     let reader_cfg = ReaderConfig::with_vector(vector_column);

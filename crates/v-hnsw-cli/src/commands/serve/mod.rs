@@ -205,6 +205,11 @@ pub fn run(db_path: PathBuf, port: u16, timeout_secs: u64, background: bool) -> 
         }
     }
 
+    eprintln!("[daemon] Saving query cache...");
+    if let Err(e) = state.save_cache() {
+        eprintln!("[daemon] Failed to save query cache: {}", e);
+    }
+
     eprintln!("[daemon] Cleaning up...");
     cleanup_files(&db_path);
     eprintln!("[daemon] Shutdown complete");

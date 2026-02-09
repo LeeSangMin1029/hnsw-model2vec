@@ -63,26 +63,6 @@ pub enum Commands {
         #[arg(long, default_value = "1024")]
         batch_size: usize,
     },
-    /// Search for nearest neighbors.
-    Search {
-        /// Path to the database directory.
-        path: PathBuf,
-        /// Query vector as comma-separated floats.
-        #[arg(short, long)]
-        vector: Option<String>,
-        /// Query text for BM25 search.
-        #[arg(short, long)]
-        text: Option<String>,
-        /// Number of results to return.
-        #[arg(short, long, default_value = "10")]
-        k: usize,
-        /// Search beam width (ef_search).
-        #[arg(long, default_value = "200")]
-        ef: usize,
-        /// Collection to search in.
-        #[arg(long, default_value = "default")]
-        collection: String,
-    },
     /// Delete a point by ID.
     Delete {
         /// Path to the database directory.
@@ -174,25 +154,6 @@ pub enum Commands {
         #[arg(required = true)]
         ids: Vec<u64>,
     },
-    /// Semantic vector search with auto-embedding.
-    Vsearch {
-        /// Path to the database directory.
-        path: PathBuf,
-        /// Query text to search for.
-        query: String,
-        /// Number of results to return.
-        #[arg(short, long, default_value = "10")]
-        k: usize,
-        /// Search beam width (ef_search).
-        #[arg(long, default_value = "200")]
-        ef: usize,
-        /// Embedding model (auto-detected from DB if not specified).
-        #[arg(long)]
-        model: Option<String>,
-        /// Show document text in results.
-        #[arg(long)]
-        show_text: bool,
-    },
     /// Add data to database (auto-detect input type, auto-embed, auto-create DB).
     Add {
         /// Path to the database directory.
@@ -207,18 +168,30 @@ pub enum Commands {
         /// Input folder to scan for changes.
         input: PathBuf,
     },
-    /// Search database with hybrid HNSW + BM25 (auto-load model from config).
+    /// Search database (hybrid HNSW+BM25 by default, supports raw vector and BM25-only modes).
     Find {
         /// Path to the database directory.
         db: PathBuf,
-        /// Search query text.
-        query: String,
+        /// Search query text (required unless --vector is provided).
+        query: Option<String>,
         /// Number of results to return.
         #[arg(short, long, default_value = "10")]
         k: usize,
         /// Filter by tags (can be specified multiple times, AND logic).
         #[arg(long)]
         tag: Vec<String>,
+        /// Show full text (default: truncated to 150 chars).
+        #[arg(long)]
+        full: bool,
+        /// BM25-only search (no model loading, ~100ms cold start).
+        #[arg(long)]
+        fast: bool,
+        /// Raw query vector as comma-separated floats (bypasses auto-embedding).
+        #[arg(long)]
+        vector: Option<String>,
+        /// Search beam width for HNSW (ef_search).
+        #[arg(long, default_value = "200")]
+        ef: usize,
     },
     /// Start daemon server for fast embedding search.
     Serve {

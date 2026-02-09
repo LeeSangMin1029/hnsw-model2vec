@@ -45,7 +45,7 @@ pub fn run_embed(
             );
         }
         update_embed_model(&path, model_name)?;
-        StorageEngine::open(&path)
+        StorageEngine::open_exclusive(&path)
             .with_context(|| format!("failed to open database at {}", path.display()))?
     } else {
         auto_create_db(&path, dim, Some(model_name))?

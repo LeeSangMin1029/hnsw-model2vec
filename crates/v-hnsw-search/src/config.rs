@@ -13,8 +13,10 @@ pub struct HybridSearchConfig {
     pub dense_limit: usize,
     /// Maximum number of sparse results to retrieve (default: 100).
     pub sparse_limit: usize,
-    /// RRF k parameter (default: 60).
+    /// RRF k parameter (default: 60). Used when fusion_mode is RRF.
     pub rrf_k: u32,
+    /// Convex fusion alpha (default: 0.5). 0=sparse only, 1=dense only.
+    pub fusion_alpha: f32,
 }
 
 impl Default for HybridSearchConfig {
@@ -26,6 +28,7 @@ impl Default for HybridSearchConfig {
             dense_limit: 100,
             sparse_limit: 100,
             rrf_k: 60,
+            fusion_alpha: 0.5,
         }
     }
 }
@@ -46,6 +49,7 @@ pub struct HybridSearchConfigBuilder {
     dense_limit: Option<usize>,
     sparse_limit: Option<usize>,
     rrf_k: Option<u32>,
+    fusion_alpha: Option<f32>,
 }
 
 impl HybridSearchConfigBuilder {
@@ -85,6 +89,13 @@ impl HybridSearchConfigBuilder {
         self
     }
 
+    /// Set the convex fusion alpha (default: 0.5).
+    /// 0.0 = sparse only, 1.0 = dense only.
+    pub fn fusion_alpha(mut self, alpha: f32) -> Self {
+        self.fusion_alpha = Some(alpha);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> HybridSearchConfig {
         let defaults = HybridSearchConfig::default();
@@ -95,6 +106,7 @@ impl HybridSearchConfigBuilder {
             dense_limit: self.dense_limit.unwrap_or(defaults.dense_limit),
             sparse_limit: self.sparse_limit.unwrap_or(defaults.sparse_limit),
             rrf_k: self.rrf_k.unwrap_or(defaults.rrf_k),
+            fusion_alpha: self.fusion_alpha.unwrap_or(defaults.fusion_alpha),
         }
     }
 }
@@ -112,6 +124,7 @@ mod tests {
         assert_eq!(config.dense_limit, 100);
         assert_eq!(config.sparse_limit, 100);
         assert_eq!(config.rrf_k, 60);
+        assert!((config.fusion_alpha - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -3,9 +3,17 @@
 //! This module provides integration with the official model2vec-rs library for lightweight,
 //! static embedding models. Supports automatic download from HuggingFace Hub.
 
+use std::path::Path;
+
 use crate::error::EmbedError;
 use crate::model::{EmbeddingModel, Result};
 use model2vec_rs::model::StaticModel;
+
+/// Default HuggingFace model ID.
+const DEFAULT_MODEL: &str = "minishlab/potion-multilingual-128M";
+
+/// Local f16 model path (under ~/.v-hnsw/models/).
+const F16_SUBDIR: &str = "potion-multilingual-128M-f16";
 
 /// Model2Vec embedding model.
 ///
@@ -23,14 +31,17 @@ pub struct Model2VecModel {
 impl Model2VecModel {
     /// Create a new Model2VecModel with the default multilingual model.
     ///
-    /// Uses `minishlab/potion-multilingual-128M` which produces 256-dimensional embeddings.
-    /// Downloads from HuggingFace Hub on first use; cached locally afterwards.
+    /// Prefers a local f16 model at `~/.v-hnsw/models/potion-multilingual-128M-f16`
+    /// for ~50% memory savings. Falls back to the HuggingFace f32 model if not found.
     ///
     /// # Errors
     ///
     /// Returns `EmbedError::ModelInit` if model loading fails.
     pub fn new() -> Result<Self> {
-        Self::from_pretrained("minishlab/potion-multilingual-128M")
+        if let Some(f16_path) = find_f16_model() {
+            return Self::from_pretrained(f16_path.to_str().unwrap_or(DEFAULT_MODEL));
+        }
+        Self::from_pretrained(DEFAULT_MODEL)
     }
 
     /// Create a Model2VecModel from a specific pretrained model.
@@ -45,7 +56,22 @@ impl Model2VecModel {
     /// Returns `EmbedError::ModelInit` if model loading fails.
     /// Returns `EmbedError::Download` if model download fails.
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
-        let model = StaticModel::from_pretrained(model_name, None, None, None)
+        // Prefer local f16 model for ~50% memory savings
+        let load_path = if model_name == DEFAULT_MODEL {
+            find_f16_model()
+        } else {
+            None
+        };
+        let (actual_path, display_name) = match load_path {
+            Some(ref p) => (p.to_str().unwrap_or(model_name), "[f16] local"),
+            None => (model_name, ""),
+        };
+
+        if !display_name.is_empty() {
+            eprintln!("  Using f16 model: {}", actual_path);
+        }
+
+        let model = StaticModel::from_pretrained(actual_path, None, None, None)
             .map_err(|e| {
                 let msg = e.to_string();
                 if msg.contains("download") || msg.contains("network") || msg.contains("HTTP") {
@@ -64,6 +90,19 @@ impl Model2VecModel {
             model_name: model_name.to_string(),
             dim,
         })
+    }
+}
+
+/// Check if a local f16 model exists at ~/.v-hnsw/models/.
+fn find_f16_model() -> Option<std::path::PathBuf> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let path = Path::new(&home).join(".v-hnsw").join("models").join(F16_SUBDIR);
+    if path.join("model.safetensors").exists() && path.join("tokenizer.json").exists() {
+        Some(path)
+    } else {
+        None
     }
 }
 

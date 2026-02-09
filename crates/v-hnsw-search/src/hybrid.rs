@@ -1,11 +1,13 @@
 //! Hybrid search combining dense and sparse retrieval.
 
+use std::collections::HashSet;
+
 use v_hnsw_core::{DistanceMetric, PayloadStore, PointId, VectorIndex};
 use v_hnsw_graph::HnswGraph;
 
 use crate::bm25::Bm25Index;
 use crate::config::HybridSearchConfig;
-use crate::fusion::RrfFusion;
+use crate::fusion::ConvexFusion;
 use crate::reranker::Reranker;
 use crate::Tokenizer;
 
@@ -31,8 +33,8 @@ where
     payload_store: P,
     /// Search configuration.
     config: HybridSearchConfig,
-    /// RRF fusion combiner.
-    fusion: RrfFusion,
+    /// Convex fusion combiner.
+    fusion: ConvexFusion,
 }
 
 impl<D, T, P> HybridSearcher<D, T, P>
@@ -48,7 +50,7 @@ where
         payload_store: P,
         config: HybridSearchConfig,
     ) -> Self {
-        let fusion = RrfFusion::with_k(config.rrf_k);
+        let fusion = ConvexFusion::with_alpha(config.fusion_alpha);
         Self {
             dense_index,
             sparse_index,
@@ -132,25 +134,25 @@ where
         query_text: &str,
         k: usize,
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-        // Get dense results
         let dense_results = self.dense_index.search(
             query_vector,
             self.config.dense_limit,
             self.config.ef_search,
         )?;
 
-        // Get sparse results
         let sparse_results = self
             .sparse_index
             .search(query_text, self.config.sparse_limit);
 
-        // Fuse using weighted RRF
-        let weighted_lists = vec![
-            (self.config.dense_weight, dense_results),
-            (self.config.sparse_weight, sparse_results),
-        ];
+        // Dense-Guided: score dense candidates missing from BM25 top-k
+        let all_sparse = enrich_sparse(
+            &self.sparse_index,
+            query_text,
+            &dense_results,
+            sparse_results,
+        );
 
-        let results = self.fusion.fuse_weighted(&weighted_lists, k);
+        let results = self.fusion.fuse(&dense_results, &all_sparse, k);
         Ok(results)
     }
 
@@ -245,8 +247,8 @@ where
     sparse_index: Bm25Index<T>,
     /// Search configuration.
     config: HybridSearchConfig,
-    /// RRF fusion combiner.
-    fusion: RrfFusion,
+    /// Convex fusion combiner.
+    fusion: ConvexFusion,
 }
 
 impl<D, T> SimpleHybridSearcher<D, T>
@@ -260,7 +262,7 @@ where
         sparse_index: Bm25Index<T>,
         config: HybridSearchConfig,
     ) -> Self {
-        let fusion = RrfFusion::with_k(config.rrf_k);
+        let fusion = ConvexFusion::with_alpha(config.fusion_alpha);
         Self {
             dense_index,
             sparse_index,
@@ -308,7 +310,7 @@ where
         Ok(())
     }
 
-    /// Perform hybrid search.
+    /// Perform hybrid search using the graph's internal vector store.
     pub fn search(
         &self,
         query_vector: &[f32],
@@ -325,12 +327,47 @@ where
             .sparse_index
             .search(query_text, self.config.sparse_limit);
 
-        let weighted_lists = vec![
-            (self.config.dense_weight, dense_results),
-            (self.config.sparse_weight, sparse_results),
-        ];
+        let all_sparse = enrich_sparse(
+            &self.sparse_index,
+            query_text,
+            &dense_results,
+            sparse_results,
+        );
 
-        let results = self.fusion.fuse_weighted(&weighted_lists, k);
+        let results = self.fusion.fuse(&dense_results, &all_sparse, k);
+        Ok(results)
+    }
+
+    /// Perform hybrid search reading vectors from an external store.
+    ///
+    /// Avoids `populate_store()` by reading directly from mmap or other
+    /// external vector storage.
+    pub fn search_ext(
+        &self,
+        store: &dyn v_hnsw_core::VectorStore,
+        query_vector: &[f32],
+        query_text: &str,
+        k: usize,
+    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
+        let dense_results = self.dense_index.search_ext(
+            store,
+            query_vector,
+            self.config.dense_limit,
+            self.config.ef_search,
+        )?;
+
+        let sparse_results = self
+            .sparse_index
+            .search(query_text, self.config.sparse_limit);
+
+        let all_sparse = enrich_sparse(
+            &self.sparse_index,
+            query_text,
+            &dense_results,
+            sparse_results,
+        );
+
+        let results = self.fusion.fuse(&dense_results, &all_sparse, k);
         Ok(results)
     }
 
@@ -358,4 +395,34 @@ where
     pub fn is_empty(&self) -> bool {
         self.dense_index.is_empty()
     }
+}
+
+/// Enrich BM25 results with scores for dense candidates not in BM25 top-k.
+///
+/// Ensures all dense candidates get a BM25 score for proper fusion,
+/// without running a second full BM25 scan. Uses binary search on sorted
+/// posting lists — O(|missing| * |terms| * log(df)) per candidate.
+fn enrich_sparse<T: Tokenizer>(
+    sparse_index: &Bm25Index<T>,
+    query_text: &str,
+    dense_results: &[(PointId, f32)],
+    mut sparse_results: Vec<(PointId, f32)>,
+) -> Vec<(PointId, f32)> {
+    if dense_results.is_empty() {
+        return sparse_results;
+    }
+
+    let sparse_ids: HashSet<PointId> = sparse_results.iter().map(|&(id, _)| id).collect();
+    let missing: Vec<PointId> = dense_results
+        .iter()
+        .filter(|&&(id, _)| !sparse_ids.contains(&id))
+        .map(|&(id, _)| id)
+        .collect();
+
+    if !missing.is_empty() {
+        let extra = sparse_index.score_documents(query_text, &missing);
+        sparse_results.extend(extra);
+    }
+
+    sparse_results
 }

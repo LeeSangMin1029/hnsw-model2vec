@@ -44,7 +44,6 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// Much faster since it skips norm computation.
 #[derive(Debug, Clone, Copy, Default, bincode::Encode, bincode::Decode)]
-#[allow(dead_code)]
 pub struct NormalizedCosineDistance;
 
 impl DistanceMetric for NormalizedCosineDistance {
@@ -57,17 +56,5 @@ impl DistanceMetric for NormalizedCosineDistance {
 
     fn name(&self) -> &'static str {
         "cosine_normalized"
-    }
-}
-
-/// Normalize a vector to unit length in-place.
-#[allow(dead_code)]
-pub fn normalize(v: &mut [f32]) {
-    let norm = dot_product(v, v).sqrt();
-    if norm > 0.0 {
-        let inv = 1.0 / norm;
-        for x in v.iter_mut() {
-            *x *= inv;
-        }
     }
 }

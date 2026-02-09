@@ -1,10 +1,14 @@
 //! File-based payload and text storage with memory buffering.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+use roaring::RoaringBitmap;
 use v_hnsw_core::{Payload, PayloadStore, PointId, Result, VhnswError};
+
+use crate::fsst_text::CompressedTextReader;
 
 /// File-based storage for payload metadata and text chunks.
 ///
@@ -22,13 +26,15 @@ pub struct FilePayloadStore {
     /// PointId -> (offset, length) in text.dat
     text_index: HashMap<PointId, (u64, u32)>,
     /// Secondary index: source path -> set of PointIds
-    source_index: HashMap<String, HashSet<PointId>>,
-    /// Secondary index: tag -> set of PointIds
-    tag_index: HashMap<String, HashSet<PointId>>,
+    source_index: HashMap<String, Vec<PointId>>,
+    /// Secondary index: tag -> Roaring Bitmap of PointIds (u32 range)
+    tag_index: HashMap<String, RoaringBitmap>,
     /// In-memory payload cache for WAL buffer
     pending_payloads: HashMap<PointId, Payload>,
     /// In-memory text cache for WAL buffer
     pending_texts: HashMap<PointId, String>,
+    /// Zstd compressed text reader (loaded if text.zst exists)
+    compressed_reader: Option<CompressedTextReader>,
 }
 
 impl FilePayloadStore {
@@ -59,9 +65,10 @@ impl FilePayloadStore {
             payload_index: HashMap::new(),
             text_index: HashMap::new(),
             source_index: HashMap::new(),
-            tag_index: HashMap::new(),
+            tag_index: HashMap::new(),  // RoaringBitmap
             pending_payloads: HashMap::new(),
             pending_texts: HashMap::new(),
+            compressed_reader: None,
         })
     }
 
@@ -92,9 +99,10 @@ impl FilePayloadStore {
             payload_index: HashMap::new(),
             text_index: HashMap::new(),
             source_index: HashMap::new(),
-            tag_index: HashMap::new(),
+            tag_index: HashMap::new(),  // RoaringBitmap
             pending_payloads: HashMap::new(),
             pending_texts: HashMap::new(),
+            compressed_reader: None,
         })
     }
 
@@ -112,17 +120,15 @@ impl FilePayloadStore {
         self.payload_index.insert(id, (offset, length));
 
         // Update source index
-        self.source_index
-            .entry(payload.source.clone())
-            .or_default()
-            .insert(id);
+        let source_points = self.source_index.entry(payload.source.clone()).or_default();
+        if !source_points.contains(&id) {
+            source_points.push(id);
+        }
 
-        // Update tag index
+        // Update tag index (Roaring Bitmap)
+        let id32 = id as u32;
         for tag in &payload.tags {
-            self.tag_index
-                .entry(tag.clone())
-                .or_default()
-                .insert(id);
+            self.tag_index.entry(tag.clone()).or_default().insert(id32);
         }
 
         Ok(())
@@ -143,17 +149,15 @@ impl FilePayloadStore {
 
     /// Buffer a payload in memory (for WAL-backed writes before flush).
     pub fn buffer_payload(&mut self, id: PointId, payload: Payload) {
-        self.source_index
-            .entry(payload.source.clone())
-            .or_default()
-            .insert(id);
+        let source_points = self.source_index.entry(payload.source.clone()).or_default();
+        if !source_points.contains(&id) {
+            source_points.push(id);
+        }
 
-        // Update tag index
+        // Update tag index (Roaring Bitmap)
+        let id32 = id as u32;
         for tag in &payload.tags {
-            self.tag_index
-                .entry(tag.clone())
-                .or_default()
-                .insert(id);
+            self.tag_index.entry(tag.clone()).or_default().insert(id32);
         }
 
         self.pending_payloads.insert(id, payload);
@@ -188,7 +192,7 @@ impl FilePayloadStore {
     pub fn points_by_source(&self, source: &str) -> Vec<PointId> {
         self.source_index
             .get(source)
-            .map(|set| set.iter().copied().collect())
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -196,40 +200,54 @@ impl FilePayloadStore {
     pub fn points_by_tag(&self, tag: &str) -> Vec<PointId> {
         self.tag_index
             .get(tag)
-            .map(|set| set.iter().copied().collect())
+            .map(|bm| bm.iter().map(|v| v as PointId).collect())
             .unwrap_or_default()
     }
 
     /// Get all point IDs matching ALL given tags (AND logic).
+    ///
+    /// Uses Roaring Bitmap intersection for efficient set operations.
     pub fn points_by_tags(&self, tags: &[String]) -> Vec<PointId> {
         if tags.is_empty() {
             return Vec::new();
         }
 
-        // Start with first tag's points
-        let mut result: Option<HashSet<PointId>> = None;
+        let mut result: Option<RoaringBitmap> = None;
 
         for tag in tags {
-            if let Some(points) = self.tag_index.get(tag) {
+            if let Some(bitmap) = self.tag_index.get(tag) {
                 match &mut result {
                     None => {
-                        // First tag: start with its points
-                        result = Some(points.clone());
+                        result = Some(bitmap.clone());
                     }
                     Some(current) => {
-                        // Subsequent tags: keep only intersection
-                        current.retain(|id| points.contains(id));
+                        *current &= bitmap;
                     }
                 }
             } else {
-                // Tag not found: no points can match all tags
                 return Vec::new();
             }
         }
 
         result
-            .map(|set| set.into_iter().collect())
+            .map(|bm| bm.iter().map(|v| v as PointId).collect())
             .unwrap_or_default()
+    }
+
+    /// Read all raw text bytes from text.dat.
+    ///
+    /// Used by FSST compression during build-index to train
+    /// the compressor on the full corpus.
+    pub fn all_text_bytes(&self) -> Result<Vec<(PointId, Vec<u8>)>> {
+        let mut texts = Vec::with_capacity(self.text_index.len());
+        for (&id, &(offset, length)) in &self.text_index {
+            let mut handle = self.text_file.try_clone()?;
+            handle.seek(SeekFrom::Start(offset))?;
+            let mut data = vec![0u8; length as usize];
+            handle.read_exact(&mut data)?;
+            texts.push((id, data));
+        }
+        Ok(texts)
     }
 
     /// Mark a point as removed (remove from all indices and buffers).
@@ -241,12 +259,13 @@ impl FilePayloadStore {
 
         // Remove from source index
         for points in self.source_index.values_mut() {
-            points.remove(&id);
+            points.retain(|&pid| pid != id);
         }
 
-        // Remove from tag index
-        for points in self.tag_index.values_mut() {
-            points.remove(&id);
+        // Remove from tag index (Roaring Bitmap)
+        let id32 = id as u32;
+        for bitmap in self.tag_index.values_mut() {
+            bitmap.remove(id32);
         }
     }
 
@@ -281,14 +300,32 @@ impl FilePayloadStore {
         Ok(())
     }
 
-    /// Save tag index to disk.
+    /// Save tag index to disk using Roaring native serialization.
     fn save_tag_index(&self) -> Result<()> {
-        let tag_idx_path = self.payload_path.with_file_name("tag_index.dat");
-        let config = bincode::config::standard();
+        let tag_idx_path = self.payload_path.with_file_name("tag_index.roaring");
 
-        let tag_data = bincode::encode_to_vec(&self.tag_index, config)
-            .map_err(|e| VhnswError::Payload(format!("failed to encode tag index: {e}")))?;
-        std::fs::write(tag_idx_path, tag_data)?;
+        // Format: [num_tags: u32] [tag_name_len: u32, tag_name: bytes, bitmap_len: u32, bitmap: bytes]*
+        let mut buf = Vec::new();
+        let num_tags = self.tag_index.len() as u32;
+        buf.extend_from_slice(&num_tags.to_le_bytes());
+
+        for (tag, bitmap) in &self.tag_index {
+            let tag_bytes = tag.as_bytes();
+            buf.extend_from_slice(&(tag_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(tag_bytes);
+
+            let mut bm_buf = Vec::new();
+            bitmap.serialize_into(&mut bm_buf)
+                .map_err(|e| VhnswError::Payload(format!("failed to serialize bitmap: {e}")))?;
+            buf.extend_from_slice(&(bm_buf.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&bm_buf);
+        }
+
+        std::fs::write(tag_idx_path, buf)?;
+
+        // Remove old format if exists
+        let old_path = self.payload_path.with_file_name("tag_index.dat");
+        let _ = std::fs::remove_file(old_path);
 
         Ok(())
     }
@@ -318,36 +355,41 @@ impl FilePayloadStore {
         // Load tag index
         self.load_tag_index()?;
 
+        // Load zstd compressed text reader if available
+        let dir = self.text_path.parent().unwrap_or(Path::new("."));
+        self.compressed_reader = CompressedTextReader::load(dir)?;
+
         // Rebuild source index from payload index
         self.source_index.clear();
         for (&id, &(offset, length)) in &self.payload_index {
             if let Ok(Some(payload)) = self.read_payload_at(offset, length) {
-                self.source_index
-                    .entry(payload.source.clone())
-                    .or_default()
-                    .insert(id);
+                let source_points = self.source_index.entry(payload.source.clone()).or_default();
+                if !source_points.contains(&id) {
+                    source_points.push(id);
+                }
             }
         }
 
         Ok(())
     }
 
-    /// Load tag index from disk.
+    /// Load tag index from disk (Roaring format, with legacy .dat migration).
     fn load_tag_index(&mut self) -> Result<()> {
-        let tag_idx_path = self.payload_path.with_file_name("tag_index.dat");
+        let roaring_path = self.payload_path.with_file_name("tag_index.roaring");
+        let legacy_path = self.payload_path.with_file_name("tag_index.dat");
 
-        // If tag index doesn't exist, rebuild it from payloads
-        if !tag_idx_path.exists() {
+        if roaring_path.exists() {
+            // Load new Roaring format
+            let data = std::fs::read(&roaring_path)?;
+            self.tag_index = deserialize_roaring_tag_index(&data)?;
+        } else if legacy_path.exists() {
+            // Rebuild from payloads (legacy format migration)
             self.rebuild_tag_index()?;
-            return Ok(());
+            // Save in new format
+            self.save_tag_index()?;
+        } else {
+            self.rebuild_tag_index()?;
         }
-
-        let config = bincode::config::standard();
-        let tag_data = std::fs::read(tag_idx_path)?;
-        let (index, _): (HashMap<String, HashSet<PointId>>, usize) =
-            bincode::decode_from_slice(&tag_data, config)
-                .map_err(|e| VhnswError::Payload(format!("failed to decode tag index: {e}")))?;
-        self.tag_index = index;
 
         Ok(())
     }
@@ -357,11 +399,9 @@ impl FilePayloadStore {
         self.tag_index.clear();
         for (&id, &(offset, length)) in &self.payload_index {
             if let Ok(Some(payload)) = self.read_payload_at(offset, length) {
+                let id32 = id as u32;
                 for tag in &payload.tags {
-                    self.tag_index
-                        .entry(tag.clone())
-                        .or_default()
-                        .insert(id);
+                    self.tag_index.entry(tag.clone()).or_default().insert(id32);
                 }
             }
         }
@@ -430,13 +470,60 @@ impl PayloadStore for FilePayloadStore {
             return Ok(Some(text.clone()));
         }
 
-        // Read from file via index
-        if let Some(&(offset, length)) = self.text_index.get(&id) {
+        // Must be in text_index to be a valid (non-removed) document
+        let raw_entry = self.text_index.get(&id);
+        if raw_entry.is_none() {
+            return Ok(None);
+        }
+
+        // Try zstd compressed store first (less I/O)
+        if let Some(reader) = &self.compressed_reader {
+            if let Some(text) = reader.get_text(id)? {
+                return Ok(Some(text));
+            }
+        }
+
+        // Fall back to raw text.dat
+        if let Some(&(offset, length)) = raw_entry {
             return self.read_text_at(offset, length);
         }
 
         Ok(None)
     }
+}
+
+/// Deserialize Roaring tag index from bytes.
+fn deserialize_roaring_tag_index(data: &[u8]) -> Result<HashMap<String, RoaringBitmap>> {
+    use std::io::Cursor;
+
+    let mut cursor = Cursor::new(data);
+    let mut tag_index = HashMap::new();
+
+    let mut buf4 = [0u8; 4];
+    std::io::Read::read_exact(&mut cursor, &mut buf4)?;
+    let num_tags = u32::from_le_bytes(buf4) as usize;
+
+    for _ in 0..num_tags {
+        // Read tag name
+        std::io::Read::read_exact(&mut cursor, &mut buf4)?;
+        let tag_len = u32::from_le_bytes(buf4) as usize;
+        let mut tag_bytes = vec![0u8; tag_len];
+        std::io::Read::read_exact(&mut cursor, &mut tag_bytes)?;
+        let tag = String::from_utf8(tag_bytes)
+            .map_err(|e| VhnswError::Payload(format!("invalid UTF-8 in tag: {e}")))?;
+
+        // Read bitmap
+        std::io::Read::read_exact(&mut cursor, &mut buf4)?;
+        let bm_len = u32::from_le_bytes(buf4) as usize;
+        let mut bm_data = vec![0u8; bm_len];
+        std::io::Read::read_exact(&mut cursor, &mut bm_data)?;
+        let bitmap = RoaringBitmap::deserialize_from(&bm_data[..])
+            .map_err(|e| VhnswError::Payload(format!("failed to deserialize bitmap: {e}")))?;
+
+        tag_index.insert(tag, bitmap);
+    }
+
+    Ok(tag_index)
 }
 
 #[cfg(test)]

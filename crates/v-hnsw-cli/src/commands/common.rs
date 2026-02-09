@@ -1,13 +1,15 @@
 //! Shared utilities for CLI commands.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use v_hnsw_core::{Payload, PayloadStore, PayloadValue, VectorIndex, VectorStore};
+use lru::LruCache;
+use v_hnsw_core::{Payload, PayloadStore, PayloadValue, VectorIndex};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{CosineDistance, HnswConfig, HnswGraph};
+use v_hnsw_graph::{NormalizedCosineDistance, HnswConfig, HnswGraph};
 use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
@@ -73,7 +75,7 @@ pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
     Ok(pb)
 }
 
-/// Auto-create database if it doesn't exist, or open existing.
+/// Auto-create database if it doesn't exist, or open existing with exclusive lock.
 pub fn ensure_database(path: &Path, dim: usize, model_name: &str) -> Result<StorageEngine> {
     if path.exists() {
         let config = DbConfig::load(path)?;
@@ -89,7 +91,7 @@ pub fn ensure_database(path: &Path, dim: usize, model_name: &str) -> Result<Stor
             config.embed_model = Some(model_name.to_string());
             config.save(path)?;
         }
-        StorageEngine::open(path)
+        StorageEngine::open_exclusive(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))
     } else {
         tracing::info!(path = %path.display(), dim, "Creating new database");
@@ -233,15 +235,13 @@ pub fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> 
 
     let pb = make_progress_bar(vector_store.id_map().keys().len() as u64)?;
 
-    let mut hnsw = HnswGraph::new(hnsw_config, CosineDistance);
+    let mut hnsw = HnswGraph::new(hnsw_config, NormalizedCosineDistance);
     for id in vector_store.id_map().keys() {
         if is_interrupted() {
             pb.abandon_with_message("Interrupted during HNSW build");
             return Ok(());
         }
-        if let Ok(vec) = vector_store.get(*id) {
-            let _ = hnsw.insert(*id, vec);
-        }
+        let _ = hnsw.build_insert(vector_store, *id);
         pb.inc(1);
     }
 
@@ -307,7 +307,7 @@ pub fn update_indexes_incremental(
     println!("Updating indexes incrementally ({} additions, {} removals)...", added_ids.len(), removed_ids.len());
 
     // --- HNSW incremental update ---
-    let mut hnsw: HnswGraph<CosineDistance> = HnswGraph::load(&hnsw_path, CosineDistance)
+    let mut hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
         .with_context(|| "Failed to load HNSW graph")?;
 
     let vector_store = engine.vector_store();
@@ -318,9 +318,7 @@ pub fn update_indexes_incremental(
     }
 
     for &id in added_ids {
-        if let Ok(vec) = vector_store.get(id) {
-            let _ = hnsw.insert(id, vec);
-        }
+        let _ = hnsw.build_insert(vector_store, id);
     }
 
     hnsw.save(&hnsw_path)
@@ -357,13 +355,17 @@ pub fn update_indexes_incremental(
 }
 
 /// Search result common to both find and serve.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultItem {
     pub id: u64,
     pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
 
@@ -414,6 +416,28 @@ pub fn build_results(
         .collect()
 }
 
+/// Check if query contains Korean (Hangul) characters.
+///
+/// Returns `true` if any character is in the Hangul Syllables or Jamo range.
+pub fn has_korean(text: &str) -> bool {
+    text.chars().any(|c| {
+        ('\u{AC00}'..='\u{D7AF}').contains(&c)  // Hangul Syllables
+            || ('\u{1100}'..='\u{11FF}').contains(&c) // Hangul Jamo
+            || ('\u{3130}'..='\u{318F}').contains(&c) // Hangul Compatibility Jamo
+    })
+}
+
+/// Fusion alpha for convex combination, adjusted by query language.
+///
+/// Returns alpha in [0, 1]: higher = more weight on dense (vector) search.
+pub fn fusion_alpha(query: &str) -> f32 {
+    if has_korean(query) {
+        0.4 // Korean: BM25 형태소 매칭이 더 중요
+    } else {
+        0.7 // English: 벡터 유사도 우선
+    }
+}
+
 /// Get the file modification time as seconds since UNIX epoch.
 pub fn get_file_mtime(path: &Path) -> Option<u64> {
     std::fs::metadata(path)
@@ -421,4 +445,90 @@ pub fn get_file_mtime(path: &Path) -> Option<u64> {
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
+}
+
+// ============================================================================
+// Query Embedding Cache
+// ============================================================================
+
+const QUERY_CACHE_MAX: usize = 1000;
+const QUERY_CACHE_FILE: &str = "query_cache.bin";
+
+/// LRU cache for query embeddings, with disk persistence.
+///
+/// Stores query text → embedding vector mappings to skip model inference
+/// on repeated queries. Persisted to disk so cache survives daemon restarts.
+pub struct QueryCache {
+    cache: LruCache<String, Vec<f32>>,
+    db_path: PathBuf,
+}
+
+/// On-disk format: Vec of (query, embedding) pairs in LRU order.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CacheEntry {
+    query: String,
+    embedding: Vec<f32>,
+}
+
+impl QueryCache {
+    /// Load cache from disk, or create empty if not found.
+    pub fn load(db_path: &Path) -> Self {
+        let cap = NonZeroUsize::new(QUERY_CACHE_MAX)
+            .unwrap_or(NonZeroUsize::MIN);
+        let mut cache = LruCache::new(cap);
+
+        let cache_path = db_path.join(QUERY_CACHE_FILE);
+        if let Ok(data) = std::fs::read(&cache_path) {
+            if let Ok((entries, _)) = bincode::serde::decode_from_slice::<Vec<CacheEntry>, _>(
+                &data,
+                bincode::config::standard(),
+            ) {
+                // Insert in reverse to preserve LRU order (most recent last)
+                for entry in entries.into_iter().rev() {
+                    cache.put(entry.query, entry.embedding);
+                }
+                tracing::debug!(count = cache.len(), "Query cache loaded");
+            }
+        }
+
+        Self {
+            cache,
+            db_path: db_path.to_path_buf(),
+        }
+    }
+
+    /// Get cached embedding for a query (promotes to most-recently-used).
+    pub fn get(&mut self, query: &str) -> Option<&Vec<f32>> {
+        self.cache.get(query)
+    }
+
+    /// Insert a query→embedding mapping.
+    pub fn insert(&mut self, query: String, embedding: Vec<f32>) {
+        self.cache.put(query, embedding);
+    }
+
+    /// Number of cached entries.
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Save cache to disk.
+    pub fn save(&self) -> Result<()> {
+        let entries: Vec<CacheEntry> = self.cache.iter()
+            .map(|(q, e)| CacheEntry {
+                query: q.clone(),
+                embedding: e.clone(),
+            })
+            .collect();
+
+        let encoded = bincode::serde::encode_to_vec(&entries, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("Failed to encode query cache: {e}"))?;
+
+        let cache_path = self.db_path.join(QUERY_CACHE_FILE);
+        std::fs::write(&cache_path, encoded)
+            .with_context(|| format!("Failed to write query cache to {}", cache_path.display()))?;
+
+        tracing::debug!(count = self.len(), "Query cache saved");
+        Ok(())
+    }
 }

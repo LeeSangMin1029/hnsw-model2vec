@@ -10,7 +10,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use v_hnsw_core::VectorIndex;
 use v_hnsw_embed::{Model2VecModel, EmbeddingModel};
-use v_hnsw_graph::{CosineDistance, HnswConfig, HnswGraph};
+use v_hnsw_graph::{NormalizedCosineDistance, HnswConfig, HnswGraph};
 
 use crate::is_interrupted;
 
@@ -306,7 +306,7 @@ fn embed_chunks(model: &Model2VecModel, chunks: &[String]) -> Result<Vec<Vec<f32
 }
 
 /// Build HNSW index from embeddings.
-fn build_hnsw_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<CosineDistance>> {
+fn build_hnsw_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<NormalizedCosineDistance>> {
     let config = HnswConfig::builder()
         .dim(dim)
         .m(16)
@@ -314,7 +314,7 @@ fn build_hnsw_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<Cos
         .build()
         .context("Failed to create HNSW config")?;
 
-    let mut hnsw: HnswGraph<CosineDistance> = HnswGraph::new(config, CosineDistance);
+    let mut hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::new(config, NormalizedCosineDistance);
 
     let pb = ProgressBar::new(embeddings.len() as u64);
     pb.set_style(
@@ -366,7 +366,7 @@ fn select_query_embeddings(embeddings: &[Vec<f32>], count: usize) -> Vec<Vec<f32
 
 /// Run search benchmark with different ef values.
 fn run_search_benchmark(
-    hnsw: &HnswGraph<CosineDistance>,
+    hnsw: &HnswGraph<NormalizedCosineDistance>,
     query_embeddings: &[Vec<f32>],
     k: usize,
 ) -> Result<()> {

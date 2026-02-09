@@ -18,7 +18,5 @@ pub mod index_md;
 pub mod info;
 pub mod insert;
 pub mod readers;
-pub mod search;
 pub mod serve;
 pub mod update;
-pub mod vsearch;

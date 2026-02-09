@@ -25,6 +25,30 @@ impl Bm25Params {
         Self { k1, b }
     }
 
+    /// Compute the IDF (inverse document frequency) component.
+    ///
+    /// Call once per query term, then reuse for all documents.
+    #[inline]
+    pub fn idf(&self, df: u32, total_docs: usize) -> f32 {
+        if df == 0 || total_docs == 0 {
+            return 0.0;
+        }
+        let n = total_docs as f32;
+        let df_f = df as f32;
+        ((n - df_f + 0.5) / (df_f + 0.5) + 1.0).ln()
+    }
+
+    /// Compute the TF normalization component (without IDF).
+    ///
+    /// Multiply by `idf()` to get the full BM25 score.
+    #[inline]
+    pub fn tf_norm(&self, tf: u32, doc_len: u32, avg_doc_len: f32) -> f32 {
+        let tf_f = tf as f32;
+        let doc_len_f = doc_len as f32;
+        let length_norm = 1.0 - self.b + self.b * (doc_len_f / avg_doc_len);
+        (tf_f * (self.k1 + 1.0)) / (tf_f + self.k1 * length_norm)
+    }
+
     /// Compute the BM25 score for a single term in a document.
     ///
     /// # Parameters
@@ -45,22 +69,7 @@ impl Bm25Params {
         avg_doc_len: f32,
         total_docs: usize,
     ) -> f32 {
-        if df == 0 || total_docs == 0 {
-            return 0.0;
-        }
-
-        // IDF: log((N - df + 0.5) / (df + 0.5) + 1)
-        let n = total_docs as f32;
-        let df_f = df as f32;
-        let idf = ((n - df_f + 0.5) / (df_f + 0.5) + 1.0).ln();
-
-        // TF normalization
-        let tf_f = tf as f32;
-        let doc_len_f = doc_len as f32;
-        let length_norm = 1.0 - self.b + self.b * (doc_len_f / avg_doc_len);
-        let tf_norm = (tf_f * (self.k1 + 1.0)) / (tf_f + self.k1 * length_norm);
-
-        idf * tf_norm
+        self.idf(df, total_docs) * self.tf_norm(tf, doc_len, avg_doc_len)
     }
 }
 

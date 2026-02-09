@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_core::VectorIndex;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{CosineDistance, HnswConfig, HnswGraph};
+use v_hnsw_graph::{NormalizedCosineDistance, HnswConfig, HnswGraph};
 
 use crate::is_interrupted;
 
@@ -291,7 +291,7 @@ fn embed_texts(model: &Model2VecModel, texts: &[&str]) -> Result<Vec<Vec<f32>>> 
 }
 
 /// Build HNSW index from embeddings.
-fn build_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<CosineDistance>> {
+fn build_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<NormalizedCosineDistance>> {
     let config = HnswConfig::builder()
         .dim(dim)
         .m(16)
@@ -299,7 +299,7 @@ fn build_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<CosineDi
         .build()
         .context("Failed to create HNSW config")?;
 
-    let mut hnsw: HnswGraph<CosineDistance> = HnswGraph::new(config, CosineDistance);
+    let mut hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::new(config, NormalizedCosineDistance);
 
     let pb = ProgressBar::new(embeddings.len() as u64);
     pb.set_style(
@@ -328,7 +328,7 @@ fn build_index(embeddings: &[Vec<f32>], dim: usize) -> Result<HnswGraph<CosineDi
 /// Save index and metadata to disk.
 fn save_index(
     output_dir: &Path,
-    _hnsw: &HnswGraph<CosineDistance>,
+    _hnsw: &HnswGraph<NormalizedCosineDistance>,
     chunks: &[(u64, String)],
     documents: &[Document],
 ) -> Result<()> {

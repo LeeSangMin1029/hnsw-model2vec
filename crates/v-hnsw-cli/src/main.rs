@@ -69,21 +69,6 @@ fn main() -> Result<()> {
             &model,
             batch_size,
         ),
-        Commands::Search {
-            path,
-            vector,
-            text,
-            k,
-            ef,
-            collection,
-        } => commands::search::run(commands::search::SearchParams {
-            path,
-            vector,
-            text,
-            k,
-            ef,
-            collection,
-        }),
         Commands::Delete { path, id } => commands::delete::run(path, id),
         Commands::Bench { path, queries, k } => commands::bench::run(path, queries, k),
         Commands::Export { path, output } => commands::export::run(path, output),
@@ -105,24 +90,13 @@ fn main() -> Result<()> {
         Commands::Collection { path, action } => commands::collection::run(path, action),
         Commands::BuildIndex { path } => commands::buildindex::run(path),
         Commands::Get { path, ids } => commands::get::run(path, ids),
-        Commands::Vsearch {
-            path,
-            query,
-            k,
-            ef,
-            model,
-            show_text,
-        } => commands::vsearch::run(commands::vsearch::VSearchParams {
-            path,
-            query,
-            k,
-            ef,
-            model,
-            show_text,
-        }),
         Commands::Add { db, input } => commands::add::run(db, input),
         Commands::Update { db, input } => commands::update::run(db, input),
-        Commands::Find { db, query, k, tag } => commands::find::run(db, query, k, tag),
+        Commands::Find { db, query, k, tag, full, fast, vector, ef } => {
+            commands::find::run(commands::find::FindParams {
+                db, query, k, tags: tag, full, fast, vector, ef,
+            })
+        }
         Commands::Serve {
             db,
             port,

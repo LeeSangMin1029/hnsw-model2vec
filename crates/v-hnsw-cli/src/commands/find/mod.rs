@@ -1,7 +1,10 @@
-//! Find command - Unified search with hybrid HNSW + BM25 and RRF fusion.
+//! Find command - Unified search: hybrid HNSW+BM25, BM25-only, and raw vector modes.
 //!
-//! Uses daemon mode by default for fast searches. Falls back to direct mode
-//! if daemon fails.
+//! Modes:
+//!   find db "query"              — hybrid (auto-embed + BM25, daemon preferred)
+//!   find db "query" --fast       — BM25-only (~100ms cold start)
+//!   find db --vector "0.1,..."   — raw vector dense-only
+//!   find db --vector "0.1,..." "query" — raw vector + BM25 hybrid
 
 mod direct;
 
@@ -16,17 +19,33 @@ use serde::{Deserialize, Serialize};
 use crate::commands::common::SearchResultItem;
 use super::serve;
 
+/// Parameters for the find command.
+pub struct FindParams {
+    pub db: PathBuf,
+    pub query: Option<String>,
+    pub k: usize,
+    pub tags: Vec<String>,
+    pub full: bool,
+    pub fast: bool,
+    pub vector: Option<String>,
+    pub ef: usize,
+}
+
 /// Search output for JSON formatting.
 #[derive(Debug, Serialize, Deserialize)]
-struct FindOutput {
+pub(super) struct FindOutput {
     results: Vec<SearchResultItem>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     query: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     total_docs: usize,
     elapsed_ms: f64,
+}
+
+pub(super) fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 /// JSON-RPC response for daemon communication.
@@ -107,44 +126,107 @@ fn try_daemon_search(
     Ok(search_response)
 }
 
-/// Run the find command.
-pub fn run(db_path: PathBuf, query: String, k: usize, tags: Vec<String>) -> Result<()> {
-    if !db_path.exists() {
-        anyhow::bail!("Database not found at {}", db_path.display());
+/// Truncate text to max_len chars, appending "..." if truncated.
+fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    let mut end = max_len;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
+}
+
+/// Compact the output: truncate text, strip home prefix from source.
+pub(super) fn compact_output(mut output: FindOutput) -> FindOutput {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default()
+        .replace('\\', "/");
+
+    for item in &mut output.results {
+        if let Some(ref text) = item.text {
+            let cleaned = text.replace('\n', " ");
+            item.text = Some(truncate_text(&cleaned, 150));
+        }
+        if let Some(ref source) = item.source {
+            let short = source
+                .strip_prefix(&home)
+                .unwrap_or(source)
+                .trim_start_matches('/');
+            item.source = Some(short.to_string());
+        }
+    }
+    output
+}
+
+/// Print FindOutput as JSON with optional compaction.
+fn print_output(output: FindOutput, full: bool) -> Result<()> {
+    let output = if full { output } else { compact_output(output) };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    Ok(())
+}
+
+/// Run the find command (unified entry point).
+pub fn run(params: FindParams) -> Result<()> {
+    let FindParams { db, query, k, tags, full, fast, vector, ef } = params;
+
+    if !db.exists() {
+        anyhow::bail!("Database not found at {}", db.display());
     }
 
+    // Validate: at least one of query or vector is required
+    if query.is_none() && vector.is_none() {
+        anyhow::bail!("At least one of <query> or --vector must be provided");
+    }
+
+    // --fast + --vector is invalid
+    if fast && vector.is_some() {
+        anyhow::bail!("--fast (BM25-only) cannot be used with --vector");
+    }
+
+    // Mode 1: BM25-only (--fast)
+    if fast {
+        let query = query.unwrap(); // validated above
+        return direct::run_bm25_only(db, query, k, tags, full);
+    }
+
+    // Mode 2: Raw vector (--vector provided)
+    if let Some(ref vec_str) = vector {
+        let raw_vec = parse_vector(vec_str)?;
+        return direct::run_raw_vector(db, raw_vec, query, k, tags, full, ef);
+    }
+
+    // Mode 3: Hybrid (default) — daemon preferred
+    let query = query.unwrap(); // validated above
+    run_hybrid(db, query, k, tags, full)
+}
+
+/// Parse a comma-separated vector string.
+fn parse_vector(s: &str) -> Result<Vec<f32>> {
+    s.split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .with_context(|| format!("invalid number: '{part}'"))
+        })
+        .collect()
+}
+
+/// Hybrid search: try daemon first, then direct fallback.
+fn run_hybrid(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, full: bool) -> Result<()> {
     // Try daemon mode first
     match try_daemon_search(&db_path, &query, k, &tags) {
-        Ok(output) => {
-            let output = FindOutput {
-                query: query.clone(),
-                model: String::from("(daemon)"),
-                total_docs: 0,
-                ..output
-            };
-            let json = serde_json::to_string_pretty(&output)?;
-            println!("{json}");
-            return Ok(());
-        }
-        Err(_) => {
-            eprintln!("Daemon not running, starting...");
-        }
+        Ok(output) => return print_output(output, full),
+        Err(_) => eprintln!("Daemon not running, starting..."),
     }
 
     // Try to spawn daemon
     if direct::spawn_daemon(&db_path).is_ok() {
         match try_daemon_search(&db_path, &query, k, &tags) {
-            Ok(output) => {
-                let output = FindOutput {
-                    query: query.clone(),
-                    model: String::from("(daemon)"),
-                    total_docs: 0,
-                    ..output
-                };
-                let json = serde_json::to_string_pretty(&output)?;
-                println!("{json}");
-                return Ok(());
-            }
+            Ok(output) => return print_output(output, full),
             Err(e) => {
                 eprintln!("Daemon search failed: {}", e);
                 eprintln!("Falling back to direct search...");
@@ -155,5 +237,5 @@ pub fn run(db_path: PathBuf, query: String, k: usize, tags: Vec<String>) -> Resu
     }
 
     // Fallback: direct search
-    direct::run_direct(db_path, query, k, tags)
+    direct::run_direct(db_path, query, k, tags, full)
 }

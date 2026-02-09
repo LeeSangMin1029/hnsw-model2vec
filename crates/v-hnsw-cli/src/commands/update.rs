@@ -77,7 +77,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         file_index.files.len()
     );
 
-    let mut engine = StorageEngine::open(&db_path)
+    let mut engine = StorageEngine::open_exclusive(&db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
     // Scan input folder for all markdown files

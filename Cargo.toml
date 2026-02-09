@@ -41,12 +41,19 @@ cubecl = "0.9"
 # Storage
 memmap2 = "0.9"
 crc32fast = "1"
+fs2 = "0.4"
 
 # Tokenizer (Korean)
 unicode-normalization = "0.1"
 
 # Logging
 tracing = "0.1"
+
+# Cache
+lru = "0.16"
+
+# String compression
+zstd = "0.13"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

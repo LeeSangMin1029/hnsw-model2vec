@@ -48,10 +48,14 @@ pub struct StorageEngine {
     checkpoint_seq: u64,
     ops_since_checkpoint: usize,
     next_batch_id: u64,
+    _write_lock: Option<std::fs::File>,
 }
 
 impl StorageEngine {
     /// Create a new storage directory with empty stores.
+    ///
+    /// Automatically acquires an exclusive write lock. The lock is released
+    /// when the `StorageEngine` is dropped.
     ///
     /// # Errors
     ///
@@ -59,6 +63,8 @@ impl StorageEngine {
     pub fn create(dir: impl AsRef<Path>, config: StorageConfig) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
+
+        let lock_file = Self::acquire_write_lock(&dir)?;
 
         let vectors_path = dir.join("vectors.bin");
         let payload_path = dir.join("payload.dat");
@@ -78,6 +84,7 @@ impl StorageEngine {
             checkpoint_seq: 0,
             ops_since_checkpoint: 0,
             next_batch_id: 1,
+            _write_lock: Some(lock_file),
         })
     }
 
@@ -135,12 +142,44 @@ impl StorageEngine {
             checkpoint_seq: 0,
             ops_since_checkpoint: 0,
             next_batch_id: 1,
+            _write_lock: None,
         };
 
         // Replay WAL to recover un-checkpointed operations
         engine.replay_wal()?;
 
         Ok(engine)
+    }
+
+    /// Open an existing storage directory with an exclusive write lock.
+    ///
+    /// Other write operations on the same database will block until this
+    /// engine is dropped. Read operations are not affected.
+    pub fn open_exclusive(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir_ref = dir.as_ref();
+        let lock_file = Self::acquire_write_lock(dir_ref)?;
+        let mut engine = Self::open(dir_ref)?;
+        engine._write_lock = Some(lock_file);
+        Ok(engine)
+    }
+
+    /// Acquire a blocking exclusive lock on the database directory.
+    ///
+    /// Uses `fs2` advisory file locking. If another process holds the lock,
+    /// this call blocks until the lock becomes available. The lock is
+    /// automatically released when the returned `File` is dropped or the
+    /// process exits (including crashes).
+    fn acquire_write_lock(dir: &Path) -> Result<std::fs::File> {
+        use fs2::FileExt;
+
+        let lock_path = dir.join("write.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+
+        file.lock_exclusive().map_err(VhnswError::Storage)?;
+        Ok(file)
     }
 
     /// Insert a point with vector + payload + text.
@@ -150,12 +189,15 @@ impl StorageEngine {
     /// 3. Buffer payload and text in FilePayloadStore
     /// 4. Auto-checkpoint if threshold reached
     pub fn insert(&mut self, id: PointId, vector: &[f32], payload: Payload, text: &str) -> Result<()> {
+        // Allocate text once, share between WAL and buffer
+        let text_owned = text.to_string();
+
         // Write to WAL first for durability
         self.wal.append(&WalRecord::Insert {
             id,
             vector: vector.to_vec(),
             payload: payload.clone(),
-            text: text.to_string(),
+            text: text_owned.clone(),
         })?;
 
         // Insert into vector store
@@ -163,7 +205,7 @@ impl StorageEngine {
 
         // Buffer payload and text (will be flushed at checkpoint)
         self.payloads.buffer_payload(id, payload);
-        self.payloads.buffer_text(id, text.to_string());
+        self.payloads.buffer_text(id, text_owned);
 
         self.ops_since_checkpoint += 1;
 

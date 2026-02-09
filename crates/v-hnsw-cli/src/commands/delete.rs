@@ -13,7 +13,7 @@ pub fn run(path: PathBuf, id: u64) -> Result<()> {
     }
 
     // Open storage
-    let mut engine = StorageEngine::open(&path)
+    let mut engine = StorageEngine::open_exclusive(&path)
         .with_context(|| format!("failed to open database at {}", path.display()))?;
 
     // Remove the point

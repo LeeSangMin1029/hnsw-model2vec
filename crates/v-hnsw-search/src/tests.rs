@@ -386,10 +386,11 @@ fn test_hybrid_search_custom_config() -> v_hnsw_core::Result<()> {
     let hnsw = HnswGraph::with_seed(hnsw_config, L2Distance, 42);
     let bm25 = Bm25Index::new(SimpleTokenizer);
 
-    // Custom config: heavy dense weight
+    // Custom config: heavy dense weight via fusion_alpha
     let search_config = HybridSearchConfig::builder()
         .dense_weight(0.9)
         .sparse_weight(0.1)
+        .fusion_alpha(0.9)
         .build();
 
     let mut searcher = SimpleHybridSearcher::new(hnsw, bm25, search_config);
