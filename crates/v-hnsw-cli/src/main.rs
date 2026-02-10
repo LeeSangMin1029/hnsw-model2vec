@@ -8,11 +8,11 @@ mod cli;
 mod commands;
 pub mod error;
 
-use anyhow::Result;
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cli::{Cli, Commands};
+use error::CliError;
 
 /// Global flag for Ctrl+C handling.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -22,7 +22,7 @@ pub fn is_interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
 }
 
-fn main() -> Result<()> {
+fn main() {
     // Initialize tracing (default: v_hnsw=info, override via RUST_LOG)
     #[allow(clippy::expect_used)]
     let directive = "v_hnsw=info".parse().expect("static directive");
@@ -40,6 +40,16 @@ fn main() -> Result<()> {
         eprintln!("Warning: Failed to set Ctrl+C handler: {e}");
     }
 
+    if let Err(err) = run() {
+        let cli_err = CliError::from(err);
+        tracing::error!("{cli_err:#}");
+        log_to_file(&cli_err);
+        eprintln!("Error: {cli_err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -104,4 +114,30 @@ fn main() -> Result<()> {
             background,
         } => commands::serve::run(db, port, timeout, background),
     }
+}
+
+/// Best-effort append error to `~/.v-hnsw/logs/v-hnsw.log`.
+fn log_to_file(err: &CliError) {
+    use std::io::Write;
+
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"));
+    let Some(home) = home else { return };
+
+    let log_dir = std::path::Path::new(&home).join(".v-hnsw").join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("v-hnsw.log"))
+    else {
+        return;
+    };
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = writeln!(f, "[{ts}] {err:?}");
 }
