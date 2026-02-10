@@ -331,7 +331,7 @@ pub fn update_indexes_incremental(
         ensure_korean_dict()?;
     }
 
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load(&bm25_path)
+    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load_mutable(&bm25_path)
         .with_context(|| "Failed to load BM25 index")?;
 
     let payload_store = engine.payload_store();

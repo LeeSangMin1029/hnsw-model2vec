@@ -168,7 +168,7 @@ pub enum Commands {
         /// Input folder to scan for changes.
         input: PathBuf,
     },
-    /// Search database (hybrid HNSW+BM25 by default, supports raw vector and BM25-only modes).
+    /// Search database (hybrid HNSW+BM25 by default, supports raw vector mode).
     Find {
         /// Path to the database directory.
         db: PathBuf,
@@ -183,9 +183,6 @@ pub enum Commands {
         /// Show full text (default: truncated to 150 chars).
         #[arg(long)]
         full: bool,
-        /// BM25-only search (no model loading, ~100ms cold start).
-        #[arg(long)]
-        fast: bool,
         /// Raw query vector as comma-separated floats (bypasses auto-embedding).
         #[arg(long)]
         vector: Option<String>,

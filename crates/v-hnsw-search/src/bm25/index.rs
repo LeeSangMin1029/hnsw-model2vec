@@ -462,12 +462,16 @@ impl<T: Tokenizer> Bm25Index<T> {
             }
         }
 
-        // Fall back to bincode
-        Self::load_bincode(path)
+        // Fall back to bincode (mutable HashMap mode)
+        Self::load_mutable(path)
     }
 
-    /// Load from legacy bincode format.
-    fn load_bincode(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
+    /// Load index in mutable (HashMap) mode from bincode format.
+    ///
+    /// Use this instead of `load()` when you need to mutate the index
+    /// (e.g. `add_document` / `remove_document`, then `save`).
+    /// `load()` may return a read-only FST index that silently ignores mutations.
+    pub fn load_mutable(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
         use std::io::Read;
 
         let mut file = std::fs::File::open(path.as_ref())?;

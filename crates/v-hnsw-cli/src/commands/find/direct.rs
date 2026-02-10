@@ -93,53 +93,6 @@ pub fn spawn_daemon(db_path: &Path) -> Result<()> {
     }
 }
 
-/// BM25-only search (no model loading, fast cold start).
-pub fn run_bm25_only(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, full: bool) -> Result<()> {
-    let bm25_path = db_path.join("bm25.bin");
-    if !bm25_path.exists() {
-        anyhow::bail!("BM25 index not found. Run 'v-hnsw add' first to index data.");
-    }
-
-    let t0 = Instant::now();
-    common::ensure_korean_dict()?;
-    let bm25: Bm25Index<KoreanBm25Tokenizer> =
-        Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
-    eprintln!("  BM25 load: {:.0}ms", t0.elapsed().as_millis());
-
-    let engine = StorageEngine::open(&db_path).context("Failed to open storage")?;
-    let payload_store = engine.payload_store();
-
-    let start = Instant::now();
-    let total_docs = bm25.len();
-
-    let fetch_k = if tags.is_empty() { k } else { k * 10 };
-    let mut results = bm25.search(&query, fetch_k);
-
-    if !tags.is_empty() {
-        let allowed_ids = payload_store.points_by_tags(&tags);
-        let allowed_set: std::collections::HashSet<_> = allowed_ids.into_iter().collect();
-        results.retain(|(id, _)| allowed_set.contains(id));
-        results.truncate(k);
-    }
-
-    let results_with_text = common::build_results(&results, payload_store);
-    let elapsed = start.elapsed();
-
-    let output = FindOutput {
-        results: results_with_text,
-        query,
-        model: String::new(),
-        total_docs,
-        elapsed_ms: elapsed.as_secs_f64() * 1000.0,
-    };
-
-    let output = if full { output } else { super::compact_output(output) };
-    let json = serde_json::to_string_pretty(&output).context("Failed to serialize output")?;
-    println!("{json}");
-
-    Ok(())
-}
-
 /// Raw vector search (dense-only or dense+BM25 hybrid).
 pub fn run_raw_vector(
     db_path: PathBuf,

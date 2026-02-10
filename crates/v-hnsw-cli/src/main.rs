@@ -92,9 +92,9 @@ fn main() -> Result<()> {
         Commands::Get { path, ids } => commands::get::run(path, ids),
         Commands::Add { db, input } => commands::add::run(db, input),
         Commands::Update { db, input } => commands::update::run(db, input),
-        Commands::Find { db, query, k, tag, full, fast, vector, ef } => {
+        Commands::Find { db, query, k, tag, full, vector, ef } => {
             commands::find::run(commands::find::FindParams {
-                db, query, k, tags: tag, full, fast, vector, ef,
+                db, query, k, tags: tag, full, vector, ef,
             })
         }
         Commands::Serve {

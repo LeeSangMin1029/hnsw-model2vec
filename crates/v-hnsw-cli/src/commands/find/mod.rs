@@ -1,8 +1,7 @@
-//! Find command - Unified search: hybrid HNSW+BM25, BM25-only, and raw vector modes.
+//! Find command - Unified search: hybrid HNSW+BM25 and raw vector modes.
 //!
 //! Modes:
 //!   find db "query"              — hybrid (auto-embed + BM25, daemon preferred)
-//!   find db "query" --fast       — BM25-only (~100ms cold start)
 //!   find db --vector "0.1,..."   — raw vector dense-only
 //!   find db --vector "0.1,..." "query" — raw vector + BM25 hybrid
 
@@ -26,7 +25,6 @@ pub struct FindParams {
     pub k: usize,
     pub tags: Vec<String>,
     pub full: bool,
-    pub fast: bool,
     pub vector: Option<String>,
     pub ef: usize,
 }
@@ -171,7 +169,7 @@ fn print_output(output: FindOutput, full: bool) -> Result<()> {
 
 /// Run the find command (unified entry point).
 pub fn run(params: FindParams) -> Result<()> {
-    let FindParams { db, query, k, tags, full, fast, vector, ef } = params;
+    let FindParams { db, query, k, tags, full, vector, ef } = params;
 
     if !db.exists() {
         anyhow::bail!("Database not found at {}", db.display());
@@ -182,18 +180,7 @@ pub fn run(params: FindParams) -> Result<()> {
         anyhow::bail!("At least one of <query> or --vector must be provided");
     }
 
-    // --fast + --vector is invalid
-    if fast && vector.is_some() {
-        anyhow::bail!("--fast (BM25-only) cannot be used with --vector");
-    }
-
-    // Mode 1: BM25-only (--fast)
-    if fast {
-        let query = query.unwrap(); // validated above
-        return direct::run_bm25_only(db, query, k, tags, full);
-    }
-
-    // Mode 2: Raw vector (--vector provided)
+    // Mode 1: Raw vector (--vector provided)
     if let Some(ref vec_str) = vector {
         let raw_vec = parse_vector(vec_str)?;
         return direct::run_raw_vector(db, raw_vec, query, k, tags, full, ef);
