@@ -181,7 +181,9 @@ impl Bm25Snapshot {
         &self, tokenizer: &T, query: &str, limit: usize,
     ) -> Vec<(PointId, f32)> {
         if self.total_docs == 0 { return Vec::new(); }
-        let tokens = tokenizer.tokenize(query);
+        let mut tokens = tokenizer.tokenize(query);
+        let bigrams = super::bigram::generate(&tokens);
+        tokens.extend(bigrams);
         let terms = self.resolve_terms(&tokens);
         if terms.is_empty() { return Vec::new(); }
         self.accumulate_and_rank(&terms, limit)
@@ -192,7 +194,9 @@ impl Bm25Snapshot {
         &self, tokenizer: &T, query: &str, doc_ids: &[PointId],
     ) -> Vec<(PointId, f32)> {
         if self.total_docs == 0 || doc_ids.is_empty() { return Vec::new(); }
-        let tokens = tokenizer.tokenize(query);
+        let mut tokens = tokenizer.tokenize(query);
+        let bigrams = super::bigram::generate(&tokens);
+        tokens.extend(bigrams);
         let terms = self.resolve_terms(&tokens);
         if terms.is_empty() { return Vec::new(); }
 

@@ -180,12 +180,18 @@ impl<T: Tokenizer> Bm25Index<T> {
 
         // Tokenize the text
         let tokens = self.tokenizer.tokenize(text);
-        let doc_len = tokens.len() as u32;
+        let doc_len = tokens.len() as u32; // unigram only (bigrams don't inflate length norm)
 
-        // Count term frequencies
+        // Generate bigram tokens for proximity scoring
+        let bigrams = super::bigram::generate(&tokens);
+
+        // Count term frequencies (unigrams + bigrams)
         let mut term_freqs: HashMap<String, u32> = HashMap::new();
         for token in tokens {
             *term_freqs.entry(token).or_insert(0) += 1;
+        }
+        for bigram in bigrams {
+            *term_freqs.entry(bigram).or_insert(0) += 1;
         }
 
         // Update posting lists
@@ -244,7 +250,9 @@ impl<T: Tokenizer> Bm25Index<T> {
         if self.total_docs == 0 {
             return Vec::new();
         }
-        let query_tokens = self.tokenizer.tokenize(query);
+        let mut query_tokens = self.tokenizer.tokenize(query);
+        let bigrams = super::bigram::generate(&query_tokens);
+        query_tokens.extend(bigrams);
         let terms = self.resolve_terms(&query_tokens);
         if terms.is_empty() {
             return Vec::new();
@@ -287,7 +295,9 @@ impl<T: Tokenizer> Bm25Index<T> {
         if self.total_docs == 0 || doc_ids.is_empty() {
             return Vec::new();
         }
-        let query_tokens = self.tokenizer.tokenize(query);
+        let mut query_tokens = self.tokenizer.tokenize(query);
+        let bigrams = super::bigram::generate(&query_tokens);
+        query_tokens.extend(bigrams);
         let terms = self.resolve_terms(&query_tokens);
         if terms.is_empty() {
             return Vec::new();
