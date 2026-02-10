@@ -243,32 +243,45 @@ fn load_db(db_path: &Path) -> Result<DbIndexes> {
     Ok(DbIndexes { dense, sparse, engine })
 }
 
-/// Load dense index: prefer snapshot (mmap), fallback to heap (bincode).
+/// Check if `a` is newer than `b` by file modification time.
+fn is_newer(a: &Path, b: &Path) -> bool {
+    let Ok(ma) = std::fs::metadata(a) else { return false };
+    let Ok(mb) = std::fs::metadata(b) else { return true };
+    let Ok(ta) = ma.modified() else { return false };
+    let Ok(tb) = mb.modified() else { return true };
+    ta > tb
+}
+
+/// Load dense index: prefer the freshest source (snapshot vs heap).
 fn load_dense(db_path: &Path) -> Result<DenseIndex> {
     let snap_path = db_path.join("hnsw.snap");
-    if snap_path.exists() {
+    let bin_path = db_path.join("hnsw.bin");
+
+    // Use snapshot only if it exists AND is not stale vs .bin
+    if snap_path.exists() && !is_newer(&bin_path, &snap_path) {
         let snap = HnswSnapshot::open(&snap_path).context("Failed to open HNSW snapshot")?;
         eprintln!("[daemon] HNSW snapshot loaded: {} vectors (mmap)", snap.len());
         return Ok(DenseIndex::Snapshot(snap));
     }
-    let hnsw_path = db_path.join("hnsw.bin");
-    let hnsw = HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
+    let hnsw = HnswGraph::load(&bin_path, NormalizedCosineDistance)
         .context("Failed to load HNSW index")?;
     eprintln!("[daemon] HNSW heap loaded: {} vectors", hnsw.len());
     Ok(DenseIndex::Heap(hnsw))
 }
 
-/// Load sparse index: prefer snapshot (mmap+FST), fallback to heap (bincode/FST).
+/// Load sparse index: prefer the freshest source (snapshot vs heap).
 fn load_sparse(db_path: &Path) -> Result<SparseIndex> {
     let snap_path = db_path.join("bm25.snap");
+    let bin_path = db_path.join("bm25.bin");
     let fst_path = db_path.join("bm25_terms.fst");
-    if snap_path.exists() && fst_path.exists() {
+
+    // Use snapshot only if it exists AND is not stale vs .bin
+    if snap_path.exists() && fst_path.exists() && !is_newer(&bin_path, &snap_path) {
         let snap = Bm25Snapshot::open(db_path).context("Failed to open BM25 snapshot")?;
         eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap)", snap.total_docs());
         return Ok(SparseIndex::Snapshot(snap));
     }
-    let bm25_path = db_path.join("bm25.bin");
-    let bm25 = Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
+    let bm25 = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
     eprintln!("[daemon] BM25 heap loaded");
     Ok(SparseIndex::Heap(bm25))
 }
