@@ -239,7 +239,7 @@ fn test_rrf_fusion_weighted() {
     let list2 = vec![(2, 0.95)];
 
     // Weight list 1 at 3x
-    let fused = rrf.fuse_weighted(&[(3.0, list1), (1.0, list2)], 10);
+    let fused = rrf.fuse_weighted(&[(3.0, &list1), (1.0, &list2)], 10);
 
     // Doc 1 should be first due to higher weight
     assert_eq!(fused[0].0, 1);

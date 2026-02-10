@@ -68,10 +68,8 @@ impl ConvexFusion {
             return Vec::new();
         }
 
-        // Normalize dense distances to [0, 1] scores (invert: small distance → high score)
-        let dense_scores = normalize_dense(dense);
-        // Normalize sparse scores to [0, 1]
-        let sparse_scores = normalize_sparse(sparse);
+        let dense_scores = normalize(dense, true);   // distance: invert
+        let sparse_scores = normalize(sparse, false); // score: keep direction
 
         // Merge into combined scores
         let mut combined: HashMap<PointId, f32> = HashMap::new();
@@ -94,45 +92,24 @@ impl ConvexFusion {
     }
 }
 
-/// Normalize dense distances to [0, 1] scores.
-/// Lower distance → higher score. Uses min-max normalization.
-fn normalize_dense(results: &[(PointId, f32)]) -> HashMap<PointId, f32> {
+/// Min-max normalize scores to [0, 1].
+/// If `invert`, lower values → higher scores (for distance metrics).
+fn normalize(results: &[(PointId, f32)], invert: bool) -> HashMap<PointId, f32> {
     let mut scores = HashMap::with_capacity(results.len());
     if results.is_empty() {
         return scores;
     }
 
-    let (min_dist, max_dist) = min_max_values(results);
-    let range = max_dist - min_dist;
+    let (min_val, max_val) = min_max_values(results);
+    let range = max_val - min_val;
 
-    for &(id, dist) in results {
-        let normalized = if range > f32::EPSILON {
-            1.0 - (dist - min_dist) / range // invert: small dist → high score
+    for &(id, val) in results {
+        let normalized = if range <= f32::EPSILON {
+            1.0
+        } else if invert {
+            1.0 - (val - min_val) / range
         } else {
-            1.0 // all same distance → max score
-        };
-        scores.insert(id, normalized);
-    }
-
-    scores
-}
-
-/// Normalize sparse scores to [0, 1].
-/// Higher score → higher normalized score. Uses min-max normalization.
-fn normalize_sparse(results: &[(PointId, f32)]) -> HashMap<PointId, f32> {
-    let mut scores = HashMap::with_capacity(results.len());
-    if results.is_empty() {
-        return scores;
-    }
-
-    let (min_score, max_score) = min_max_values(results);
-    let range = max_score - min_score;
-
-    for &(id, score) in results {
-        let normalized = if range > f32::EPSILON {
-            (score - min_score) / range
-        } else {
-            1.0 // all same score → max score
+            (val - min_val) / range
         };
         scores.insert(id, normalized);
     }
@@ -254,7 +231,7 @@ mod tests {
     fn test_normalize_same_values() {
         // When all distances are the same, all should get max score
         let results = vec![(1, 0.5), (2, 0.5), (3, 0.5)];
-        let scores = normalize_dense(&results);
+        let scores = normalize(&results, true);
         for (_, score) in &scores {
             assert!((*score - 1.0).abs() < f32::EPSILON);
         }

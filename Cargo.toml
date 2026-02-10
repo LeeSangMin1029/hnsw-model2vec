@@ -35,9 +35,6 @@ bincode = { version = "2", features = ["serde"] }
 rayon = "1"
 crossbeam = "0.8"
 
-# GPU
-cubecl = "0.9"
-
 # Storage
 memmap2 = "0.9"
 bytemuck = { version = "1", features = ["derive"] }

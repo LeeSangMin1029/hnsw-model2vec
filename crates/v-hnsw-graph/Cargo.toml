@@ -13,13 +13,6 @@ tracing.workspace = true
 bincode.workspace = true
 bytemuck.workspace = true
 memmap2.workspace = true
-cubecl = { workspace = true, optional = true }
-
-[features]
-default = []
-gpu = ["dep:cubecl"]
-cuda = ["gpu", "cubecl/cuda"]
-wgpu = ["gpu", "cubecl/wgpu"]
 
 [dev-dependencies]
 proptest.workspace = true

@@ -11,7 +11,7 @@ use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
-use super::common;
+use super::common::{self, IngestRecord};
 use super::create::DbConfig;
 use super::file_index;
 use crate::is_interrupted;
@@ -30,18 +30,6 @@ struct UpdateStats {
     modified: usize,
     deleted: usize,
     unchanged: usize,
-}
-
-/// A record for batch processing.
-struct UpdateRecord {
-    id: u64,
-    text: String,
-    source: String,
-    title: Option<String>,
-    tags: Vec<String>,
-    chunk_index: usize,
-    chunk_total: usize,
-    source_modified_at: u64,
 }
 
 /// Run the update command - incremental indexing.
@@ -190,13 +178,13 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
             .unwrap_or_default();
         let chunk_total = chunks.len();
 
-        let mut records: Vec<UpdateRecord> = Vec::new();
+        let mut records: Vec<IngestRecord> = Vec::new();
         let mut chunk_ids = Vec::new();
 
         for chunk in chunks {
             let id = common::generate_id(source, chunk.chunk_index);
             chunk_ids.push(id);
-            records.push(UpdateRecord {
+            records.push(IngestRecord {
                 id,
                 text: chunk.text,
                 source: source.clone(),
@@ -278,25 +266,13 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
 
 /// Process a batch of records: embed and insert.
 fn process_records(
-    records: &[UpdateRecord],
+    records: &[IngestRecord],
     model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<()> {
-    let max_chars = 8000;
-
     let texts: Vec<String> = records
         .iter()
-        .map(|r| {
-            if r.text.len() > max_chars {
-                let mut end = max_chars;
-                while !r.text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                r.text[..end].to_string()
-            } else {
-                r.text.clone()
-            }
-        })
+        .map(|r| common::truncate_for_embed(&r.text).to_string())
         .collect();
 
     let embeddings = common::embed_sorted(model, &texts).context("Embedding failed")?;

@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -14,7 +14,6 @@ use super::{EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchPa
 pub(crate) fn handle_client(
     stream: TcpStream,
     state: &mut DaemonState,
-    db_path: &Path,
     last_activity: &mut Instant,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -35,8 +34,9 @@ pub(crate) fn handle_client(
         "search" => {
             let params: SearchParams =
                 serde_json::from_value(request.params).context("Invalid search params")?;
+            let db_path = PathBuf::from(&params.db);
 
-            match state.search(&params.query, params.k, params.tags) {
+            match state.search(&db_path, &params.query, params.k, params.tags) {
                 Ok(result) => JsonRpcResponse {
                     id: request.id,
                     result: Some(serde_json::to_value(result)?),
@@ -57,21 +57,26 @@ pub(crate) fn handle_client(
             result: Some(serde_json::json!({"status": "ok"})),
             error: None,
         },
-        "reload" => match state.reload(db_path) {
-            Ok(()) => JsonRpcResponse {
-                id: request.id,
-                result: Some(serde_json::json!({"status": "reloaded"})),
-                error: None,
-            },
-            Err(e) => JsonRpcResponse {
-                id: request.id,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -2,
-                    message: format!("Reload failed: {}", e),
-                }),
-            },
-        },
+        "reload" => {
+            let db_path: String = request.params
+                .get("db").and_then(|d| d.as_str())
+                .unwrap_or("").to_string();
+            match state.reload(&PathBuf::from(&db_path)) {
+                Ok(()) => JsonRpcResponse {
+                    id: request.id,
+                    result: Some(serde_json::json!({"status": "reloaded"})),
+                    error: None,
+                },
+                Err(e) => JsonRpcResponse {
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -2,
+                        message: format!("Reload failed: {}", e),
+                    }),
+                },
+            }
+        }
         "embed" => {
             let params: EmbedParams =
                 serde_json::from_value(request.params).context("Invalid embed params")?;

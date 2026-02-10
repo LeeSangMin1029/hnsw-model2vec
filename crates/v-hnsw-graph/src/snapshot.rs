@@ -9,7 +9,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
-use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorStore, VhnswError};
+use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorStore, VhnswError, storage_err, read_le_u64};
 
 use crate::config::HnswConfig;
 use crate::graph::HnswGraph;
@@ -45,10 +45,6 @@ pub struct HnswSnapshot {
     entry_point: Option<PointId>,
     max_layer: LayerId,
     config: HnswConfig,
-}
-
-fn storage_err(msg: &str) -> VhnswError {
-    VhnswError::Storage(std::io::Error::other(msg))
 }
 
 impl HnswSnapshot {
@@ -210,12 +206,12 @@ impl NodeGraph for HnswSnapshot {
 
         // Skip preceding layers
         for _ in 0..layer {
-            let count = read_u64(&self.mmap, off)? as usize;
+            let count = read_le_u64(&self.mmap, off)? as usize;
             off += 8 + count * 8;
         }
 
         // Read target layer
-        let count = read_u64(&self.mmap, off)? as usize;
+        let count = read_le_u64(&self.mmap, off)? as usize;
         if count == 0 {
             return Some(&[]);
         }
@@ -226,12 +222,6 @@ impl NodeGraph for HnswSnapshot {
     fn is_deleted(&self, id: PointId) -> bool {
         self.find_entry(id).is_none_or(|e| (e.max_layer_and_flags >> 32) & 1 != 0)
     }
-}
-
-/// Read a little-endian u64 from a byte slice at the given offset.
-fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
-    let bytes: [u8; 8] = data.get(offset..offset + 8)?.try_into().ok()?;
-    Some(u64::from_le_bytes(bytes))
 }
 
 #[cfg(test)]

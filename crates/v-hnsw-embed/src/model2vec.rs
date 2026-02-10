@@ -3,8 +3,6 @@
 //! This module provides integration with the official model2vec-rs library for lightweight,
 //! static embedding models. Supports automatic download from HuggingFace Hub.
 
-use std::path::Path;
-
 use crate::error::EmbedError;
 use crate::model::{EmbeddingModel, Result};
 use model2vec_rs::model::StaticModel;
@@ -38,9 +36,6 @@ impl Model2VecModel {
     ///
     /// Returns `EmbedError::ModelInit` if model loading fails.
     pub fn new() -> Result<Self> {
-        if let Some(f16_path) = find_f16_model() {
-            return Self::from_pretrained(f16_path.to_str().unwrap_or(DEFAULT_MODEL));
-        }
         Self::from_pretrained(DEFAULT_MODEL)
     }
 
@@ -95,10 +90,7 @@ impl Model2VecModel {
 
 /// Check if a local f16 model exists at ~/.v-hnsw/models/.
 fn find_f16_model() -> Option<std::path::PathBuf> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    let path = Path::new(&home).join(".v-hnsw").join("models").join(F16_SUBDIR);
+    let path = v_hnsw_core::data_dir().join("models").join(F16_SUBDIR);
     if path.join("model.safetensors").exists() && path.join("tokenizer.json").exists() {
         Some(path)
     } else {

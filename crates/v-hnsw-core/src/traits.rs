@@ -67,24 +67,6 @@ pub trait VectorIndex: Send + Sync {
     }
 }
 
-/// A vector quantizer that compresses vectors for faster distance computation.
-pub trait Quantizer: Send + Sync {
-    /// The compressed representation of a vector.
-    type Encoded: Send + Sync;
-
-    /// Train the quantizer on a set of representative vectors.
-    fn train(&mut self, vectors: &[&[f32]]) -> Result<()>;
-
-    /// Encode a vector into its compressed form.
-    fn encode(&self, vector: &[f32]) -> Result<Self::Encoded>;
-
-    /// Compute approximate distance between two encoded vectors.
-    fn distance_encoded(&self, a: &Self::Encoded, b: &Self::Encoded) -> f32;
-
-    /// Compression ratio (original_size / encoded_size).
-    fn compression_ratio(&self) -> f32;
-}
-
 /// Storage backend for payload data (metadata + text) associated with vector points.
 pub trait PayloadStore: Send + Sync {
     /// Retrieve metadata for a point.

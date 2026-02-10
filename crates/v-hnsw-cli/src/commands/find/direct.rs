@@ -3,7 +3,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -19,59 +18,29 @@ use crate::commands::serve;
 
 use super::FindOutput;
 
-/// Spawn daemon in background and wait for it to be ready.
+/// Spawn global daemon in background and wait for it to be ready.
+///
+/// `db_path` is passed so the daemon can preload that database on startup.
 pub fn spawn_daemon(db_path: &Path) -> Result<()> {
-    let canonical_path = db_path
+    let canonical = db_path
         .canonicalize()
         .with_context(|| format!("Database not found: {}", db_path.display()))?;
+    let path_str = canonical.to_str().context("Non-UTF8 path")?;
 
-    eprintln!("Starting daemon for {}...", canonical_path.display());
-
-    let exe = std::env::current_exe()?;
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        let path_str = canonical_path.to_str().context("Non-UTF8 path")?;
-        Command::new(&exe)
-            .args(["serve", path_str, "--timeout", "300"])
-            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("Failed to spawn daemon")?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        let path_str = canonical_path.to_str().context("Non-UTF8 path")?;
-        Command::new(&exe)
-            .args(["serve", path_str, "--timeout", "300"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("Failed to spawn daemon")?;
-    }
+    eprintln!("Starting daemon for {}...", canonical.display());
+    common::spawn_detached(&["serve", path_str, "--timeout", "300"])?;
 
     let start = Instant::now();
     let timeout = Duration::from_secs(60);
 
-    eprintln!("Waiting for daemon to load model...");
+    eprintln!("Waiting for daemon to be ready...");
 
     loop {
         if start.elapsed() > timeout {
-            anyhow::bail!(
-                "Timeout waiting for daemon to start ({}s)",
-                timeout.as_secs()
-            );
+            anyhow::bail!("Timeout waiting for daemon to start ({}s)", timeout.as_secs());
         }
 
-        if let Some(port) = serve::read_port_file(&canonical_path)
+        if let Some(port) = serve::read_port_file()
             && let Ok(addr) = format!("127.0.0.1:{}", port).parse()
             && let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500))
         {

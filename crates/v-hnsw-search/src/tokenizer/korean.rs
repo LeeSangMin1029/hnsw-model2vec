@@ -334,10 +334,7 @@ mod tests {
         if let Ok(path) = std::env::var("LINDERA_KO_DIC_PATH") {
             return PathBuf::from(path);
         }
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .expect("HOME or USERPROFILE env var");
-        PathBuf::from(home).join(".v-hnsw/dict/ko-dic")
+        v_hnsw_core::ko_dic_dir()
     }
 
     #[test]

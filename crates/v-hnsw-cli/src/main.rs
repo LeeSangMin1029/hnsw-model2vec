@@ -120,11 +120,7 @@ fn run() -> anyhow::Result<()> {
 fn log_to_file(err: &CliError) {
     use std::io::Write;
 
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"));
-    let Some(home) = home else { return };
-
-    let log_dir = std::path::Path::new(&home).join(".v-hnsw").join("logs");
+    let log_dir = v_hnsw_core::data_dir().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
 
     let Ok(mut f) = std::fs::OpenOptions::new()

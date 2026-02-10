@@ -4,62 +4,11 @@ mod embed_mode;
 mod standard;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use v_hnsw_core::Payload;
-use v_hnsw_storage::{StorageConfig, StorageEngine};
 
-use super::create::DbConfig;
-
-/// Auto-create the database when it does not exist (embed mode only).
-fn auto_create_db(
-    path: &PathBuf,
-    dim: usize,
-    embed_model: Option<&str>,
-) -> Result<StorageEngine> {
-    println!("Database not found — auto-creating at {}", path.display());
-
-    let storage_config = StorageConfig {
-        dim,
-        initial_capacity: 10_000,
-        checkpoint_threshold: 50_000,
-    };
-    let engine = StorageEngine::create(path, storage_config)
-        .with_context(|| format!("failed to create storage at {}", path.display()))?;
-
-    let db_config = DbConfig {
-        version: DbConfig::CURRENT_VERSION,
-        dim,
-        metric: "cosine".to_string(),
-        m: 16,
-        ef_construction: 200,
-        korean: false,
-        embed_model: embed_model.map(|s| s.to_string()),
-    };
-    db_config.save(path)?;
-
-    println!("  Dimension:  {dim}");
-    println!("  Metric:     cosine");
-    println!("  M:          16");
-    println!("  ef:         200");
-    if let Some(model) = embed_model {
-        println!("  Model:      {model}");
-    }
-    println!();
-
-    Ok(engine)
-}
-
-/// Update the embed_model in config if not already set.
-fn update_embed_model(path: &Path, model_name: &str) -> Result<()> {
-    let mut config = DbConfig::load(path)?;
-    if config.embed_model.is_none() {
-        config.embed_model = Some(model_name.to_string());
-        config.save(path)?;
-    }
-    Ok(())
-}
 
 /// Build a [`Payload`] with current timestamp (for raw vector insert).
 fn make_payload(source: Option<String>, tags: Option<Vec<String>>) -> Payload {

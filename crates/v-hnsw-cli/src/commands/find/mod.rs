@@ -62,44 +62,37 @@ struct JsonRpcError {
     message: String,
 }
 
-/// Try to connect to the daemon for a given database.
+/// Try to connect to the global daemon and search a specific database.
 fn try_daemon_search(
     db_path: &Path,
     query: &str,
     k: usize,
     tags: &[String],
 ) -> Result<FindOutput> {
-    let canonical_path = db_path
+    let canonical = db_path
         .canonicalize()
         .with_context(|| format!("Database not found: {}", db_path.display()))?;
 
-    let port = serve::read_port_file(&canonical_path)
+    let port = serve::read_port_file()
         .ok_or_else(|| anyhow::anyhow!("Daemon not running (no port file)"))?;
 
-    let mut stream = TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port).parse()?,
-        Duration::from_secs(2),
-    )
-    .context("Failed to connect to daemon")?;
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
+        .context("Failed to connect to daemon")?;
 
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
     let mut params = serde_json::json!({
+        "db": canonical.to_str().unwrap_or(""),
         "query": query,
         "k": k
     });
-
     if !tags.is_empty() {
         params["tags"] = serde_json::json!(tags);
     }
 
-    let request = serde_json::json!({
-        "id": 1,
-        "method": "search",
-        "params": params
-    });
-
+    let request = serde_json::json!({"id": 1, "method": "search", "params": params});
     writeln!(stream, "{}", serde_json::to_string(&request)?)?;
     stream.flush()?;
 
@@ -118,10 +111,7 @@ fn try_daemon_search(
         .result
         .ok_or_else(|| anyhow::anyhow!("Empty response from daemon"))?;
 
-    let search_response: FindOutput =
-        serde_json::from_value(result).context("Failed to parse search results")?;
-
-    Ok(search_response)
+    serde_json::from_value(result).context("Failed to parse search results")
 }
 
 /// Truncate text to max_len chars, appending "..." if truncated.

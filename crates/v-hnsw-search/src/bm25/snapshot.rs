@@ -11,7 +11,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
-use v_hnsw_core::{PointId, VhnswError};
+use v_hnsw_core::{PointId, VhnswError, storage_err, read_le_u64};
 
 use super::index::PostingList;
 use super::scorer::Bm25Params;
@@ -37,10 +37,6 @@ struct PostingEntry {
     doc_id: u64,
     tf: u32,
     _pad: u32,
-}
-
-fn storage_err(msg: &str) -> VhnswError {
-    VhnswError::Storage(std::io::Error::other(msg))
 }
 
 /// Write BM25 snapshot file from raw index data.
@@ -299,17 +295,13 @@ impl Bm25Snapshot {
     fn posting_entries(&self, ordinal: usize) -> Option<&[PostingEntry]> {
         if ordinal >= self.num_terms { return None; }
         let off_pos = self.posting_offsets_offset + ordinal * 8;
-        let offset = read_u64(&self.mmap, off_pos)? as usize;
+        let offset = read_le_u64(&self.mmap, off_pos)? as usize;
         let abs = self.posting_data_offset + offset;
-        let count = read_u64(&self.mmap, abs)? as usize;
+        let count = read_le_u64(&self.mmap, abs)? as usize;
         if count == 0 { return Some(&[]); }
         let start = abs + 8;
         bytemuck::try_cast_slice(self.mmap.get(start..start + count * 16)?).ok()
     }
-}
-
-fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(data.get(offset..offset + 8)?.try_into().ok()?))
 }
 
 #[cfg(test)]

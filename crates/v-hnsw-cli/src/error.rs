@@ -22,17 +22,9 @@ pub enum CliError {
     #[error("input: {0}")]
     Input(String),
 
-    /// Configuration error.
-    #[error("config: {0}")]
-    Config(String),
-
     /// I/O error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-
-    /// Serialization/deserialization error.
-    #[error("serialization: {0}")]
-    Serialization(String),
 
     /// Operation was interrupted by Ctrl+C.
     #[error("interrupted")]

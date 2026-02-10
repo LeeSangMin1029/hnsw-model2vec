@@ -8,7 +8,8 @@ use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
-use super::pipeline::{AddRecord, process_records};
+use super::pipeline::process_records;
+use crate::commands::common::IngestRecord;
 use crate::commands::common;
 use crate::commands::file_index;
 use crate::is_interrupted;
@@ -47,7 +48,7 @@ pub fn process_markdown_folder(
     println!("Found {} markdown files", md_files.len());
 
     // First pass: collect all chunks and track file metadata
-    let mut records: Vec<AddRecord> = Vec::new();
+    let mut records: Vec<IngestRecord> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
 
     for md_path in &md_files {
@@ -79,7 +80,7 @@ pub fn process_markdown_folder(
         for chunk in chunks {
             let id = common::generate_id(&source, chunk.chunk_index);
             chunk_ids.push(id);
-            records.push(AddRecord {
+            records.push(IngestRecord {
                 id,
                 text: chunk.text,
                 source: source.clone(),
@@ -122,7 +123,7 @@ pub fn process_jsonl(
         .with_context(|| format!("Failed to open {}", input_path.display()))?;
     let reader = BufReader::new(file);
 
-    let mut records: Vec<AddRecord> = Vec::new();
+    let mut records: Vec<IngestRecord> = Vec::new();
     let source = common::normalize_source(input_path);
 
     for (line_num, line_result) in reader.lines().enumerate() {
@@ -187,7 +188,7 @@ pub fn process_jsonl(
             .unwrap_or(&source)
             .to_string();
 
-        records.push(AddRecord {
+        records.push(IngestRecord {
             id,
             text,
             source: item_source,
@@ -224,7 +225,7 @@ pub fn process_parquet(
         .build()
         .with_context(|| "Failed to build Parquet reader")?;
 
-    let mut records: Vec<AddRecord> = Vec::new();
+    let mut records: Vec<IngestRecord> = Vec::new();
     let source = common::normalize_source(input_path);
     let mut row_idx = 0u64;
 
@@ -299,7 +300,7 @@ pub fn process_parquet(
                 }
             });
 
-            records.push(AddRecord {
+            records.push(IngestRecord {
                 id,
                 text,
                 source: source.clone(),

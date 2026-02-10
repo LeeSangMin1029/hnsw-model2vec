@@ -41,59 +41,33 @@ impl RrfFusion {
         self.k
     }
 
-    /// Fuse multiple ranked lists into a single ranking.
-    ///
-    /// # Parameters
-    /// - `ranked_lists`: A slice of ranked result lists. Each list contains
-    ///   `(PointId, score)` pairs, assumed to be sorted by score descending.
-    /// - `limit`: Maximum number of results to return.
-    ///
-    /// # Returns
-    /// Combined results sorted by RRF score descending.
+    /// Fuse multiple ranked lists into a single ranking (equal weights).
     pub fn fuse(&self, ranked_lists: &[Vec<(PointId, f32)>], limit: usize) -> Vec<(PointId, f32)> {
-        let mut rrf_scores: HashMap<PointId, f32> = HashMap::new();
-
-        for list in ranked_lists {
-            for (rank, (doc_id, _original_score)) in list.iter().enumerate() {
-                // RRF formula: 1 / (k + rank), where rank is 1-indexed
-                let rrf_contribution = 1.0 / (self.k as f32 + (rank as f32 + 1.0));
-                *rrf_scores.entry(*doc_id).or_insert(0.0) += rrf_contribution;
-            }
-        }
-
-        // Sort by RRF score descending
-        let mut results: Vec<(PointId, f32)> = rrf_scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
-
-        results
+        let weighted: Vec<_> = ranked_lists.iter().map(|l| (1.0f32, l.as_slice())).collect();
+        self.fuse_weighted(&weighted, limit)
     }
 
     /// Fuse multiple weighted ranked lists.
     ///
     /// Each list can have a different weight applied to its RRF contribution.
-    ///
-    /// # Parameters
-    /// - `weighted_lists`: A slice of `(weight, ranked_list)` pairs.
-    /// - `limit`: Maximum number of results to return.
+    /// Formula: `score(d) = sum_i weight_i / (k + rank_i(d))`
     pub fn fuse_weighted(
         &self,
-        weighted_lists: &[(f32, Vec<(PointId, f32)>)],
+        weighted_lists: &[(f32, &[(PointId, f32)])],
         limit: usize,
     ) -> Vec<(PointId, f32)> {
         let mut rrf_scores: HashMap<PointId, f32> = HashMap::new();
+        let k = self.k as f32;
 
-        for (weight, list) in weighted_lists {
-            for (rank, (doc_id, _original_score)) in list.iter().enumerate() {
-                let rrf_contribution = weight / (self.k as f32 + (rank as f32 + 1.0));
-                *rrf_scores.entry(*doc_id).or_insert(0.0) += rrf_contribution;
+        for &(weight, list) in weighted_lists {
+            for (rank, &(doc_id, _)) in list.iter().enumerate() {
+                *rrf_scores.entry(doc_id).or_insert(0.0) += weight / (k + rank as f32 + 1.0);
             }
         }
 
-        let mut results: Vec<(PointId, f32)> = rrf_scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut results: Vec<_> = rrf_scores.into_iter().collect();
+        results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
-
         results
     }
 }
@@ -211,7 +185,7 @@ mod tests {
         let list2 = vec![(1, 0.95), (2, 0.85)];
 
         let unweighted = rrf.fuse(&[list1.clone(), list2.clone()], 10);
-        let weighted = rrf.fuse_weighted(&[(1.0, list1), (1.0, list2)], 10);
+        let weighted = rrf.fuse_weighted(&[(1.0, &list1), (1.0, &list2)], 10);
 
         assert_eq!(unweighted.len(), weighted.len());
         for i in 0..unweighted.len() {
@@ -226,7 +200,7 @@ mod tests {
         // Weight list1 at 2x, list2 at 1x
         let list1 = vec![(1, 0.9)];
         let list2 = vec![(2, 0.95)];
-        let result = rrf.fuse_weighted(&[(2.0, list1), (1.0, list2)], 10);
+        let result = rrf.fuse_weighted(&[(2.0, &list1), (1.0, &list2)], 10);
 
         assert_eq!(result.len(), 2);
         // Doc 1 should be first (weighted 2x)

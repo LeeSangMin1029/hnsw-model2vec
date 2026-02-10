@@ -6,25 +6,12 @@ use anyhow::{Context, Result};
 use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
-use crate::commands::common;
+use crate::commands::common::{self, IngestRecord};
 use crate::is_interrupted;
-
-/// A record for batch processing.
-#[derive(Clone)]
-pub struct AddRecord {
-    pub id: u64,
-    pub text: String,
-    pub source: String,
-    pub title: Option<String>,
-    pub tags: Vec<String>,
-    pub chunk_index: usize,
-    pub chunk_total: usize,
-    pub source_modified_at: u64,
-}
 
 /// Embedded batch ready for storage insertion.
 struct EmbeddedBatch {
-    records: Vec<AddRecord>,
+    records: Vec<IngestRecord>,
     embeddings: Vec<Vec<f32>>,
 }
 
@@ -33,7 +20,7 @@ struct EmbeddedBatch {
 /// Consumer thread: storage insertion
 /// Returns (inserted, errors).
 pub fn process_records(
-    records: Vec<AddRecord>,
+    records: Vec<IngestRecord>,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64)> {
@@ -42,7 +29,6 @@ pub fn process_records(
     }
 
     let batch_size = 256;
-    let max_chars = 8000;
 
     let pb = common::make_progress_bar(records.len() as u64)?;
     let start = Instant::now();
@@ -65,17 +51,7 @@ pub fn process_records(
 
                 let texts: Vec<String> = chunk
                     .iter()
-                    .map(|r| {
-                        if r.text.len() > max_chars {
-                            let mut end = max_chars;
-                            while !r.text.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            r.text[..end].to_string()
-                        } else {
-                            r.text.clone()
-                        }
-                    })
+                    .map(|r| common::truncate_for_embed(&r.text).to_string())
                     .collect();
 
                 let embeddings = match common::embed_sorted(model, &texts) {

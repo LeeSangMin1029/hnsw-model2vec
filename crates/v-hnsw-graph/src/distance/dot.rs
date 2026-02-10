@@ -71,10 +71,11 @@ unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// Horizontal sum of 8 floats in an AVX2 register.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn hsum_avx2(v: __m256) -> f32 {
+pub(super) unsafe fn hsum_avx2(v: __m256) -> f32 {
     let hi = _mm256_extractf128_ps(v, 1);
     let lo = _mm256_castps256_ps128(v);
     let sum128 = _mm_add_ps(lo, hi);

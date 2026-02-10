@@ -192,8 +192,8 @@ pub enum Commands {
     },
     /// Start daemon server for fast embedding search.
     Serve {
-        /// Path to the database directory.
-        db: PathBuf,
+        /// Path to database directory to preload (optional).
+        db: Option<PathBuf>,
         /// TCP port to listen on (default: 19530).
         #[arg(long, default_value = "19530")]
         port: u16,

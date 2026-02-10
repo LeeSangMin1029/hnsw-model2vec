@@ -37,6 +37,32 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("v-hnsw")
 }
 
+/// Get a file path inside the cache directory, creating it if needed.
+pub fn cache_file(name: &str) -> PathBuf {
+    let dir = cache_dir();
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(name)
+}
+
+/// Spawn a detached background process with stdin/stdout/stderr suppressed.
+pub fn spawn_detached(args: &[&str]) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x00000200 | 0x08000000);
+    }
+
+    cmd.spawn().context("Failed to spawn detached process")?;
+    Ok(())
+}
+
 /// Ensure Korean dictionary is available and initialize the tokenizer.
 ///
 /// Downloads and builds the ko-dic dictionary on first run, then
@@ -76,7 +102,12 @@ pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
 }
 
 /// Auto-create database if it doesn't exist, or open existing with exclusive lock.
-pub fn ensure_database(path: &Path, dim: usize, model_name: &str) -> Result<StorageEngine> {
+pub fn ensure_database(
+    path: &Path,
+    dim: usize,
+    model_name: &str,
+    korean: bool,
+) -> Result<StorageEngine> {
     if path.exists() {
         let config = DbConfig::load(path)?;
         if config.dim != dim {
@@ -112,7 +143,7 @@ pub fn ensure_database(path: &Path, dim: usize, model_name: &str) -> Result<Stor
             metric: "cosine".to_string(),
             m: 16,
             ef_construction: 200,
-            korean: true,
+            korean,
             embed_model: Some(model_name.to_string()),
         };
         db_config.save(path)?;
@@ -438,6 +469,36 @@ pub fn fusion_alpha(query: &str) -> f32 {
     }
 }
 
+/// Max character length for text sent to embedding model.
+const EMBED_MAX_CHARS: usize = 8000;
+
+/// Truncate text at a char boundary for embedding.
+///
+/// Returns a new string if truncation occurs, otherwise the original slice.
+pub fn truncate_for_embed(text: &str) -> &str {
+    if text.len() <= EMBED_MAX_CHARS {
+        return text;
+    }
+    let mut end = EMBED_MAX_CHARS;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A record for batch ingestion (shared by add and update commands).
+#[derive(Clone)]
+pub struct IngestRecord {
+    pub id: u64,
+    pub text: String,
+    pub source: String,
+    pub title: Option<String>,
+    pub tags: Vec<String>,
+    pub chunk_index: usize,
+    pub chunk_total: usize,
+    pub source_modified_at: u64,
+}
+
 /// Get the file modification time as seconds since UNIX epoch.
 pub fn get_file_mtime(path: &Path) -> Option<u64> {
     std::fs::metadata(path)
@@ -445,6 +506,44 @@ pub fn get_file_mtime(path: &Path) -> Option<u64> {
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
+}
+
+/// Build an HNSW index from a slice of embeddings.
+pub fn build_hnsw_index(
+    embeddings: &[Vec<f32>],
+    dim: usize,
+) -> Result<HnswGraph<NormalizedCosineDistance>> {
+    let config = HnswConfig::builder()
+        .dim(dim)
+        .m(16)
+        .ef_construction(200)
+        .build()
+        .context("Failed to create HNSW config")?;
+
+    let mut hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::new(config, NormalizedCosineDistance);
+
+    let pb = ProgressBar::new(embeddings.len() as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} vectors")
+            .ok()
+            .unwrap_or_else(ProgressStyle::default_bar)
+            .progress_chars("#>-"),
+    );
+
+    for (id, embedding) in embeddings.iter().enumerate() {
+        if is_interrupted() {
+            pb.finish_with_message("Interrupted");
+            break;
+        }
+
+        hnsw.insert(id as u64, embedding)
+            .context("Failed to insert vector")?;
+        pb.inc(1);
+    }
+
+    pb.finish_with_message("Done");
+    Ok(hnsw)
 }
 
 // ============================================================================
@@ -471,6 +570,11 @@ struct CacheEntry {
 }
 
 impl QueryCache {
+    /// Global cache (not tied to a specific DB).
+    pub fn global() -> Self {
+        Self::load(&cache_dir())
+    }
+
     /// Load cache from disk, or create empty if not found.
     pub fn load(db_path: &Path) -> Self {
         let cap = NonZeroUsize::new(QUERY_CACHE_MAX)

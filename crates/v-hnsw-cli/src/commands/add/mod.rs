@@ -92,7 +92,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     let model_name = common::DEFAULT_MODEL;
 
     // Ensure database exists
-    let mut engine = common::ensure_database(&db_path, model.dim(), model_name)?;
+    let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true)?;
 
     // Process based on input type
     let (inserted, errors) = match input_type {

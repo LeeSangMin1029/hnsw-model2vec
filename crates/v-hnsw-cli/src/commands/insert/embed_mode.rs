@@ -6,9 +6,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use v_hnsw_core::Payload;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_storage::StorageEngine;
 
-use super::{auto_create_db, make_payload, print_stats, update_embed_model};
+use super::{make_payload, print_stats};
 use crate::commands::common;
 use crate::commands::create::DbConfig;
 use crate::commands::readers::{self, ReaderConfig};
@@ -32,24 +31,10 @@ pub fn run_embed(
     let model = Model2VecModel::from_pretrained(model_name)
         .map_err(|e| anyhow::anyhow!("failed to load model2vec model: {e}"))?;
     let dim = model.dim();
-    let max_chars = 8000;
     println!("Model loaded (dim={dim}).");
 
     // Open or create DB.
-    let mut engine = if path.exists() {
-        let config = DbConfig::load(&path)?;
-        if config.dim != dim {
-            anyhow::bail!(
-                "dimension mismatch: database has dim={}, but model produces dim={dim}",
-                config.dim,
-            );
-        }
-        update_embed_model(&path, model_name)?;
-        StorageEngine::open_exclusive(&path)
-            .with_context(|| format!("failed to open database at {}", path.display()))?
-    } else {
-        auto_create_db(&path, dim, Some(model_name))?
-    };
+    let mut engine = common::ensure_database(&path, dim, model_name, false)?;
     let model: Box<dyn EmbeddingModel> = Box::new(model);
 
     let reader_cfg = ReaderConfig {
@@ -100,15 +85,7 @@ pub fn run_embed(
                     continue;
                 }
 
-                let embed_text = if text.len() > max_chars {
-                    let mut end = max_chars;
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text[..end].to_string()
-                } else {
-                    text.clone()
-                };
+                let embed_text = common::truncate_for_embed(&text).to_string();
 
                 batch_texts.push(embed_text);
                 batch_records.push(record);

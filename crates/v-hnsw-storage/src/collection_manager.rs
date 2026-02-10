@@ -193,66 +193,36 @@ impl CollectionManager {
             .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
     }
 
-    /// Get a reference to an existing collection.
-    ///
-    /// Opens the collection lazily if not already loaded.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Collection does not exist in manifest
-    /// - Collection files are corrupt
-    /// - WAL replay fails
+    /// Get a reference to an existing collection (lazy-loaded).
     pub fn get_collection(&mut self, name: &str) -> Result<&Collection> {
-        // Check if collection exists in manifest
-        if self.manifest.get_collection(name).is_none() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{}' not found",
-                name
-            )));
-        }
-
-        // Lazy load if not already open
-        if !self.open_collections.contains_key(name) {
-            let collections_dir = self.root.join("collections");
-            let collection = Collection::open(&collections_dir, name)?;
-            self.open_collections.insert(name.to_string(), collection);
-        }
-
+        self.ensure_loaded(name)?;
         self.open_collections
             .get(name)
             .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
     }
 
-    /// Get a mutable reference to an existing collection.
-    ///
-    /// Opens the collection lazily if not already loaded.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Collection does not exist in manifest
-    /// - Collection files are corrupt
-    /// - WAL replay fails
+    /// Get a mutable reference to an existing collection (lazy-loaded).
     pub fn get_collection_mut(&mut self, name: &str) -> Result<&mut Collection> {
-        // Check if collection exists in manifest
+        self.ensure_loaded(name)?;
+        self.open_collections
+            .get_mut(name)
+            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
+    }
+
+    /// Check manifest and lazy-load collection if not already open.
+    fn ensure_loaded(&mut self, name: &str) -> Result<()> {
         if self.manifest.get_collection(name).is_none() {
             return Err(VhnswError::Payload(format!(
                 "Collection '{}' not found",
                 name
             )));
         }
-
-        // Lazy load if not already open
         if !self.open_collections.contains_key(name) {
             let collections_dir = self.root.join("collections");
             let collection = Collection::open(&collections_dir, name)?;
             self.open_collections.insert(name.to_string(), collection);
         }
-
-        self.open_collections
-            .get_mut(name)
-            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
+        Ok(())
     }
 
     /// List all collection names.

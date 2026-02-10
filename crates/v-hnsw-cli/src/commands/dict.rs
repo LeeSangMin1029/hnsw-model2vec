@@ -40,7 +40,7 @@ const KO_DIC_METADATA_JSON: &str = r#"{
 ///
 /// Returns the path to the compiled dictionary directory.
 pub fn ensure_ko_dic() -> Result<PathBuf> {
-    let dict_dir = ko_dic_path();
+    let dict_dir = v_hnsw_core::ko_dic_dir();
 
     // Check if already built (dict.da is the compiled dictionary trie)
     if dict_dir.join("dict.da").exists() {
@@ -56,17 +56,6 @@ pub fn ensure_ko_dic() -> Result<PathBuf> {
     Ok(dict_dir)
 }
 
-/// Get the path where the compiled ko-dic dictionary is stored.
-/// Uses `~/.v-hnsw/dict/ko-dic/` (same base as DB and docs).
-pub fn ko_dic_path() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".v-hnsw")
-        .join("dict")
-        .join("ko-dic")
-}
 
 fn download_and_build(output_dir: &Path) -> Result<()> {
     let temp_dir = output_dir.parent().unwrap_or(Path::new(".")).join("_tmp");

@@ -21,17 +21,9 @@ pub enum VhnswError {
     #[error("storage error: {0}")]
     Storage(#[from] std::io::Error),
 
-    /// A GPU operation failed.
-    #[error("gpu error: {0}")]
-    Gpu(String),
-
     /// A tokenizer operation failed.
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
-
-    /// A quantization operation failed.
-    #[error("quantization error: {0}")]
-    Quantization(String),
 
     /// Payload serialization/deserialization failed.
     #[error("payload error: {0}")]
@@ -40,8 +32,4 @@ pub enum VhnswError {
     /// WAL is corrupted or unreadable.
     #[error("wal error: {0}")]
     Wal(String),
-
-    /// Batch operation was incomplete (crash during batch).
-    #[error("incomplete batch: {batch_id}")]
-    IncompleteBatch { batch_id: u64 },
 }

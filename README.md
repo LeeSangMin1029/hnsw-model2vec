@@ -40,11 +40,7 @@ v-hnsw update my-db ./documents/
 ### 소스에서 빌드
 
 ```bash
-# CPU 버전
 cargo build --release -p v-hnsw-cli
-
-# CUDA GPU 가속
-cargo build --release -p v-hnsw-cli --features cuda
 ```
 
 빌드된 바이너리: `target/release/v-hnsw` (Linux/macOS) / `target/release/v-hnsw.exe` (Windows)
@@ -56,7 +52,7 @@ PATH에 추가:
 cp target/release/v-hnsw ~/.local/bin/
 
 # Windows (PowerShell)
-Copy-Item target\release\v-hnsw.exe "$env:USERPROFILE\.local\bin\"
+Copy-Item target\release\v-hnsw.exe "$env:USERPROFILE\.cargo\bin\"
 ```
 
 ### 첫 실행
@@ -97,9 +93,6 @@ v-hnsw find my-db "검색어" -k 20
 
 # 태그 필터링 (AND 조건)
 v-hnsw find my-db "검색어" --tag rust --tag architecture
-
-# BM25-only (모델 로딩 없이 빠른 검색)
-v-hnsw find my-db "키워드 검색" --fast
 
 # 전체 텍스트 표시
 v-hnsw find my-db "검색어" --full
@@ -189,18 +182,24 @@ v-hnsw export my-db -o backup.jsonl  # JSONL 내보내기
 v-hnsw import my-db -i backup.jsonl  # JSONL 가져오기
 ```
 
-### 세부 옵션
+### Low-level 명령어
 
 ```bash
-# DB 수동 생성
+# DB 수동 생성 (add는 자동 생성하므로 보통 불필요)
 v-hnsw create my-db --dim 256 --metric cosine --neighbors 16 --ef 200
 
-# 벡터 직접 삽입
-v-hnsw insert my-db -i data.jsonl --embed --model minishlab/potion-multilingual-128M
+# 벡터 삽입 (텍스트 자동 임베딩)
+v-hnsw insert my-db -i data.jsonl --embed
+
+# Raw 벡터 삽입 (사전 임베딩된 데이터, fvecs/bvecs 지원)
+v-hnsw insert my-db -i vectors.fvecs
 
 # Raw 벡터 검색
 v-hnsw find my-db --vector "0.1,0.2,..." -k 10
 ```
+
+> `add`는 마크다운 청킹·자동 임베딩·DB 생성·file index 추적을 모두 처리하는 고수준 명령어이고,
+> `insert`는 raw 벡터나 커스텀 모델이 필요할 때 사용하는 저수준 명령어입니다.
 
 ---
 
