@@ -112,6 +112,7 @@ pub struct Bm25Snapshot {
     fst_map: fst::Map<Vec<u8>>,
     total_docs: usize,
     total_length: u64,
+    max_doc_id: u64,
     num_terms: usize,
     num_doc_entries: usize,
     doc_lengths_offset: usize,
@@ -153,6 +154,7 @@ impl Bm25Snapshot {
             fst_map,
             total_docs: h[2] as usize,
             total_length: h[3],
+            max_doc_id: h[4],
             num_terms,
             num_doc_entries,
             doc_lengths_offset,
@@ -231,22 +233,53 @@ impl Bm25Snapshot {
             .collect()
     }
 
+    /// Vec accumulator ceiling: 256K entries = 1MB max allocation.
+    const MAX_VEC_ACCUMULATOR_ID: u64 = 256_000;
+
     fn accumulate_and_rank(
         &self, terms: &[(&[PostingEntry], f32)], limit: usize,
     ) -> Vec<(PointId, f32)> {
         let avg = self.avg_doc_length();
-        let mut scores: HashMap<PointId, f32> = HashMap::new();
-        for &(entries, idf) in terms {
-            for e in entries {
-                let doc_len = self.doc_length(e.doc_id);
-                *scores.entry(e.doc_id).or_insert(0.0) +=
-                    idf * self.params.tf_norm(e.tf, doc_len, avg);
+
+        if self.max_doc_id <= Self::MAX_VEC_ACCUMULATOR_ID {
+            let len = self.max_doc_id as usize + 1;
+            let mut scores = vec![0.0f32; len];
+            let mut touched: Vec<PointId> = Vec::with_capacity(256);
+
+            for &(entries, idf) in terms {
+                for e in entries {
+                    let id = e.doc_id as usize;
+                    if id < len {
+                        if scores[id] == 0.0 {
+                            touched.push(e.doc_id);
+                        }
+                        let doc_len = self.doc_length(e.doc_id);
+                        scores[id] += idf * self.params.tf_norm(e.tf, doc_len, avg);
+                    }
+                }
             }
+
+            let mut results: Vec<(PointId, f32)> = touched
+                .into_iter()
+                .map(|id| (id, scores[id as usize]))
+                .collect();
+            results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            results.truncate(limit);
+            results
+        } else {
+            let mut score_map: HashMap<PointId, f32> = HashMap::new();
+            for &(entries, idf) in terms {
+                for e in entries {
+                    let doc_len = self.doc_length(e.doc_id);
+                    *score_map.entry(e.doc_id).or_insert(0.0) +=
+                        idf * self.params.tf_norm(e.tf, doc_len, avg);
+                }
+            }
+            let mut results: Vec<_> = score_map.into_iter().collect();
+            results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            results.truncate(limit);
+            results
         }
-        let mut results: Vec<_> = scores.into_iter().collect();
-        results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-        results.truncate(limit);
-        results
     }
 
     fn doc_length(&self, doc_id: PointId) -> u32 {
