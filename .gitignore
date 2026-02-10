@@ -9,7 +9,6 @@
 *.swo
 
 # Rust
-Cargo.lock
 **/*.rs.bk
 
 # Test databases and data
