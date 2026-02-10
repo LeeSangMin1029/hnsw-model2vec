@@ -26,9 +26,8 @@ test_*.parquet
 # OMC (oh-my-claudecode) state
 .omc/
 
-# Claude Code local settings
-.claude/settings.local.json
-.claude/skills/
+# Claude Code
+.claude/
 
 # Windows artifacts
 nul
