@@ -20,7 +20,7 @@ pub fn process_markdown_folder(
     input_path: &Path,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<u64>)> {
     let chunker = MarkdownChunker::new(ChunkConfig {
         target_size: 1000,
         overlap: 200,
@@ -98,7 +98,7 @@ pub fn process_markdown_folder(
     println!("Total chunks to process: {}", records.len());
 
     // Process in batches
-    let result = process_records(records, model, engine)?;
+    let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
 
     // Save file metadata index
     let mut file_index = file_index::load_file_index(db_path)?;
@@ -107,7 +107,7 @@ pub fn process_markdown_folder(
     }
     file_index::save_file_index(db_path, &file_index)?;
 
-    Ok(result)
+    Ok((inserted, errors, inserted_ids))
 }
 
 /// Process JSONL file: parse records, embed, insert.
@@ -116,7 +116,7 @@ pub fn process_jsonl(
     input_path: &Path,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<u64>)> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(input_path)
@@ -211,7 +211,7 @@ pub fn process_parquet(
     input_path: &Path,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<u64>)> {
     use arrow::array::{Array, StringArray, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 

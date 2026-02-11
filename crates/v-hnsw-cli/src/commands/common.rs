@@ -229,10 +229,10 @@ pub fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<
         .embed(&sorted)
         .map_err(|e| anyhow::anyhow!("Embedding failed: {e}"))?;
 
-    // Restore original order
+    // Restore original order (consume sorted_embs to avoid clone)
     let mut embeddings = vec![Vec::new(); texts.len()];
-    for (sorted_idx, &orig_idx) in indices.iter().enumerate() {
-        embeddings[orig_idx] = sorted_embs[sorted_idx].clone();
+    for (emb, &orig_idx) in sorted_embs.into_iter().zip(indices.iter()) {
+        embeddings[orig_idx] = emb;
     }
     Ok(embeddings)
 }

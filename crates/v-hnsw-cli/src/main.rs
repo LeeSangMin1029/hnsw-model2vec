@@ -117,16 +117,27 @@ fn run() -> anyhow::Result<()> {
 }
 
 /// Best-effort append error to `~/.v-hnsw/logs/v-hnsw.log`.
+///
+/// Truncates and restarts the log file when it exceeds 1 MB.
 fn log_to_file(err: &CliError) {
     use std::io::Write;
 
     let log_dir = v_hnsw_core::data_dir().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
 
+    let log_path = log_dir.join("v-hnsw.log");
+
+    // Truncate if file exceeds 1 MB
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 1_000_000 {
+            let _ = std::fs::remove_file(&log_path);
+        }
+    }
+
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_dir.join("v-hnsw.log"))
+        .open(&log_path)
     else {
         return;
     };

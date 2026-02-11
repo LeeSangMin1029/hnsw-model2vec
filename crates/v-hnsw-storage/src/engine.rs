@@ -353,15 +353,12 @@ impl StorageEngine {
         // Save all index files
         self.save_indices()?;
 
-        // Write checkpoint record to WAL
+        // All data is flushed — WAL is no longer needed, truncate it.
+        // (Previously used purge_old_segments which was a no-op when
+        // segment_number stayed at 0, causing unbounded WAL growth.)
+        self.wal.truncate()?;
+
         self.checkpoint_seq += 1;
-        let point_count = self.vectors.len();
-        self.wal.checkpoint(self.checkpoint_seq, point_count)?;
-
-        // Purge old WAL segments
-        self.wal.purge_old_segments()?;
-
-        // Reset counter
         self.ops_since_checkpoint = 0;
 
         Ok(())

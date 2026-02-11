@@ -95,7 +95,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true)?;
 
     // Process based on input type
-    let (inserted, errors) = match input_type {
+    let (inserted, errors, added_ids) = match input_type {
         InputType::MarkdownFolder => {
             ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine)?
         }
@@ -118,9 +118,9 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    // Build indexes
+    // Update indexes incrementally (falls back to full rebuild if no existing index)
     let config = DbConfig::load(&db_path)?;
-    common::build_indexes(&db_path, &engine, &config)?;
+    common::update_indexes_incremental(&db_path, &engine, &config, &added_ids, &[])?;
 
     // Notify daemon to reload if running
     if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {

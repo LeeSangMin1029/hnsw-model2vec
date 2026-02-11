@@ -18,14 +18,14 @@ struct EmbeddedBatch {
 /// Process records in batches with embedding using pipeline parallelism.
 /// Producer thread: prepare texts + embedding
 /// Consumer thread: storage insertion
-/// Returns (inserted, errors).
+/// Returns (inserted, errors, inserted_ids).
 pub fn process_records(
     records: Vec<IngestRecord>,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<u64>)> {
     if records.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     let batch_size = 256;
@@ -40,16 +40,20 @@ pub fn process_records(
     let result = std::thread::scope(|scope| {
         let pb_ref = &pb;
 
-        // Producer thread: prepare texts + embed
+        // Producer thread: prepare texts + embed (drain-based ownership transfer)
         let producer = scope.spawn(move || -> anyhow::Result<u64> {
             let mut producer_errors = 0u64;
+            let mut remaining = records;
 
-            for chunk in records.chunks(batch_size) {
+            while !remaining.is_empty() {
                 if is_interrupted() {
                     break;
                 }
 
-                let texts: Vec<String> = chunk
+                let batch_end = batch_size.min(remaining.len());
+                let batch_records: Vec<IngestRecord> = remaining.drain(..batch_end).collect();
+
+                let texts: Vec<String> = batch_records
                     .iter()
                     .map(|r| common::truncate_for_embed(&r.text).to_string())
                     .collect();
@@ -58,14 +62,14 @@ pub fn process_records(
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("Embedding error: {e}");
-                        producer_errors += chunk.len() as u64;
-                        pb_ref.inc(chunk.len() as u64);
+                        producer_errors += batch_records.len() as u64;
+                        pb_ref.inc(batch_records.len() as u64);
                         continue;
                     }
                 };
 
                 let batch = EmbeddedBatch {
-                    records: chunk.to_vec(),
+                    records: batch_records,
                     embeddings,
                 };
 
@@ -81,6 +85,7 @@ pub fn process_records(
         // Consumer (this thread): receive batches + insert into storage
         let mut inserted = 0u64;
         let mut consumer_errors = 0u64;
+        let mut inserted_ids: Vec<u64> = Vec::new();
 
         for batch in receiver {
             if is_interrupted() {
@@ -109,6 +114,7 @@ pub fn process_records(
                 consumer_errors += batch.records.len() as u64;
             } else {
                 inserted += batch.records.len() as u64;
+                inserted_ids.extend(batch.records.iter().map(|r| r.id));
             }
 
             pb_ref.inc(batch.records.len() as u64);
@@ -116,10 +122,10 @@ pub fn process_records(
 
         let producer_errors = producer.join().unwrap_or_else(|_| Ok(0)).unwrap_or(0);
 
-        (inserted, producer_errors + consumer_errors)
+        (inserted, producer_errors + consumer_errors, inserted_ids)
     });
 
-    let (inserted, errors) = result;
+    let (inserted, errors, inserted_ids) = result;
 
     if !is_interrupted() {
         pb.finish_with_message("Done");
@@ -150,5 +156,5 @@ pub fn process_records(
         );
     }
 
-    Ok((inserted, errors))
+    Ok((inserted, errors, inserted_ids))
 }
