@@ -30,6 +30,7 @@ struct UpdateStats {
     modified: usize,
     deleted: usize,
     unchanged: usize,
+    hash_skipped: usize,
 }
 
 /// Run the update command - incremental indexing.
@@ -100,8 +101,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         include_heading_context: true,
     });
 
-    // First pass: detect changes without embedding
-    let mut pending_files: Vec<(PathBuf, String, u64, u64)> = Vec::new();
+    // First pass: detect changes (mtime/size → content hash two-stage)
+    let mut pending_files: Vec<(PathBuf, String, u64, u64, u64)> = Vec::new(); // +content_hash
 
     for md_path in &md_files {
         let source = common::normalize_source(md_path);
@@ -111,7 +112,25 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         let size = file_index::get_file_size(md_path).unwrap_or(0);
 
         if file_index.is_modified(&source, mtime, size) {
-            pending_files.push((md_path.clone(), source, mtime, size));
+            // mtime/size changed — compute content hash to confirm real change
+            let hash = common::content_hash(md_path).unwrap_or(0);
+            let old_hash = file_index.get_file(&source).and_then(|m| m.content_hash);
+
+            if old_hash == Some(hash) {
+                // Content identical — just update mtime/size, skip re-embedding
+                if let Some(meta) = file_index.get_file(&source) {
+                    file_index.update_file_with_hash(
+                        source,
+                        mtime,
+                        size,
+                        meta.chunk_ids.clone(),
+                        hash,
+                    );
+                }
+                stats.hash_skipped += 1;
+            } else {
+                pending_files.push((md_path.clone(), source, mtime, size, hash));
+            }
         } else {
             stats.unchanged += 1;
         }
@@ -130,7 +149,14 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     if pending_files.is_empty() && deleted_files.is_empty() {
         file_index::save_file_index(&db_path, &file_index)?;
         let elapsed = start.elapsed();
-        println!("No changes detected ({} files unchanged).", stats.unchanged);
+        if stats.hash_skipped > 0 {
+            println!(
+                "No content changes ({} unchanged, {} hash-skipped).",
+                stats.unchanged, stats.hash_skipped
+            );
+        } else {
+            println!("No changes detected ({} files unchanged).", stats.unchanged);
+        }
         println!("Elapsed: {:.2}s", elapsed.as_secs_f64());
         return Ok(());
     }
@@ -143,7 +169,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     };
 
     // Process changed files
-    for (md_path, source, mtime, size) in &pending_files {
+    for (md_path, source, mtime, size, hash) in &pending_files {
         if is_interrupted() {
             break;
         }
@@ -201,7 +227,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
             changes.added.extend(chunk_ids.iter());
         }
 
-        file_index.update_file(source.clone(), *mtime, *size, chunk_ids);
+        file_index.update_file_with_hash(source.clone(), *mtime, *size, chunk_ids, *hash);
     }
 
     // Process deleted files
@@ -250,6 +276,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         modified = stats.modified,
         deleted = stats.deleted,
         unchanged = stats.unchanged,
+        hash_skipped = stats.hash_skipped,
         elapsed_secs = elapsed.as_secs_f64(),
         "Update completed"
     );
@@ -259,6 +286,9 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     println!("  Modified files:  {}", stats.modified);
     println!("  Deleted files:   {}", stats.deleted);
     println!("  Unchanged files: {}", stats.unchanged);
+    if stats.hash_skipped > 0 {
+        println!("  Hash-skipped:    {} (mtime changed, content identical)", stats.hash_skipped);
+    }
     println!("  Elapsed:         {:.2}s", elapsed.as_secs_f64());
 
     Ok(())

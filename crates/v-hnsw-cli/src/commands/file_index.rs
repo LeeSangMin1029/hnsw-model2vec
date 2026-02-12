@@ -20,6 +20,10 @@ pub struct FileMetadata {
     pub size: u64,
     /// IDs of chunks generated from this file.
     pub chunk_ids: Vec<u64>,
+    /// MD5-based content hash (truncated to u64) for change detection.
+    /// None for entries created before this field was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<u64>,
 }
 
 /// File index structure stored as JSON.
@@ -50,6 +54,25 @@ impl FileIndex {
             mtime,
             size,
             chunk_ids,
+            content_hash: None,
+        });
+    }
+
+    /// Add or update file metadata with content hash.
+    pub fn update_file_with_hash(
+        &mut self,
+        path: String,
+        mtime: u64,
+        size: u64,
+        chunk_ids: Vec<u64>,
+        content_hash: u64,
+    ) {
+        self.files.insert(path.clone(), FileMetadata {
+            path,
+            mtime,
+            size,
+            chunk_ids,
+            content_hash: Some(content_hash),
         });
     }
 

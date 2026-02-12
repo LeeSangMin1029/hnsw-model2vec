@@ -214,6 +214,22 @@ pub fn generate_id(source: &str, chunk_index: usize) -> u64 {
     hasher.finish()
 }
 
+/// Compute a content hash (MD5 → u64) for a file's raw bytes.
+///
+/// Used for change detection: if mtime/size changed but content hash
+/// is identical, we skip expensive re-embedding.
+pub fn content_hash(path: &Path) -> Result<u64> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read file for hashing: {}", path.display()))?;
+    Ok(content_hash_bytes(&bytes))
+}
+
+/// Compute content hash from raw bytes (MD5 truncated to u64).
+pub fn content_hash_bytes(bytes: &[u8]) -> u64 {
+    let digest = md5::compute(bytes);
+    u64::from_le_bytes(digest[..8].try_into().unwrap())
+}
+
 /// Embed texts with length-sorted batching to minimize padding waste.
 pub fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
