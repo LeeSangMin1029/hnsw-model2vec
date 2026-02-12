@@ -9,7 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use lru::LruCache;
 use v_hnsw_core::{Payload, PayloadStore, PayloadValue, VectorIndex};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{NormalizedCosineDistance, HnswConfig, HnswGraph};
+use v_hnsw_graph::{NormalizedCosineDistance, HnswConfig, HnswGraph, HnswSnapshot};
 use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
@@ -370,7 +370,11 @@ pub fn update_indexes_incremental(
 
     hnsw.save(&hnsw_path)
         .with_context(|| "Failed to save HNSW graph")?;
-    println!("  HNSW graph updated ({total_changes} changes).");
+
+    let hnsw_snap_path = path.join("hnsw.snap");
+    HnswSnapshot::save(&hnsw, &hnsw_snap_path)
+        .with_context(|| "Failed to save HNSW snapshot")?;
+    println!("  HNSW graph updated ({total_changes} changes) + snapshot.");
 
     // --- BM25 incremental update ---
     // Only init Korean dict if there are BM25 changes
@@ -395,7 +399,9 @@ pub fn update_indexes_incremental(
 
     bm25.save(&bm25_path)
         .with_context(|| "Failed to save BM25 index")?;
-    println!("  BM25 index updated ({total_changes} changes).");
+    bm25.save_snapshot(path)
+        .with_context(|| "Failed to save BM25 snapshot")?;
+    println!("  BM25 index updated ({total_changes} changes) + snapshot.");
 
     tracing::info!("Incremental index update completed");
     Ok(())

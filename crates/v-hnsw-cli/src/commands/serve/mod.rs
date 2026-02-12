@@ -121,10 +121,17 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
         .context("Database not found")?;
     let mut state = DaemonState::new(initial.as_deref())?;
 
-    // Bind to port
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .or_else(|_| TcpListener::bind("127.0.0.1:0"))
-        .context("Failed to bind to any port")?;
+    // Bind to port — no fallback to :0 to prevent duplicate daemons
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", port)) {
+        Ok(l) => l,
+        Err(_) if is_daemon_running() => {
+            eprintln!("[daemon] Another daemon already owns port {}, exiting", port);
+            return Ok(());
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to bind to port {}: {} (is another program using it?)", port, e);
+        }
+    };
 
     let actual_port = listener.local_addr()?.port();
 
@@ -153,6 +160,8 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
 
         // Unload embedding model if idle to free ~263 MB
         state.maybe_unload_model();
+        // Evict idle databases to free mmap memory
+        state.maybe_evict_databases();
 
         match listener.accept() {
             Ok((stream, addr)) => {

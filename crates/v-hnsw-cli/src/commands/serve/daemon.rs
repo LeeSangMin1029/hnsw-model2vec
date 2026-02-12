@@ -25,6 +25,9 @@ use super::super::create::DbConfig;
 /// Seconds of idle time before unloading the embedding model.
 const MODEL_IDLE_SECS: u64 = 300;
 
+/// Seconds of idle time before evicting a database from memory.
+const DB_IDLE_SECS: u64 = 15;
+
 /// Dense index: mmap snapshot or heap graph.
 enum DenseIndex {
     Snapshot(HnswSnapshot),
@@ -70,6 +73,7 @@ struct DbIndexes {
     dense: DenseIndex,
     sparse: SparseIndex,
     engine: StorageEngine,
+    last_used: Instant,
 }
 
 impl DbIndexes {
@@ -163,7 +167,9 @@ impl DaemonState {
             self.register_db(&key)?;
         }
         #[allow(clippy::unwrap_used)]
-        Ok(self.databases.get_mut(&key).unwrap())
+        let db = self.databases.get_mut(&key).unwrap();
+        db.last_used = Instant::now();
+        Ok(db)
     }
 
     /// Ensure model is loaded, return reference.
@@ -204,6 +210,24 @@ impl DaemonState {
         if self.model.is_some() && self.last_embed_at.elapsed().as_secs() > MODEL_IDLE_SECS {
             self.model = None;
             eprintln!("[daemon] Model unloaded (idle > {}s)", MODEL_IDLE_SECS);
+            trim_working_set();
+        }
+    }
+
+    /// Evict databases idle longer than DB_IDLE_SECS.
+    pub fn maybe_evict_databases(&mut self) {
+        let before = self.databases.len();
+        self.databases.retain(|path, db| {
+            if db.last_used.elapsed().as_secs() > DB_IDLE_SECS {
+                eprintln!("[daemon] DB evicted (idle > {}s): {}", DB_IDLE_SECS, path.display());
+                false
+            } else {
+                true
+            }
+        });
+        if self.databases.len() < before {
+            eprintln!("[daemon] {} DB(s) in memory", self.databases.len());
+            trim_working_set();
         }
     }
 
@@ -240,7 +264,7 @@ fn load_db(db_path: &Path) -> Result<DbIndexes> {
         .with_context(|| format!("Failed to open storage: {}", db_path.display()))?;
     let dense = load_dense(db_path)?;
     let sparse = load_sparse(db_path)?;
-    Ok(DbIndexes { dense, sparse, engine })
+    Ok(DbIndexes { dense, sparse, engine, last_used: Instant::now() })
 }
 
 /// Check if `a` is newer than `b` by file modification time.
@@ -317,3 +341,20 @@ fn enrich_sparse(
 
     sparse_results
 }
+
+/// Ask the OS to trim the process working set, releasing unmapped pages.
+#[cfg(windows)]
+fn trim_working_set() {
+    #[allow(unsafe_code)]
+    unsafe {
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetProcessWorkingSetSize(process: isize, min: usize, max: usize) -> i32;
+        }
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+    eprintln!("[daemon] Working set trimmed");
+}
+
+#[cfg(not(windows))]
+fn trim_working_set() {}
