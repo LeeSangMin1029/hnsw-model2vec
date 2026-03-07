@@ -106,11 +106,17 @@ fn run() -> anyhow::Result<()> {
         Commands::Deps { db, file, format, depth } => {
             commands::code_intel::deps::run_deps(db, file, format, depth)
         }
-        Commands::Context { db, symbol, depth, k, format } => {
-            commands::code_intel::context::run_context(db, symbol, depth, k, format)
+        Commands::Context { db, symbol, depth, k, format, include_tests } => {
+            commands::code_intel::context::run_context(db, symbol, depth, k, format, include_tests)
         }
-        Commands::Impact { db, symbol, depth, format } => {
-            commands::code_intel::impact::run_impact(db, symbol, depth, format)
+        Commands::Impact { db, symbol, depth, format, include_tests } => {
+            commands::code_intel::impact::run_impact(db, symbol, depth, format, include_tests)
+        }
+        Commands::Trace { db, from, to, format } => {
+            commands::code_intel::trace::run_trace(db, from, to, format)
+        }
+        Commands::Gather { db, symbol, depth, k, format, include_tests } => {
+            commands::code_intel::gather::run_gather(db, symbol, depth, k, format, include_tests)
         }
         Commands::Stats { db, format } => commands::code_intel::run_stats(db, format),
         Commands::Serve {

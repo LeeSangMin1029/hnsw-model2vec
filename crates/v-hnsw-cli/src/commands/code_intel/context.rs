@@ -55,17 +55,18 @@ fn bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<BfsEntry
     results
 }
 
-/// `v-hnsw context <db> <symbol> --depth N --k K`
+/// `v-hnsw context <db> <symbol> --depth N --k K [--include-tests]`
 pub fn run_context(
     db: std::path::PathBuf,
     symbol: String,
     depth: u32,
     k: usize,
     format: OutputFormat,
+    include_tests: bool,
 ) -> Result<()> {
     if matches!(format, OutputFormat::Json) {
-        let key = format!("context:{symbol}:{depth}:{k}");
-        return cached_json(&db, &key, || compute_context_json(&db, &symbol, depth, k));
+        let key = format!("context:{symbol}:{depth}:{k}:{include_tests}");
+        return cached_json(&db, &key, || compute_context_json(&db, &symbol, depth, k, include_tests));
     }
 
     let graph = load_or_build_graph(&db)?;
@@ -77,6 +78,9 @@ pub fn run_context(
     }
 
     let mut entries = bfs_forward(&graph, &seeds, depth);
+    if !include_tests {
+        entries.retain(|e| !graph.is_test[e.idx as usize]);
+    }
     entries.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     entries.truncate(k);
 
@@ -86,11 +90,14 @@ pub fn run_context(
     Ok(())
 }
 
-fn compute_context_json(db: &Path, symbol: &str, depth: u32, k: usize) -> Result<String> {
+fn compute_context_json(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<String> {
     let graph = load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
 
     let mut entries = bfs_forward(&graph, &seeds, depth);
+    if !include_tests {
+        entries.retain(|e| !graph.is_test[e.idx as usize]);
+    }
     entries.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     entries.truncate(k);
 

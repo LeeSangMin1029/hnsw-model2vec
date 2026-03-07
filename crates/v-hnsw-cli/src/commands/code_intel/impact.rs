@@ -56,16 +56,17 @@ fn bfs_reverse(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<BfsEntry
     results
 }
 
-/// `v-hnsw impact <db> <symbol> --depth N`
+/// `v-hnsw impact <db> <symbol> --depth N [--include-tests]`
 pub fn run_impact(
     db: std::path::PathBuf,
     symbol: String,
     depth: u32,
     format: OutputFormat,
+    include_tests: bool,
 ) -> Result<()> {
     if matches!(format, OutputFormat::Json) {
-        let key = format!("impact:{symbol}:{depth}");
-        return cached_json(&db, &key, || compute_impact_json(&db, &symbol, depth));
+        let key = format!("impact:{symbol}:{depth}:{include_tests}");
+        return cached_json(&db, &key, || compute_impact_json(&db, &symbol, depth, include_tests));
     }
 
     let graph = load_or_build_graph(&db)?;
@@ -76,11 +77,17 @@ pub fn run_impact(
         return Ok(());
     }
 
-    let entries = bfs_reverse(&graph, &seeds, depth);
+    let all_entries = bfs_reverse(&graph, &seeds, depth);
 
-    // Summary counts.
-    let prod_count = entries.iter().filter(|e| e.depth > 0 && !e.is_test).count();
-    let test_count = entries.iter().filter(|e| e.depth > 0 && e.is_test).count();
+    // Summary counts (always based on all entries).
+    let prod_count = all_entries.iter().filter(|e| e.depth > 0 && !e.is_test).count();
+    let test_count = all_entries.iter().filter(|e| e.depth > 0 && e.is_test).count();
+
+    let entries: Vec<BfsEntry> = if include_tests {
+        all_entries
+    } else {
+        all_entries.into_iter().filter(|e| !e.is_test).collect()
+    };
 
     println!("Impact of \"{symbol}\" (depth={depth}):");
     println!("  {prod_count} production callers, {test_count} test callers\n");
@@ -89,10 +96,15 @@ pub fn run_impact(
     Ok(())
 }
 
-fn compute_impact_json(db: &Path, symbol: &str, depth: u32) -> Result<String> {
+fn compute_impact_json(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result<String> {
     let graph = load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
-    let entries = bfs_reverse(&graph, &seeds, depth);
+    let all_entries = bfs_reverse(&graph, &seeds, depth);
+    let entries: Vec<BfsEntry> = if include_tests {
+        all_entries
+    } else {
+        all_entries.into_iter().filter(|e| !e.is_test).collect()
+    };
     let json = build_json(&graph, &entries);
     Ok(serde_json::to_string(&json)?)
 }

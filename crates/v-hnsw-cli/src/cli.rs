@@ -231,6 +231,7 @@ pub enum Commands {
     ///
     /// BFS from target symbol through callees, depth-limited.
     /// Score: `1/(depth+1)`, test code weighted at 0.1.
+    /// Test symbols are hidden by default; use `--include-tests` to show them.
     #[command(visible_alias = "ctx")]
     Context {
         /// Path to the database directory.
@@ -246,10 +247,14 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: crate::commands::code_intel::OutputFormat,
+        /// Include test symbols in results (hidden by default).
+        #[arg(long)]
+        include_tests: bool,
     },
     /// Show impact of changing a symbol (reverse BFS: callers).
     ///
     /// "If I change this, what breaks?" — traverses callers direction.
+    /// Test symbols are hidden by default; use `--include-tests` to show them.
     #[command(visible_alias = "imp")]
     Impact {
         /// Path to the database directory.
@@ -262,6 +267,49 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: crate::commands::code_intel::OutputFormat,
+        /// Include test symbols in results (hidden by default).
+        #[arg(long)]
+        include_tests: bool,
+    },
+    /// Find shortest call path between two symbols.
+    ///
+    /// BFS on call graph (callees direction) from symbol A to symbol B.
+    /// Shows the shortest chain of function calls connecting them.
+    #[command(visible_alias = "tr")]
+    Trace {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Source symbol name.
+        from: String,
+        /// Target symbol name.
+        to: String,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+    },
+    /// Gather context + impact for full symbol understanding.
+    ///
+    /// Merges forward (callees) and reverse (callers) BFS results into
+    /// a single "read this code to understand the symbol" view.
+    /// Test symbols are hidden by default; use `--include-tests` to show them.
+    #[command(visible_alias = "g")]
+    Gather {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to gather around.
+        symbol: String,
+        /// Max BFS depth (default: 2).
+        #[arg(long, default_value = "2")]
+        depth: u32,
+        /// Max results to show (default: 15).
+        #[arg(short, long, default_value = "15")]
+        k: usize,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+        /// Include test symbols in results (hidden by default).
+        #[arg(long)]
+        include_tests: bool,
     },
     /// Show per-crate code statistics (functions, structs, enums).
     ///
