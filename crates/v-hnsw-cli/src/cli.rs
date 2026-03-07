@@ -185,19 +185,6 @@ pub enum Commands {
         #[arg(long, default_value = "text")]
         format: crate::commands::code_intel::OutputFormat,
     },
-    /// Find all callers of a function.
-    ///
-    /// JSON schema: {_s, "file":[{l=lines,k=kind,n=name}]}
-    #[command(visible_alias = "c")]
-    Callers {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Function name to find callers of.
-        function: String,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: crate::commands::code_intel::OutputFormat,
-    },
     /// Find all references to a symbol.
     ///
     /// JSON schema: {_s, "file":[{l=lines,k=kind,n=name,v=via}]}
@@ -226,33 +213,6 @@ pub enum Commands {
         /// Transitive dependency depth (default: 1 = direct only).
         #[arg(long, default_value = "1")]
         depth: usize,
-    },
-    /// Show call-graph context of a symbol (forward BFS: callees).
-    ///
-    /// BFS from target symbol through callees, depth-limited.
-    /// Score: `1/(depth+1)`, test code weighted at 0.1.
-    /// Test symbols are hidden by default; use `--include-tests` to show them.
-    #[command(visible_alias = "ctx")]
-    Context {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Symbol name to explore.
-        symbol: String,
-        /// Max BFS depth (default: 2).
-        #[arg(long, default_value = "2")]
-        depth: u32,
-        /// Max results to show (default: 20).
-        #[arg(short, long, default_value = "20")]
-        k: usize,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: crate::commands::code_intel::OutputFormat,
-        /// Include test symbols in results (hidden by default).
-        #[arg(long)]
-        include_tests: bool,
-        /// Show reasoning details for each symbol in results.
-        #[arg(long)]
-        detail: bool,
     },
     /// Show impact of changing a symbol (reverse BFS: callers).
     ///
