@@ -6,9 +6,12 @@
 //!
 //! These commands are read-only and do not modify the database.
 
+pub mod context;
 pub mod deps;
 mod deps_html;
-mod parse;
+pub mod graph;
+pub mod impact;
+pub(crate) mod parse;
 
 use std::collections::BTreeMap;
 use std::fs;

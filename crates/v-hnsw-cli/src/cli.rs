@@ -116,6 +116,9 @@ pub enum Commands {
         db: PathBuf,
         /// Input file or folder (folder with .md files, .jsonl, or .parquet).
         input: PathBuf,
+        /// Directories to exclude from scanning (can be specified multiple times).
+        #[arg(long)]
+        exclude: Vec<String>,
     },
     /// Incrementally update database with changed files.
     Update {
@@ -123,6 +126,9 @@ pub enum Commands {
         db: PathBuf,
         /// Input folder to scan for changes.
         input: PathBuf,
+        /// Directories to exclude from scanning (can be specified multiple times).
+        #[arg(long)]
+        exclude: Vec<String>,
     },
     /// Search database (hybrid HNSW+BM25 by default, supports raw vector mode).
     Find {
@@ -145,6 +151,9 @@ pub enum Commands {
         /// Search beam width for HNSW (ef_search).
         #[arg(long, default_value = "200")]
         ef: usize,
+        /// Minimum normalized score threshold (0.0-1.0). Results below this are dropped.
+        #[arg(long, default_value = "0.25")]
+        min_score: f32,
     },
     /// List symbols matching filters.
     ///
@@ -217,6 +226,42 @@ pub enum Commands {
         /// Transitive dependency depth (default: 1 = direct only).
         #[arg(long, default_value = "1")]
         depth: usize,
+    },
+    /// Show call-graph context of a symbol (forward BFS: callees).
+    ///
+    /// BFS from target symbol through callees, depth-limited.
+    /// Score: `1/(depth+1)`, test code weighted at 0.1.
+    #[command(visible_alias = "ctx")]
+    Context {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to explore.
+        symbol: String,
+        /// Max BFS depth (default: 2).
+        #[arg(long, default_value = "2")]
+        depth: u32,
+        /// Max results to show (default: 20).
+        #[arg(short, long, default_value = "20")]
+        k: usize,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+    },
+    /// Show impact of changing a symbol (reverse BFS: callers).
+    ///
+    /// "If I change this, what breaks?" — traverses callers direction.
+    #[command(visible_alias = "imp")]
+    Impact {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to analyse.
+        symbol: String,
+        /// Max BFS depth (default: 2).
+        #[arg(long, default_value = "2")]
+        depth: u32,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
     },
     /// Show per-crate code statistics (functions, structs, enums).
     ///
