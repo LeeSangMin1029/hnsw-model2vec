@@ -250,6 +250,9 @@ pub enum Commands {
         /// Include test symbols in results (hidden by default).
         #[arg(long)]
         include_tests: bool,
+        /// Show reasoning details for each symbol in results.
+        #[arg(long)]
+        detail: bool,
     },
     /// Show impact of changing a symbol (reverse BFS: callers).
     ///
@@ -270,6 +273,9 @@ pub enum Commands {
         /// Include test symbols in results (hidden by default).
         #[arg(long)]
         include_tests: bool,
+        /// Show reasoning details for each symbol in results.
+        #[arg(long)]
+        detail: bool,
     },
     /// Find shortest call path between two symbols.
     ///
@@ -310,6 +316,44 @@ pub enum Commands {
         /// Include test symbols in results (hidden by default).
         #[arg(long)]
         include_tests: bool,
+        /// Show reasoning details for each symbol in results.
+        #[arg(long)]
+        detail: bool,
+    },
+    /// View or manage reasoning (design decisions, history) for a symbol.
+    ///
+    /// Without mutation flags, shows the current reasoning entry.
+    /// With flags, creates or updates the entry.
+    #[command(visible_alias = "dt")]
+    Detail {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to manage reasoning for.
+        symbol: String,
+        /// Add a general note.
+        #[arg(long)]
+        add: Option<String>,
+        /// Set or update the design decision.
+        #[arg(long)]
+        decision: Option<String>,
+        /// Set or update the rationale (why).
+        #[arg(long)]
+        why: Option<String>,
+        /// Add a constraint.
+        #[arg(long)]
+        constraint: Option<String>,
+        /// Add a rejected alternative.
+        #[arg(long)]
+        rejected: Option<String>,
+        /// Record a failure.
+        #[arg(long)]
+        failure: Option<String>,
+        /// Record a fix (usually paired with --failure).
+        #[arg(long)]
+        fix: Option<String>,
+        /// Delete the reasoning entry.
+        #[arg(long)]
+        delete: bool,
     },
     /// Show per-crate code statistics (functions, structs, enums).
     ///

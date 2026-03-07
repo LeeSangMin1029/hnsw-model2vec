@@ -9,10 +9,12 @@
 pub mod context;
 pub mod deps;
 mod deps_html;
+pub mod detail;
 pub mod gather;
 pub mod graph;
 pub mod impact;
 pub(crate) mod parse;
+pub mod reason;
 pub mod trace;
 
 use std::collections::BTreeMap;

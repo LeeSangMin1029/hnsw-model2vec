@@ -55,7 +55,7 @@ fn bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<BfsEntry
     results
 }
 
-/// `v-hnsw context <db> <symbol> --depth N --k K [--include-tests]`
+/// `v-hnsw context <db> <symbol> --depth N --k K [--include-tests] [--detail]`
 pub fn run_context(
     db: std::path::PathBuf,
     symbol: String,
@@ -63,6 +63,7 @@ pub fn run_context(
     k: usize,
     format: OutputFormat,
     include_tests: bool,
+    detail: bool,
 ) -> Result<()> {
     if matches!(format, OutputFormat::Json) {
         let key = format!("context:{symbol}:{depth}:{k}:{include_tests}");
@@ -87,7 +88,36 @@ pub fn run_context(
     println!("Context of \"{symbol}\" (depth={depth}, top {k}):\n");
     print_grouped(&graph, &entries);
 
+    if detail {
+        print_detail_annotations(&db, &graph, &entries);
+    }
+
     Ok(())
+}
+
+/// Print reasoning annotations for BFS entries that have reason data.
+fn print_detail_annotations(db: &std::path::Path, graph: &CallGraph, entries: &[BfsEntry]) {
+    use std::collections::HashSet;
+    use super::reason;
+
+    let mut found = false;
+    let mut seen = HashSet::new();
+    for e in entries {
+        let name = &graph.names[e.idx as usize];
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        if let Ok(Some(entry)) = reason::load_reason(db, name) {
+            if !found {
+                println!("  [reasoning]");
+                found = true;
+            }
+            println!("    {name}: {}", reason::one_line_summary(&entry));
+        }
+    }
+    if found {
+        println!();
+    }
 }
 
 fn compute_context_json(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<String> {
