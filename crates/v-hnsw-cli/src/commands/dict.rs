@@ -36,21 +36,50 @@ const KO_DIC_METADATA_JSON: &str = r#"{
   }
 }"#;
 
+/// Lindera version stamp to detect binary format changes across builds.
+///
+/// When lindera (or its serialization deps like rkyv/rancor) updates,
+/// the compiled dictionary binary format may change silently.
+/// We stamp the dictionary with the lindera version at build time
+/// and rebuild automatically when it doesn't match.
+const LINDERA_VERSION_STAMP: &str = env!("LINDERA_VERSION");
+
 /// Ensure the ko-dic dictionary is available, downloading and building if needed.
 ///
 /// Returns the path to the compiled dictionary directory.
 pub fn ensure_ko_dic() -> Result<PathBuf> {
     let dict_dir = v_hnsw_core::ko_dic_dir();
+    let stamp_path = dict_dir.join(".lindera-version");
 
-    // Check if already built (dict.da is the compiled dictionary trie)
+    // Check if already built AND version matches
     if dict_dir.join("dict.da").exists() {
-        return Ok(dict_dir);
+        if let Ok(stamp) = std::fs::read_to_string(&stamp_path) {
+            if stamp.trim() == LINDERA_VERSION_STAMP {
+                return Ok(dict_dir);
+            }
+            info!(
+                old = stamp.trim(),
+                new = LINDERA_VERSION_STAMP,
+                "Lindera version changed, rebuilding dictionary..."
+            );
+            eprintln!("Lindera version changed ({} -> {}), rebuilding Korean dictionary...",
+                stamp.trim(), LINDERA_VERSION_STAMP);
+        } else {
+            info!("No version stamp found, rebuilding dictionary...");
+            eprintln!("Rebuilding Korean dictionary (version stamp missing)...");
+        }
+        // Remove stale dictionary
+        let _ = std::fs::remove_dir_all(&dict_dir);
+    } else {
+        info!("Korean dictionary not found, downloading and building...");
+        eprintln!("Downloading Korean dictionary (first-time setup)...");
     }
 
-    info!("Korean dictionary not found, downloading and building...");
-    eprintln!("Downloading Korean dictionary (first-time setup)...");
-
     download_and_build(&dict_dir)?;
+
+    // Write version stamp
+    std::fs::write(&stamp_path, LINDERA_VERSION_STAMP)
+        .context("write lindera version stamp")?;
 
     info!("Korean dictionary ready at {}", dict_dir.display());
     Ok(dict_dir)

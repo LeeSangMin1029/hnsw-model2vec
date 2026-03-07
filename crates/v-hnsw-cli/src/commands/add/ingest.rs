@@ -20,6 +20,7 @@ pub fn process_markdown_folder(
     input_path: &Path,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
+    exclude: &[String],
 ) -> Result<(u64, u64, Vec<u64>)> {
     let chunker = MarkdownChunker::new(ChunkConfig {
         target_size: 1000,
@@ -31,6 +32,13 @@ pub fn process_markdown_folder(
     // Collect all markdown files recursively
     let md_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
         .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir() {
+                !common::should_skip_dir(e.file_name(), exclude)
+            } else {
+                true
+            }
+        })
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()
@@ -203,6 +211,7 @@ pub fn process_code_folder(
     input_path: &Path,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
+    exclude: &[String],
 ) -> Result<(u64, u64, Vec<u64>)> {
     use crate::chunk_code::{CodeChunkConfig, RustCodeChunker};
 
@@ -211,6 +220,13 @@ pub fn process_code_folder(
     // Collect all supported code files recursively
     let code_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
         .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir() {
+                !common::should_skip_dir(e.file_name(), exclude)
+            } else {
+                true
+            }
+        })
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()

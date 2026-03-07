@@ -26,6 +26,13 @@ pub struct DbConfig {
     /// Embedding model used (for vsearch auto-detection).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
+    /// Content type: "code", "markdown", or "mixed".
+    #[serde(default = "default_content_type")]
+    pub content_type: String,
+}
+
+fn default_content_type() -> String {
+    "mixed".to_owned()
 }
 
 impl DbConfig {
@@ -108,6 +115,7 @@ pub fn run(
         ef_construction: ef,
         korean,
         embed_model: None,  // Set later when inserting with --embed
+        content_type: default_content_type(),
     };
     db_config.save(&path)?;
 

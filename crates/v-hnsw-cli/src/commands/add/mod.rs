@@ -27,7 +27,7 @@ enum InputType {
 }
 
 /// Detect input type from path (recursive for directories).
-fn detect_input_type(path: &Path) -> Result<InputType> {
+fn detect_input_type(path: &Path, exclude: &[String]) -> Result<InputType> {
     if path.is_dir() {
         // Recursively check what kind of files the folder contains
         let mut has_md = false;
@@ -35,6 +35,13 @@ fn detect_input_type(path: &Path) -> Result<InputType> {
         for entry in walkdir::WalkDir::new(path)
             .max_depth(5)
             .into_iter()
+            .filter_entry(|e| {
+                if e.file_type().is_dir() {
+                    !common::should_skip_dir(e.file_name(), exclude)
+                } else {
+                    true
+                }
+            })
             .filter_map(|e| e.ok())
         {
             if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
@@ -82,9 +89,9 @@ fn detect_input_type(path: &Path) -> Result<InputType> {
 }
 
 /// Run the add command.
-pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
+pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<()> {
     // Detect input type
-    let input_type = detect_input_type(&input_path)?;
+    let input_type = detect_input_type(&input_path, exclude)?;
 
     tracing::info!(
         input_type = ?input_type,
@@ -104,13 +111,26 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     // Ensure database exists
     let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true)?;
 
+    // Record content type in config
+    let content_type = match input_type {
+        InputType::CodeFolder => "code",
+        InputType::MarkdownFolder => "markdown",
+        InputType::Jsonl => "mixed",
+    };
+    if let Ok(mut config) = DbConfig::load(&db_path) {
+        if config.content_type.is_empty() || config.content_type == "mixed" {
+            config.content_type = content_type.to_owned();
+            let _ = config.save(&db_path);
+        }
+    }
+
     // Process based on input type
     let (inserted, errors, added_ids) = match input_type {
         InputType::MarkdownFolder => {
-            ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine)?
+            ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine, exclude)?
         }
         InputType::CodeFolder => {
-            ingest::process_code_folder(&db_path, &input_path, &model, &mut engine)?
+            ingest::process_code_folder(&db_path, &input_path, &model, &mut engine, exclude)?
         }
         InputType::Jsonl => {
             ingest::process_jsonl(&db_path, &input_path, &model, &mut engine)?

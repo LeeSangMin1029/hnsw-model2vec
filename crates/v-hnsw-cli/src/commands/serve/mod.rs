@@ -68,6 +68,8 @@ pub(crate) struct EmbedParams {
 pub(crate) struct UpdateParams {
     pub db: String,
     pub input: String,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// Read the daemon port from global cache file.

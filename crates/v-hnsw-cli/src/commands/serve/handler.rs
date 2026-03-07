@@ -104,7 +104,7 @@ pub(crate) fn handle_client(
             let db_path = PathBuf::from(&params.db);
             let input_path = PathBuf::from(&params.input);
 
-            match state.update(&db_path, &input_path) {
+            match state.update(&db_path, &input_path, &params.exclude) {
                 Ok(stats) => JsonRpcResponse {
                     id: request.id,
                     result: Some(serde_json::to_value(stats)?),

@@ -1,6 +1,7 @@
 //! Shared utilities for CLI commands.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -145,6 +146,7 @@ pub fn ensure_database(
             ef_construction: 200,
             korean,
             embed_model: Some(model_name.to_string()),
+            content_type: String::new(), // set by caller after creation
         };
         db_config.save(path)?;
 
@@ -520,6 +522,32 @@ pub struct IngestRecord {
     pub chunk_index: usize,
     pub chunk_total: usize,
     pub source_modified_at: u64,
+}
+
+/// Built-in directory names always skipped during file scanning.
+const BUILTIN_SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    ".git",
+    ".swarm",
+    "__pycache__",
+    ".venv",
+    "dist",
+    "vendor",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+];
+
+/// Check if a directory entry should be skipped during walkdir scanning.
+///
+/// Skips built-in cache/build directories and any user-specified `--exclude` dirs.
+pub fn should_skip_dir(dir_name: &OsStr, exclude: &[String]) -> bool {
+    let name = dir_name.to_string_lossy();
+    if BUILTIN_SKIP_DIRS.iter().any(|s| *s == name.as_ref()) {
+        return true;
+    }
+    exclude.iter().any(|e| e == name.as_ref())
 }
 
 /// Get the file modification time as seconds since UNIX epoch.

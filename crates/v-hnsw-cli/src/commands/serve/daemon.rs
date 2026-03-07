@@ -248,7 +248,7 @@ impl DaemonState {
     ///
     /// Drops cached read-only engine, runs update with exclusive lock,
     /// then reloads indexes for subsequent searches.
-    pub fn update(&mut self, db_path: &Path, input_path: &Path) -> Result<crate::commands::update::UpdateStats> {
+    pub fn update(&mut self, db_path: &Path, input_path: &Path, exclude: &[String]) -> Result<crate::commands::update::UpdateStats> {
         let key = canonicalize(db_path)?;
         let t0 = Instant::now();
 
@@ -260,7 +260,7 @@ impl DaemonState {
         let model = self.model.as_ref();
 
         // Run core update with the daemon's shared model (no 1GB reload)
-        let stats = crate::commands::update::run_core(&key, input_path, model)?;
+        let stats = crate::commands::update::run_core(&key, input_path, model, exclude)?;
 
         // Reload indexes so subsequent searches see the new data
         self.register_db(&key)?;

@@ -34,7 +34,7 @@ pub(crate) struct UpdateStats {
 }
 
 /// Run the update command - incremental indexing (CLI entry point).
-pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
+pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<()> {
     if !db_path.exists() {
         anyhow::bail!(
             "Database not found at {}. Use 'add' command to create a new database.",
@@ -50,7 +50,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     }
 
     // Try daemon first (avoids 1GB model reload)
-    if let Ok(stats) = try_daemon_update(&db_path, &input_path) {
+    if let Ok(stats) = try_daemon_update(&db_path, &input_path, exclude) {
         print_stats(&stats, std::time::Instant::now());
         return Ok(());
     }
@@ -67,7 +67,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     let start = Instant::now();
 
     // No shared model — run_core will load on demand
-    let stats = run_core(&db_path, &input_path, None)?;
+    let stats = run_core(&db_path, &input_path, None, exclude)?;
 
     // Notify daemon to reload if running
     if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {
@@ -86,6 +86,7 @@ pub(crate) fn run_core(
     db_path: &Path,
     input_path: &Path,
     shared_model: Option<&Model2VecModel>,
+    exclude: &[String],
 ) -> Result<UpdateStats> {
     let mut file_index = file_index::load_file_index(db_path)?;
     eprintln!(
@@ -100,15 +101,8 @@ pub(crate) fn run_core(
     let all_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
         .into_iter()
         .filter_entry(|e| {
-            // Skip build/cache directories
             if e.file_type().is_dir() {
-                let name = e.file_name().to_string_lossy();
-                !matches!(
-                    name.as_ref(),
-                    "target" | "node_modules" | ".git" | ".swarm"
-                        | "__pycache__" | ".venv" | "dist" | "vendor"
-                        | ".tox" | ".mypy_cache" | ".pytest_cache"
-                )
+                !common::should_skip_dir(e.file_name(), exclude)
             } else {
                 true
             }
@@ -379,7 +373,7 @@ fn print_stats(stats: &UpdateStats, start: Instant) {
 }
 
 /// Try to delegate update to running daemon (avoids 1GB model reload).
-fn try_daemon_update(db_path: &Path, input_path: &Path) -> Result<UpdateStats> {
+fn try_daemon_update(db_path: &Path, input_path: &Path, exclude: &[String]) -> Result<UpdateStats> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
 
@@ -408,7 +402,8 @@ fn try_daemon_update(db_path: &Path, input_path: &Path) -> Result<UpdateStats> {
         "method": "update",
         "params": {
             "db": canonical_db.to_str().unwrap_or(""),
-            "input": canonical_input.to_str().unwrap_or("")
+            "input": canonical_input.to_str().unwrap_or(""),
+            "exclude": exclude
         }
     });
     writeln!(stream, "{}", serde_json::to_string(&request)?)?;

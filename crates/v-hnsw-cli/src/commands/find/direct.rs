@@ -71,6 +71,7 @@ pub fn run_raw_vector(
     tags: Vec<String>,
     full: bool,
     ef: usize,
+    min_score: f32,
 ) -> Result<()> {
     let config = DbConfig::load(&db_path)?;
 
@@ -144,7 +145,10 @@ pub fn run_raw_vector(
         elapsed_ms: elapsed.as_secs_f64() * 1000.0,
     };
 
-    let output = if full { output } else { super::compact_output(output) };
+    let mut output = if full { output } else { super::compact_output(output) };
+    if min_score > 0.0 {
+        output.results.retain(|item| item.score >= min_score);
+    }
     let json = serde_json::to_string_pretty(&output).context("Failed to serialize output")?;
     println!("{json}");
 
@@ -152,7 +156,7 @@ pub fn run_raw_vector(
 }
 
 /// Direct search without daemon (fallback).
-pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, full: bool) -> Result<()> {
+pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, full: bool, min_score: f32) -> Result<()> {
     let config = DbConfig::load(&db_path)?;
 
     let hnsw_path = db_path.join("hnsw.bin");
@@ -271,7 +275,10 @@ pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, 
         elapsed_ms: elapsed.as_secs_f64() * 1000.0,
     };
 
-    let output = if full { output } else { super::compact_output(output) };
+    let mut output = if full { output } else { super::compact_output(output) };
+    if min_score > 0.0 {
+        output.results.retain(|item| item.score >= min_score);
+    }
     let json = serde_json::to_string_pretty(&output).context("Failed to serialize output")?;
     println!("{json}");
 
