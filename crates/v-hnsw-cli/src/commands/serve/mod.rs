@@ -72,6 +72,32 @@ pub(crate) struct UpdateParams {
     pub exclude: Vec<String>,
 }
 
+/// Code-intel request parameters (shared by all code-intel methods).
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodeIntelParams {
+    pub db: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub symbol: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub depth: Option<u32>,
+    #[serde(default = "default_ci_k")]
+    pub k: usize,
+    #[serde(default)]
+    pub include_tests: bool,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+fn default_ci_k() -> usize {
+    15
+}
+
 /// Read the daemon port from global cache file.
 pub fn read_port_file() -> Option<u16> {
     std::fs::read_to_string(super::common::cache_file("v-hnsw.port"))

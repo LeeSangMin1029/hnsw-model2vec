@@ -53,7 +53,7 @@ fn cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("chunks.bin")
 }
 
-pub(super) fn load_chunks(path: &Path) -> Result<Vec<CodeChunk>> {
+pub(crate) fn load_chunks(path: &Path) -> Result<Vec<CodeChunk>> {
     let cache = cache_path(path);
     let db_mtime = fs::metadata(path)
         .and_then(|m| m.modified())

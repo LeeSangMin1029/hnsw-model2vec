@@ -138,7 +138,7 @@ fn compute_context_json(db: &Path, symbol: &str, depth: u32, k: usize, include_t
 // ── Shared helpers ───────────────────────────────────────────────────────
 
 /// Load graph from cache or build from chunks.
-pub(super) fn load_or_build_graph(db: &Path) -> Result<CallGraph> {
+pub(crate) fn load_or_build_graph(db: &Path) -> Result<CallGraph> {
     if let Some(g) = CallGraph::load(db) {
         return Ok(g);
     }
