@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use super::daemon::DaemonState;
-use super::{EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchParams};
+use super::{EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchParams, UpdateParams};
 
 /// Handle a single client connection.
 pub(crate) fn handle_client(
@@ -16,8 +16,9 @@ pub(crate) fn handle_client(
     state: &mut DaemonState,
     last_activity: &mut Instant,
 ) -> Result<()> {
+    // Generous timeouts: update can take minutes for large repos
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(300)))?;
 
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
@@ -93,6 +94,28 @@ pub(crate) fn handle_client(
                     error: Some(JsonRpcError {
                         code: -3,
                         message: format!("Embed failed: {}", e),
+                    }),
+                },
+            }
+        }
+        "update" => {
+            let params: UpdateParams =
+                serde_json::from_value(request.params).context("Invalid update params")?;
+            let db_path = PathBuf::from(&params.db);
+            let input_path = PathBuf::from(&params.input);
+
+            match state.update(&db_path, &input_path) {
+                Ok(stats) => JsonRpcResponse {
+                    id: request.id,
+                    result: Some(serde_json::to_value(stats)?),
+                    error: None,
+                },
+                Err(e) => JsonRpcResponse {
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -4,
+                        message: format!("Update failed: {e}"),
                     }),
                 },
             }

@@ -6,9 +6,8 @@
 //! # Features
 //!
 //! - **BM25 Index**: Okapi BM25 ranking for keyword-based retrieval
-//! - **RRF Fusion**: Combines multiple ranked lists into a single ranking
+//! - **Convex Fusion**: Combines dense and sparse ranked lists
 //! - **Hybrid Search**: Seamlessly combines dense and sparse results
-//! - **Reranking**: Pluggable reranker interface for result refinement
 //!
 //! # Example
 //!
@@ -38,7 +37,6 @@ pub mod fusion;
 pub mod hybrid;
 #[cfg(feature = "korean")]
 pub mod korean_tokenizer;
-pub mod reranker;
 #[cfg(feature = "korean")]
 pub mod tokenizer;
 
@@ -48,9 +46,8 @@ mod tests;
 // Re-exports
 pub use bm25::{Bm25Index, Bm25Params, Bm25Snapshot, Posting, PostingList};
 pub use config::{HybridSearchConfig, HybridSearchConfigBuilder};
-pub use fusion::{ConvexFusion, RrfFusion};
-pub use hybrid::{HybridSearcher, SimpleHybridSearcher};
-pub use reranker::{LengthBoostReranker, PassthroughReranker, Reranker};
+pub use fusion::ConvexFusion;
+pub use hybrid::SimpleHybridSearcher;
 #[cfg(feature = "korean")]
 pub use korean_tokenizer::{KoreanBm25Tokenizer, init_korean_tokenizer};
 

@@ -63,6 +63,13 @@ pub(crate) struct EmbedParams {
     pub texts: Vec<String>,
 }
 
+/// Update request parameters.
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateParams {
+    pub db: String,
+    pub input: String,
+}
+
 /// Read the daemon port from global cache file.
 pub fn read_port_file() -> Option<u16> {
     std::fs::read_to_string(super::common::cache_file("v-hnsw.port"))

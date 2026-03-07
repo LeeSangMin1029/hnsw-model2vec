@@ -2,13 +2,12 @@
 
 use std::collections::HashSet;
 
-use v_hnsw_core::{DistanceMetric, PayloadStore, PointId, VectorIndex};
+use v_hnsw_core::{DistanceMetric, PointId, VectorIndex};
 use v_hnsw_graph::HnswGraph;
 
 use crate::bm25::Bm25Index;
 use crate::config::HybridSearchConfig;
 use crate::fusion::ConvexFusion;
-use crate::reranker::Reranker;
 use crate::Tokenizer;
 
 /// A hybrid searcher combining dense vector search with sparse BM25 search.
@@ -101,89 +100,6 @@ where
 
     pub fn len(&self) -> usize { self.dense_index.len() }
     pub fn is_empty(&self) -> bool { self.dense_index.is_empty() }
-}
-
-/// Extended hybrid searcher with a payload store for reranking.
-///
-/// Wraps [`SimpleHybridSearcher`] and adds `search_with_rerank` using document text.
-pub struct HybridSearcher<D, T, P>
-where
-    D: DistanceMetric,
-    T: Tokenizer,
-    P: PayloadStore,
-{
-    inner: SimpleHybridSearcher<D, T>,
-    payload_store: P,
-}
-
-impl<D, T, P> HybridSearcher<D, T, P>
-where
-    D: DistanceMetric,
-    T: Tokenizer,
-    P: PayloadStore,
-{
-    pub fn new(
-        dense_index: HnswGraph<D>,
-        sparse_index: Bm25Index<T>,
-        payload_store: P,
-        config: HybridSearchConfig,
-    ) -> Self {
-        Self {
-            inner: SimpleHybridSearcher::new(dense_index, sparse_index, config),
-            payload_store,
-        }
-    }
-
-    // -- Delegate common methods --
-    pub fn config(&self) -> &HybridSearchConfig { self.inner.config() }
-    pub fn config_mut(&mut self) -> &mut HybridSearchConfig { self.inner.config_mut() }
-    pub fn dense_index(&self) -> &HnswGraph<D> { self.inner.dense_index() }
-    pub fn dense_index_mut(&mut self) -> &mut HnswGraph<D> { self.inner.dense_index_mut() }
-    pub fn sparse_index(&self) -> &Bm25Index<T> { self.inner.sparse_index() }
-    pub fn sparse_index_mut(&mut self) -> &mut Bm25Index<T> { self.inner.sparse_index_mut() }
-
-    pub fn add_document(&mut self, id: PointId, vector: &[f32], text: &str) -> v_hnsw_core::Result<()> {
-        self.inner.add_document(id, vector, text)
-    }
-    pub fn remove_document(&mut self, id: PointId) -> v_hnsw_core::Result<()> {
-        self.inner.remove_document(id)
-    }
-    pub fn search(&self, query_vector: &[f32], query_text: &str, k: usize) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-        self.inner.search(query_vector, query_text, k)
-    }
-    pub fn search_dense(&self, query_vector: &[f32], k: usize) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-        self.inner.search_dense(query_vector, k)
-    }
-    pub fn search_sparse(&self, query_text: &str, k: usize) -> Vec<(PointId, f32)> {
-        self.inner.search_sparse(query_text, k)
-    }
-    pub fn len(&self) -> usize { self.inner.len() }
-    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
-
-    // -- Own methods --
-    pub fn payload_store(&self) -> &P { &self.payload_store }
-    pub fn payload_store_mut(&mut self) -> &mut P { &mut self.payload_store }
-
-    /// Perform hybrid search with reranking.
-    pub fn search_with_rerank<R: Reranker>(
-        &self,
-        query_vector: &[f32],
-        query_text: &str,
-        k: usize,
-        reranker: &R,
-    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-        let candidates = self.search(query_vector, query_text, k * 3)?;
-
-        let mut docs_with_text: Vec<(PointId, f32, String)> = Vec::with_capacity(candidates.len());
-        for (id, score) in candidates {
-            let text = self.payload_store.get_text(id)?.unwrap_or_default();
-            docs_with_text.push((id, score, text));
-        }
-
-        let mut results = reranker.rerank(query_text, &docs_with_text)?;
-        results.truncate(k);
-        Ok(results)
-    }
 }
 
 /// Enrich BM25 results with scores for dense candidates not in BM25 top-k.

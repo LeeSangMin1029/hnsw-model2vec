@@ -1,9 +1,9 @@
-//! Update command - Incremental indexing of markdown files.
+//! Update command - Incremental indexing of markdown and code files.
 //!
 //! Compares modification times and file sizes against a stored file index
 //! to detect new, modified, and deleted files. Re-processes only changed files.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -24,16 +24,16 @@ struct ChangeSet {
 }
 
 /// Statistics for the update operation.
-#[derive(Debug, Default)]
-struct UpdateStats {
-    new: usize,
-    modified: usize,
-    deleted: usize,
-    unchanged: usize,
-    hash_skipped: usize,
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UpdateStats {
+    pub new: usize,
+    pub modified: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+    pub hash_skipped: usize,
 }
 
-/// Run the update command - incremental indexing.
+/// Run the update command - incremental indexing (CLI entry point).
 pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     if !db_path.exists() {
         anyhow::bail!(
@@ -49,6 +49,12 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         );
     }
 
+    // Try daemon first (avoids 1GB model reload)
+    if let Ok(stats) = try_daemon_update(&db_path, &input_path) {
+        print_stats(&stats, std::time::Instant::now());
+        return Ok(());
+    }
+
     tracing::info!(
         db = %db_path.display(),
         input = %input_path.display(),
@@ -60,35 +66,74 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
 
     let start = Instant::now();
 
-    let mut file_index = file_index::load_file_index(&db_path)?;
-    println!(
+    // No shared model — run_core will load on demand
+    let stats = run_core(&db_path, &input_path, None)?;
+
+    // Notify daemon to reload if running
+    if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {
+        println!("Daemon notified to reload indexes.");
+    }
+
+    print_stats(&stats, start);
+    Ok(())
+}
+
+/// Core update logic shared by CLI and daemon.
+///
+/// Pass `shared_model` to reuse an existing model (daemon path).
+/// Pass `None` to load a fresh model on demand (CLI fallback path).
+pub(crate) fn run_core(
+    db_path: &Path,
+    input_path: &Path,
+    shared_model: Option<&Model2VecModel>,
+) -> Result<UpdateStats> {
+    let mut file_index = file_index::load_file_index(db_path)?;
+    eprintln!(
         "Loaded file index with {} tracked files",
         file_index.files.len()
     );
 
-    let mut engine = StorageEngine::open_exclusive(&db_path)
+    let mut engine = StorageEngine::open_exclusive(db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
-    // Scan input folder for all markdown files
-    let md_files: Vec<PathBuf> = walkdir::WalkDir::new(&input_path)
+    // Scan input folder for all supported files (markdown + code)
+    let all_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
         .into_iter()
+        .filter_entry(|e| {
+            // Skip build/cache directories
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_string_lossy();
+                !matches!(
+                    name.as_ref(),
+                    "target" | "node_modules" | ".git" | ".swarm"
+                        | "__pycache__" | ".venv" | "dist" | "vendor"
+                        | ".tox" | ".mypy_cache" | ".pytest_cache"
+                )
+            } else {
+                true
+            }
+        })
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()
                 .extension()
-                .map(|ext| ext == "md" || ext == "markdown")
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    ext == "md"
+                        || ext == "markdown"
+                        || crate::chunk_code::is_supported_code_file(ext)
+                })
                 .unwrap_or(false)
         })
         .map(|e| e.path().to_path_buf())
         .collect();
 
-    if md_files.is_empty() {
-        println!("No markdown files found in {}", input_path.display());
-        return Ok(());
+    if all_files.is_empty() {
+        eprintln!("No supported files found in {}", input_path.display());
+        return Ok(UpdateStats::default());
     }
 
-    println!("Scanning {} markdown files...", md_files.len());
-    println!();
+    eprintln!("Scanning {} files (markdown + code)...", all_files.len());
 
     let mut stats = UpdateStats::default();
     let mut seen_files = std::collections::HashSet::new();
@@ -102,22 +147,20 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     });
 
     // First pass: detect changes (mtime/size → content hash two-stage)
-    let mut pending_files: Vec<(PathBuf, String, u64, u64, u64)> = Vec::new(); // +content_hash
+    let mut pending_files: Vec<(PathBuf, String, u64, u64, u64)> = Vec::new();
 
-    for md_path in &md_files {
-        let source = common::normalize_source(md_path);
+    for file_path in &all_files {
+        let source = common::normalize_source(file_path);
         seen_files.insert(source.clone());
 
-        let mtime = common::get_file_mtime(md_path).unwrap_or(0);
-        let size = file_index::get_file_size(md_path).unwrap_or(0);
+        let mtime = common::get_file_mtime(file_path).unwrap_or(0);
+        let size = file_index::get_file_size(file_path).unwrap_or(0);
 
         if file_index.is_modified(&source, mtime, size) {
-            // mtime/size changed — compute content hash to confirm real change
-            let hash = common::content_hash(md_path).unwrap_or(0);
+            let hash = common::content_hash(file_path).unwrap_or(0);
             let old_hash = file_index.get_file(&source).and_then(|m| m.content_hash);
 
             if old_hash == Some(hash) {
-                // Content identical — just update mtime/size, skip re-embedding
                 if let Some(meta) = file_index.get_file(&source) {
                     file_index.update_file_with_hash(
                         source,
@@ -129,7 +172,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
                 }
                 stats.hash_skipped += 1;
             } else {
-                pending_files.push((md_path.clone(), source, mtime, size, hash));
+                pending_files.push((file_path.clone(), source, mtime, size, hash));
             }
         } else {
             stats.unchanged += 1;
@@ -137,7 +180,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
     }
 
     // Detect deleted files
-    let input_prefix = common::normalize_source(&input_path);
+    let input_prefix = common::normalize_source(input_path);
     let deleted_files: Vec<String> = file_index
         .files
         .keys()
@@ -147,29 +190,30 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
 
     // Early exit: no changes at all
     if pending_files.is_empty() && deleted_files.is_empty() {
-        file_index::save_file_index(&db_path, &file_index)?;
-        let elapsed = start.elapsed();
-        if stats.hash_skipped > 0 {
-            println!(
-                "No content changes ({} unchanged, {} hash-skipped).",
-                stats.unchanged, stats.hash_skipped
-            );
-        } else {
-            println!("No changes detected ({} files unchanged).", stats.unchanged);
-        }
-        println!("Elapsed: {:.2}s", elapsed.as_secs_f64());
-        return Ok(());
+        file_index::save_file_index(db_path, &file_index)?;
+        return Ok(stats);
     }
 
     // Load model only when there are files to process
-    let model = if !pending_files.is_empty() {
-        Some(common::create_model()?)
+    let owned_model;
+    let model: Option<&Model2VecModel> = if !pending_files.is_empty() {
+        if let Some(m) = shared_model {
+            Some(m)
+        } else {
+            owned_model = common::create_model()?;
+            Some(&owned_model)
+        }
     } else {
         None
     };
 
+    // Code chunker for .rs files
+    let code_chunker = crate::chunk_code::RustCodeChunker::new(
+        crate::chunk_code::CodeChunkConfig::default(),
+    );
+
     // Process changed files
-    for (md_path, source, mtime, size, hash) in &pending_files {
+    for (file_path, source, mtime, size, hash) in &pending_files {
         if is_interrupted() {
             break;
         }
@@ -177,7 +221,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         let old_meta = file_index.get_file(source);
 
         if let Some(meta) = old_meta {
-            println!("Modified: {}", md_path.display());
+            eprintln!("Modified: {}", file_path.display());
             let old_ids = meta.chunk_ids.clone();
             for id in &old_ids {
                 let _ = engine.remove(*id);
@@ -185,45 +229,90 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
             changes.removed.extend_from_slice(&old_ids);
             stats.modified += 1;
         } else {
-            println!("New:      {}", md_path.display());
+            eprintln!("New:      {}", file_path.display());
             stats.new += 1;
         }
 
-        let (frontmatter, chunks) = match chunker.chunk_file(md_path) {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("Error processing {}: {e}", md_path.display());
-                continue;
-            }
-        };
-
-        let title = frontmatter.as_ref().and_then(|f| f.title.clone());
-        let tags = frontmatter
-            .as_ref()
-            .map(|f| f.tags.clone())
-            .unwrap_or_default();
-        let chunk_total = chunks.len();
+        let is_code = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(crate::chunk_code::is_supported_code_file)
+            .unwrap_or(false);
 
         let mut records: Vec<IngestRecord> = Vec::new();
         let mut chunk_ids = Vec::new();
 
-        for chunk in chunks {
-            let id = common::generate_id(source, chunk.chunk_index);
-            chunk_ids.push(id);
-            records.push(IngestRecord {
-                id,
-                text: chunk.text,
-                source: source.clone(),
-                title: title.clone(),
-                tags: tags.clone(),
-                chunk_index: chunk.chunk_index,
-                chunk_total,
-                source_modified_at: *mtime,
-            });
+        if is_code {
+            // Code file: tree-sitter chunking
+            let source_code = match std::fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error reading {}: {e}", file_path.display());
+                    continue;
+                }
+            };
+            let chunks = code_chunker.chunk(&source_code);
+            let file_path_str = file_path.to_string_lossy().to_string();
+            let chunk_total = chunks.len();
+
+            for chunk in &chunks {
+                let id = common::generate_id(source, chunk.chunk_index);
+                chunk_ids.push(id);
+                let embed_text = chunk.to_embed_text(&file_path_str, &[]);
+                let mut tags = vec![
+                    format!("kind:{}", chunk.kind.as_str()),
+                    "lang:rust".to_owned(),
+                ];
+                if !chunk.visibility.is_empty() {
+                    tags.push(format!("vis:{}", chunk.visibility));
+                }
+                records.push(IngestRecord {
+                    id,
+                    text: embed_text,
+                    source: source.clone(),
+                    title: Some(chunk.name.clone()),
+                    tags,
+                    chunk_index: chunk.chunk_index,
+                    chunk_total,
+                    source_modified_at: *mtime,
+                });
+            }
+        } else {
+            // Markdown file: heading-aware chunking
+            let (frontmatter, chunks) = match chunker.chunk_file(file_path) {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!("Error processing {}: {e}", file_path.display());
+                    continue;
+                }
+            };
+
+            let title = frontmatter.as_ref().and_then(|f| f.title.clone());
+            let tags = frontmatter
+                .as_ref()
+                .map(|f| f.tags.clone())
+                .unwrap_or_default();
+            let chunk_total = chunks.len();
+
+            for chunk in chunks {
+                let id = common::generate_id(source, chunk.chunk_index);
+                chunk_ids.push(id);
+                records.push(IngestRecord {
+                    id,
+                    text: chunk.text,
+                    source: source.clone(),
+                    title: title.clone(),
+                    tags: tags.clone(),
+                    chunk_index: chunk.chunk_index,
+                    chunk_total,
+                    source_modified_at: *mtime,
+                });
+            }
         }
 
         if !records.is_empty() {
-            process_records(&records, model.as_ref().unwrap(), &mut engine)?;
+            #[allow(clippy::unwrap_used)]
+            process_records(&records, model.unwrap(), &mut engine)?;
             changes.added.extend(chunk_ids.iter());
         }
 
@@ -232,10 +321,9 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
 
     // Process deleted files
     if !deleted_files.is_empty() {
-        println!();
-        println!("Deleting {} removed files:", deleted_files.len());
+        eprintln!("Deleting {} removed files:", deleted_files.len());
         for path in &deleted_files {
-            println!("Deleted:  {}", path);
+            eprintln!("Deleted:  {path}");
             if let Some(meta) = file_index.get_file(path) {
                 for id in &meta.chunk_ids {
                     let _ = engine.remove(*id);
@@ -251,26 +339,24 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         .checkpoint()
         .with_context(|| "Failed to checkpoint database")?;
 
-    file_index::save_file_index(&db_path, &file_index)?;
+    file_index::save_file_index(db_path, &file_index)?;
 
     // Incremental index update instead of full rebuild
-    println!();
-    let config = DbConfig::load(&db_path)?;
+    let config = DbConfig::load(db_path)?;
     common::update_indexes_incremental(
-        &db_path,
+        db_path,
         &engine,
         &config,
         &changes.added,
         &changes.removed,
     )?;
 
-    // Notify daemon to reload if running
-    if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {
-        println!("Daemon notified to reload indexes.");
-    }
+    Ok(stats)
+}
 
+/// Print update statistics.
+fn print_stats(stats: &UpdateStats, start: Instant) {
     let elapsed = start.elapsed();
-
     tracing::info!(
         new = stats.new,
         modified = stats.modified,
@@ -290,8 +376,63 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         println!("  Hash-skipped:    {} (mtime changed, content identical)", stats.hash_skipped);
     }
     println!("  Elapsed:         {:.2}s", elapsed.as_secs_f64());
+}
 
-    Ok(())
+/// Try to delegate update to running daemon (avoids 1GB model reload).
+fn try_daemon_update(db_path: &Path, input_path: &Path) -> Result<UpdateStats> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+
+    let port = super::serve::read_port_file()
+        .ok_or_else(|| anyhow::anyhow!("Daemon not running"))?;
+
+    let canonical_db = db_path
+        .canonicalize()
+        .with_context(|| format!("Database not found: {}", db_path.display()))?;
+    let canonical_input = input_path
+        .canonicalize()
+        .with_context(|| format!("Input not found: {}", input_path.display()))?;
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .context("Failed to parse socket address")?;
+    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+        .context("Failed to connect to daemon")?;
+
+    // Update can take a long time — generous timeouts
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(300)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+
+    let request = serde_json::json!({
+        "id": 0,
+        "method": "update",
+        "params": {
+            "db": canonical_db.to_str().unwrap_or(""),
+            "input": canonical_input.to_str().unwrap_or("")
+        }
+    });
+    writeln!(stream, "{}", serde_json::to_string(&request)?)?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut response_line = String::new();
+    reader.read_line(&mut response_line)?;
+
+    let response: serde_json::Value = serde_json::from_str(&response_line)
+        .context("Failed to parse daemon response")?;
+
+    if let Some(err) = response.get("error") {
+        anyhow::bail!("Daemon update failed: {}", err);
+    }
+
+    let result = response.get("result")
+        .ok_or_else(|| anyhow::anyhow!("No result in daemon response"))?;
+
+    let stats: UpdateStats = serde_json::from_value(result.clone())
+        .context("Failed to parse update stats")?;
+
+    println!("Update completed via daemon (no extra process).");
+    Ok(stats)
 }
 
 /// Process a batch of records: embed and insert.

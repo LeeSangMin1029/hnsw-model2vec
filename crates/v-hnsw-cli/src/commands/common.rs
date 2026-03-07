@@ -227,6 +227,7 @@ pub fn content_hash(path: &Path) -> Result<u64> {
 /// Compute content hash from raw bytes (MD5 truncated to u64).
 pub fn content_hash_bytes(bytes: &[u8]) -> u64 {
     let digest = md5::compute(bytes);
+    #[expect(clippy::unwrap_used, reason = "MD5 digest is always 16 bytes")]
     u64::from_le_bytes(digest[..8].try_into().unwrap())
 }
 
@@ -528,44 +529,6 @@ pub fn get_file_mtime(path: &Path) -> Option<u64> {
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
-}
-
-/// Build an HNSW index from a slice of embeddings.
-pub fn build_hnsw_index(
-    embeddings: &[Vec<f32>],
-    dim: usize,
-) -> Result<HnswGraph<NormalizedCosineDistance>> {
-    let config = HnswConfig::builder()
-        .dim(dim)
-        .m(16)
-        .ef_construction(200)
-        .build()
-        .context("Failed to create HNSW config")?;
-
-    let mut hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::new(config, NormalizedCosineDistance);
-
-    let pb = ProgressBar::new(embeddings.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} vectors")
-            .ok()
-            .unwrap_or_else(ProgressStyle::default_bar)
-            .progress_chars("#>-"),
-    );
-
-    for (id, embedding) in embeddings.iter().enumerate() {
-        if is_interrupted() {
-            pb.finish_with_message("Interrupted");
-            break;
-        }
-
-        hnsw.insert(id as u64, embedding)
-            .context("Failed to insert vector")?;
-        pb.inc(1);
-    }
-
-    pb.finish_with_message("Done");
-    Ok(hnsw)
 }
 
 // ============================================================================

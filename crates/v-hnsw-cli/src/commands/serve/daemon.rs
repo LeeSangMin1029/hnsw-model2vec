@@ -41,10 +41,6 @@ impl DenseIndex {
             Self::Heap(h) => h.search_ext(store, query, k, ef),
         }
     }
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        match self { Self::Snapshot(s) => s.len(), Self::Heap(h) => h.len() }
-    }
 }
 
 /// Sparse index: mmap snapshot or heap index.
@@ -247,6 +243,36 @@ impl DaemonState {
     }
 
     pub fn save_cache(&self) -> Result<()> { self.query_cache.save() }
+
+    /// Run incremental update using the daemon's shared model.
+    ///
+    /// Drops cached read-only engine, runs update with exclusive lock,
+    /// then reloads indexes for subsequent searches.
+    pub fn update(&mut self, db_path: &Path, input_path: &Path) -> Result<crate::commands::update::UpdateStats> {
+        let key = canonicalize(db_path)?;
+        let t0 = Instant::now();
+
+        // Drop cached read-only engine so exclusive lock can be acquired
+        self.databases.remove(&key);
+
+        // Ensure model is loaded before borrowing self immutably
+        self.ensure_model()?;
+        let model = self.model.as_ref();
+
+        // Run core update with the daemon's shared model (no 1GB reload)
+        let stats = crate::commands::update::run_core(&key, input_path, model)?;
+
+        // Reload indexes so subsequent searches see the new data
+        self.register_db(&key)?;
+
+        eprintln!(
+            "[daemon] Update complete: new={} mod={} del={} unchanged={} ({:.0}ms)",
+            stats.new, stats.modified, stats.deleted, stats.unchanged,
+            t0.elapsed().as_millis()
+        );
+
+        Ok(stats)
+    }
 
     /// Search: resolve embedding → delegate to DbIndexes::search.
     pub fn search(&mut self, db_path: &Path, query: &str, k: usize, tags: Vec<String>) -> Result<SearchResponse> {

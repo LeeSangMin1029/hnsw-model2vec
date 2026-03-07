@@ -1,6 +1,6 @@
 //! Add command - Unified data ingestion with automatic embedding.
 //!
-//! Detects input type (folder with .md files, .jsonl, .parquet) and processes accordingly.
+//! Detects input type (folder with .md files, .jsonl) and processes accordingly.
 //! Auto-creates database, embeds text, builds indexes.
 
 mod ingest;
@@ -20,31 +20,42 @@ use crate::is_interrupted;
 enum InputType {
     /// Folder containing markdown files.
     MarkdownFolder,
+    /// Folder containing code files (.rs, etc.).
+    CodeFolder,
     /// JSONL file.
     Jsonl,
-    /// Parquet file.
-    Parquet,
 }
 
 /// Detect input type from path (recursive for directories).
 fn detect_input_type(path: &Path) -> Result<InputType> {
     if path.is_dir() {
-        // Recursively check if folder contains markdown files
-        let has_md = walkdir::WalkDir::new(path)
-            .max_depth(3)
+        // Recursively check what kind of files the folder contains
+        let mut has_md = false;
+        let mut has_code = false;
+        for entry in walkdir::WalkDir::new(path)
+            .max_depth(5)
             .into_iter()
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "md" || ext == "markdown")
-                    .unwrap_or(false)
-            });
-        if has_md {
+        {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                match ext {
+                    "md" | "markdown" => has_md = true,
+                    e if crate::chunk_code::is_supported_code_file(e) => has_code = true,
+                    _ => {}
+                }
+            }
+            if has_md && has_code {
+                break;
+            }
+        }
+        // Code takes priority when both exist (code folder may contain README.md)
+        if has_code {
+            Ok(InputType::CodeFolder)
+        } else if has_md {
             Ok(InputType::MarkdownFolder)
         } else {
             anyhow::bail!(
-                "Directory contains no markdown files: {}",
+                "Directory contains no supported files: {}",
                 path.display()
             );
         }
@@ -55,14 +66,13 @@ fn detect_input_type(path: &Path) -> Result<InputType> {
             .map(|e| e.to_lowercase());
         match ext.as_deref() {
             Some("jsonl") | Some("ndjson") => Ok(InputType::Jsonl),
-            Some("parquet") => Ok(InputType::Parquet),
             Some("md") | Some("markdown") => {
                 anyhow::bail!(
                     "Single markdown file not supported. Use a folder containing .md files."
                 )
             }
             _ => anyhow::bail!(
-                "Unsupported file type: {}. Supported: folder with .md files, .jsonl, .parquet",
+                "Unsupported file type: {}. Supported: folder with .md files, .jsonl",
                 path.display()
             ),
         }
@@ -99,11 +109,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
         InputType::MarkdownFolder => {
             ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine)?
         }
+        InputType::CodeFolder => {
+            ingest::process_code_folder(&db_path, &input_path, &model, &mut engine)?
+        }
         InputType::Jsonl => {
             ingest::process_jsonl(&db_path, &input_path, &model, &mut engine)?
-        }
-        InputType::Parquet => {
-            ingest::process_parquet(&db_path, &input_path, &model, &mut engine)?
         }
     };
 

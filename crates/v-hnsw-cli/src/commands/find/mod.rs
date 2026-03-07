@@ -177,7 +177,8 @@ pub fn run(params: FindParams) -> Result<()> {
     }
 
     // Mode 3: Hybrid (default) — daemon preferred
-    let query = query.unwrap(); // validated above
+    #[expect(clippy::unwrap_used, reason = "query presence validated by early return above")]
+    let query = query.unwrap();
     run_hybrid(db, query, k, tags, full)
 }
 

@@ -33,27 +33,3 @@ impl DistanceMetric for AutoDistance {
     }
 }
 
-/// Report which SIMD features are available at runtime.
-#[allow(dead_code)]
-pub fn simd_features() -> &'static str {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx512f") {
-            return "avx512f";
-        }
-        if is_x86_feature_detected!("avx2") {
-            return "avx2";
-        }
-        if is_x86_feature_detected!("sse4.1") {
-            return "sse4.1";
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // NEON is always available on aarch64
-        return "neon";
-    }
-
-    "none"
-}

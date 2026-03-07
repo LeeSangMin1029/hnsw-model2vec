@@ -1,15 +1,12 @@
 //! Integration tests for v-hnsw-search.
 
-use std::collections::HashMap;
-
-use v_hnsw_core::{Payload, PayloadStore, PointId};
+use v_hnsw_core::PointId;
 use v_hnsw_graph::{HnswConfig, HnswGraph, L2Distance};
 
 use crate::bm25::{Bm25Index, Bm25Params};
 use crate::config::HybridSearchConfig;
-use crate::fusion::RrfFusion;
+
 use crate::hybrid::SimpleHybridSearcher;
-use crate::reranker::{LengthBoostReranker, PassthroughReranker, Reranker};
 use crate::{SimpleTokenizer, Tokenizer, WhitespaceTokenizer};
 
 // ============================================================================
@@ -171,104 +168,6 @@ fn test_bm25_index_remove_document() {
     assert!(!index.remove_document(999));
 }
 
-// ============================================================================
-// RRF Fusion Tests
-// ============================================================================
-
-#[test]
-fn test_rrf_fusion_basic() {
-    let rrf = RrfFusion::with_k(60);
-
-    // Two lists with same documents in different orders
-    let list1 = vec![(1, 0.9), (2, 0.8), (3, 0.7)];
-    let list2 = vec![(2, 0.95), (3, 0.85), (1, 0.75)];
-
-    let fused = rrf.fuse(&[list1, list2], 10);
-
-    // All 3 documents should be present
-    assert_eq!(fused.len(), 3);
-
-    // Doc 2 should be first (rank 1 + rank 2 in the two lists)
-    // Scores: doc2 = 1/61 + 1/62, doc1 = 1/61 + 1/63, doc3 = 1/62 + 1/63
-    // Actually: doc2 has best combined rank
-    let first_id = fused[0].0;
-    assert_eq!(first_id, 2);
-}
-
-#[test]
-fn test_rrf_fusion_disjoint_lists() {
-    let rrf = RrfFusion::with_k(60);
-
-    // Completely different documents
-    let list1 = vec![(1, 0.9), (2, 0.8)];
-    let list2 = vec![(3, 0.95), (4, 0.85)];
-
-    let fused = rrf.fuse(&[list1, list2], 10);
-
-    assert_eq!(fused.len(), 4);
-
-    // Top items from each list should be tied for first
-    let top_ids: Vec<PointId> = fused.iter().take(2).map(|(id, _)| *id).collect();
-    // Doc 1 and 3 both have rank 1 in their respective lists
-    assert!((top_ids.contains(&1) && top_ids.contains(&3)));
-}
-
-#[test]
-fn test_rrf_fusion_single_list() {
-    let rrf = RrfFusion::with_k(60);
-
-    let list = vec![(1, 0.9), (2, 0.8), (3, 0.7)];
-    let fused = rrf.fuse(&[list], 10);
-
-    // Order should be preserved
-    assert_eq!(fused[0].0, 1);
-    assert_eq!(fused[1].0, 2);
-    assert_eq!(fused[2].0, 3);
-
-    // Verify RRF scores
-    let expected_score_1 = 1.0 / 61.0;
-    assert!((fused[0].1 - expected_score_1).abs() < 1e-6);
-}
-
-#[test]
-fn test_rrf_fusion_weighted() {
-    let rrf = RrfFusion::with_k(60);
-
-    // List 1 has doc 1 first, list 2 has doc 2 first
-    let list1 = vec![(1, 0.9)];
-    let list2 = vec![(2, 0.95)];
-
-    // Weight list 1 at 3x
-    let fused = rrf.fuse_weighted(&[(3.0, &list1), (1.0, &list2)], 10);
-
-    // Doc 1 should be first due to higher weight
-    assert_eq!(fused[0].0, 1);
-
-    // Score for doc 1: 3 * 1/61 = 3/61
-    let expected_score_1 = 3.0 / 61.0;
-    assert!((fused[0].1 - expected_score_1).abs() < 1e-6);
-}
-
-#[test]
-fn test_rrf_different_k_values() {
-    // Smaller k = more emphasis on top ranks
-    let rrf_small_k = RrfFusion::with_k(10);
-    let rrf_large_k = RrfFusion::with_k(100);
-
-    // Use lists where one doc is clearly better ranked
-    let list1 = vec![(1, 0.9), (2, 0.8), (3, 0.7)];
-    let list2 = vec![(1, 0.95), (2, 0.85), (3, 0.75)];
-
-    let fused_small = rrf_small_k.fuse(&[list1.clone(), list2.clone()], 10);
-    let fused_large = rrf_large_k.fuse(&[list1, list2], 10);
-
-    // Doc 1 is first in both lists, should be first in result for both k values
-    assert_eq!(fused_small[0].0, 1);
-    assert_eq!(fused_large[0].0, 1);
-
-    // With smaller k, scores are larger (1/(k+rank) is larger for smaller k)
-    assert!(fused_small[0].1 > fused_large[0].1);
-}
 
 // ============================================================================
 // Hybrid Search Tests
@@ -388,8 +287,6 @@ fn test_hybrid_search_custom_config() -> v_hnsw_core::Result<()> {
 
     // Custom config: heavy dense weight via fusion_alpha
     let search_config = HybridSearchConfig::builder()
-        .dense_weight(0.9)
-        .sparse_weight(0.1)
         .fusion_alpha(0.9)
         .build();
 
@@ -437,49 +334,6 @@ fn test_simple_tokenizer() {
 
     let tokens = tokenizer.tokenize("one-two-three");
     assert_eq!(tokens, vec!["one", "two", "three"]);
-}
-
-// ============================================================================
-// Reranker Tests
-// ============================================================================
-
-#[test]
-fn test_passthrough_reranker_preserves_order() {
-    let reranker = PassthroughReranker::new();
-
-    let candidates = vec![
-        (1, 0.9, "first document".to_string()),
-        (2, 0.8, "second document".to_string()),
-        (3, 0.7, "third document".to_string()),
-    ];
-
-    let results = reranker
-        .rerank("query", &candidates)
-        .expect("rerank should succeed");
-
-    assert_eq!(results.len(), 3);
-    assert_eq!(results[0].0, 1);
-    assert_eq!(results[1].0, 2);
-    assert_eq!(results[2].0, 3);
-}
-
-#[test]
-fn test_length_boost_reranker_prefers_optimal() {
-    let reranker = LengthBoostReranker::new(50, 2.0);
-
-    // All same initial score, different lengths
-    let candidates = vec![
-        (1, 1.0, "a".repeat(50)),   // Optimal
-        (2, 1.0, "a".repeat(200)),  // Too long
-        (3, 1.0, "a".repeat(10)),   // Too short
-    ];
-
-    let results = reranker
-        .rerank("query", &candidates)
-        .expect("rerank should succeed");
-
-    // Optimal length document should be first
-    assert_eq!(results[0].0, 1);
 }
 
 // ============================================================================
@@ -570,101 +424,4 @@ fn test_many_documents_search() {
     assert!(doc_ids.contains(&42));
 }
 
-#[test]
-fn test_rrf_with_limit() {
-    let rrf = RrfFusion::new();
 
-    let list1: Vec<(PointId, f32)> = (0..50).map(|i| (i, 1.0 - i as f32 * 0.01)).collect();
-    let list2: Vec<(PointId, f32)> = (50..100).map(|i| (i, 1.0 - (i - 50) as f32 * 0.01)).collect();
-
-    // Fuse with limit
-    let results = rrf.fuse(&[list1, list2], 10);
-    assert_eq!(results.len(), 10);
-}
-
-// ============================================================================
-// Integration with PayloadStore (mock)
-// ============================================================================
-
-/// Mock payload store for testing HybridSearcher
-#[derive(Default)]
-struct MockPayloadStore {
-    texts: HashMap<PointId, String>,
-}
-
-impl MockPayloadStore {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn add_text(&mut self, id: PointId, text: &str) {
-        self.texts.insert(id, text.to_string());
-    }
-}
-
-impl PayloadStore for MockPayloadStore {
-    fn get_payload(&self, _id: PointId) -> v_hnsw_core::Result<Option<Payload>> {
-        // Not implemented for this test
-        Ok(None)
-    }
-
-    fn set_payload(&mut self, _id: PointId, _payload: Payload) -> v_hnsw_core::Result<()> {
-        Ok(())
-    }
-
-    fn remove_payload(&mut self, _id: PointId) -> v_hnsw_core::Result<()> {
-        Ok(())
-    }
-
-    fn get_text(&self, id: PointId) -> v_hnsw_core::Result<Option<String>> {
-        Ok(self.texts.get(&id).cloned())
-    }
-}
-
-#[test]
-fn test_hybrid_searcher_with_rerank() -> v_hnsw_core::Result<()> {
-    use crate::hybrid::HybridSearcher;
-
-    let hnsw_config = HnswConfig::builder().dim(4).m(8).build()?;
-    let hnsw = HnswGraph::with_seed(hnsw_config, L2Distance, 42);
-    let bm25 = Bm25Index::new(SimpleTokenizer);
-    let mut payload_store = MockPayloadStore::new();
-    let search_config = HybridSearchConfig::default();
-
-    // Set up payload store with texts
-    payload_store.add_text(1, "short text");
-    payload_store.add_text(2, "this is a medium length text with more words");
-    payload_store.add_text(3, "this is a very very very long text that goes on and on with many many words that make it much longer than the others in this test set");
-
-    let mut searcher = HybridSearcher::new(hnsw, bm25, payload_store, search_config);
-
-    // Add documents
-    searcher.add_document(1, &[1.0, 0.0, 0.0, 0.0], "short text")?;
-    searcher.add_document(2, &[0.5, 0.5, 0.0, 0.0], "this is a medium length text with more words")?;
-    searcher.add_document(3, &[0.0, 1.0, 0.0, 0.0], "this is a very very very long text that goes on and on with many many words that make it much longer than the others in this test set")?;
-
-    // Search with passthrough reranker (should preserve order)
-    let reranker = PassthroughReranker::new();
-    let results = searcher.search_with_rerank(
-        &[1.0, 0.0, 0.0, 0.0],
-        "text",
-        3,
-        &reranker,
-    )?;
-
-    assert_eq!(results.len(), 3);
-
-    // Search with length boost reranker (should prefer shorter)
-    let length_reranker = LengthBoostReranker::new(20, 2.0);
-    let results = searcher.search_with_rerank(
-        &[0.5, 0.5, 0.0, 0.0],
-        "text",
-        3,
-        &length_reranker,
-    )?;
-
-    // Shorter document should be boosted
-    assert_eq!(results.len(), 3);
-
-    Ok(())
-}

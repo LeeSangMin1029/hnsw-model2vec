@@ -56,10 +56,6 @@ zstd = "0.13"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# Arrow / Parquet
-arrow = { version = "54", default-features = false, features = ["ipc"] }
-parquet = { version = "54", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
-
 # Dev dependencies
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }

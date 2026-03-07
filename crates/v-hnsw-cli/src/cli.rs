@@ -40,14 +40,14 @@ pub enum Commands {
         /// Path to the database directory.
         path: PathBuf,
     },
-    /// Insert vectors from a file (JSONL, Parquet, fvecs, bvecs).
+    /// Insert vectors from a file (JSONL, fvecs, bvecs).
     Insert {
         /// Path to the database directory.
         path: PathBuf,
-        /// Input file (.jsonl, .ndjson, .parquet, .fvecs, .bvecs).
+        /// Input file (.jsonl, .ndjson, .fvecs, .bvecs).
         #[arg(short, long)]
         input: PathBuf,
-        /// Vector column name for Parquet files.
+        /// Vector column name for input files.
         #[arg(long, default_value = "vector")]
         vector_column: String,
         /// Auto-embed text using model2vec (skips vector column requirement).
@@ -89,50 +89,6 @@ pub enum Commands {
         /// Output JSONL file.
         #[arg(short, long)]
         output: PathBuf,
-    },
-    /// Import data from JSONL file.
-    Import {
-        /// Path to the database directory.
-        path: PathBuf,
-        /// Input JSONL file.
-        #[arg(short, long)]
-        input: PathBuf,
-    },
-    /// Compare v-hnsw performance on JSONL data (e.g., Claude sessions).
-    Compare {
-        /// Path to directory containing JSONL files.
-        #[arg(long)]
-        jsonl_dir: PathBuf,
-        /// Number of queries to run.
-        #[arg(long, default_value = "100")]
-        queries: usize,
-        /// Top-k results per query.
-        #[arg(short, long, default_value = "10")]
-        k: usize,
-        /// Chunk size in characters.
-        #[arg(long, default_value = "500")]
-        chunk_size: usize,
-        /// Maximum number of chunks to process (optional).
-        #[arg(long)]
-        max_chunks: Option<usize>,
-    },
-    /// Index markdown files (compatible with qmd collections).
-    IndexMd {
-        /// Input directory containing markdown files.
-        #[arg(short, long)]
-        input: PathBuf,
-        /// Output directory for the index.
-        #[arg(short, long)]
-        output: PathBuf,
-        /// Chunk size in characters.
-        #[arg(long, default_value = "500")]
-        chunk_size: usize,
-        /// Chunk overlap in characters.
-        #[arg(long, default_value = "100")]
-        chunk_overlap: usize,
-        /// Glob pattern for markdown files.
-        #[arg(long)]
-        pattern: Option<String>,
     },
     /// Manage collections.
     Collection {
@@ -189,6 +145,88 @@ pub enum Commands {
         /// Search beam width for HNSW (ef_search).
         #[arg(long, default_value = "200")]
         ef: usize,
+    },
+    /// List symbols matching filters.
+    ///
+    /// JSON schema: {_s, "file":[{l=lines,k=kind,n=name}]}
+    #[command(visible_alias = "sym")]
+    Symbols {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Filter by symbol name (substring match).
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Filter by kind (function, struct, enum, impl, trait, etc.).
+        #[arg(short, long)]
+        kind: Option<String>,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+    },
+    /// Find symbol definition location.
+    ///
+    /// JSON schema: {_s, "file":[{l=lines,k=kind,n=name}]}
+    #[command(visible_alias = "d")]
+    Def {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to find.
+        name: String,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+    },
+    /// Find all callers of a function.
+    ///
+    /// JSON schema: {_s, "file":[{l=lines,k=kind,n=name}]}
+    #[command(visible_alias = "c")]
+    Callers {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Function name to find callers of.
+        function: String,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+    },
+    /// Find all references to a symbol.
+    ///
+    /// JSON schema: {_s, "file":[{l=lines,k=kind,n=name,v=via}]}
+    #[command(visible_alias = "r")]
+    Refs {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to find references to.
+        name: String,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+    },
+    /// Show file-level dependency graph from code chunks.
+    ///
+    /// Analyses `calls` and `types` fields to map file → file dependencies.
+    /// JSON schema: {_s, "file":[{n=name,v=via}]}
+    Deps {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Show dependencies for a specific file only (suffix match).
+        file: Option<String>,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
+        /// Transitive dependency depth (default: 1 = direct only).
+        #[arg(long, default_value = "1")]
+        depth: usize,
+    },
+    /// Show per-crate code statistics (functions, structs, enums).
+    ///
+    /// JSON schema: {_s, "crate":{p=prod_fn,t=test_fn,s=struct,e=enum}}
+    Stats {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: crate::commands::code_intel::OutputFormat,
     },
     /// Start daemon server for fast embedding search.
     Serve {

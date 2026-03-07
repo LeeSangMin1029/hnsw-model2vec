@@ -1,4 +1,4 @@
-//! Input format processors: markdown folders, JSONL, and Parquet files.
+//! Input format processors: markdown folders and JSONL files.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -110,6 +110,240 @@ pub fn process_markdown_folder(
     Ok((inserted, errors, inserted_ids))
 }
 
+/// Intermediate data collected per code chunk before `called_by` resolution.
+struct CodeChunkEntry {
+    chunk: crate::chunk_code::CodeChunk,
+    source: String,
+    file_path_str: String,
+    mtime: u64,
+}
+
+/// Build `called_by` reverse index from all chunks' `calls` data.
+///
+/// For each call target, extracts the bare function name (last segment after
+/// `::` or `.`) and maps it to the set of callers (qualified chunk names).
+/// Returns `HashMap<bare_fn_name, Vec<caller_name>>`.
+fn build_called_by_index(entries: &[CodeChunkEntry]) -> HashMap<String, Vec<String>> {
+    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+
+    for entry in entries {
+        let caller = &entry.chunk.name;
+        for call in &entry.chunk.calls {
+            // Extract bare function name: "self.method" → "method",
+            // "Module::func" → "func", "validate_amount" → "validate_amount"
+            let bare = call
+                .rsplit_once("::")
+                .map(|(_, name)| name)
+                .or_else(|| call.rsplit_once('.').map(|(_, name)| name))
+                .unwrap_or(call);
+
+            reverse
+                .entry(bare.to_owned())
+                .or_default()
+                .push(caller.clone());
+        }
+    }
+
+    // Deduplicate callers per target
+    for callers in reverse.values_mut() {
+        callers.sort();
+        callers.dedup();
+    }
+
+    reverse
+}
+
+/// Look up `called_by` entries for a given chunk name.
+///
+/// Checks both the full qualified name and the bare (last segment) name
+/// against the reverse index built by [`build_called_by_index`].
+fn lookup_called_by<'a>(
+    reverse: &'a HashMap<String, Vec<String>>,
+    chunk_name: &str,
+) -> Vec<&'a str> {
+    // Bare name of this chunk: "PaymentIntent::new" → "new"
+    let bare = chunk_name
+        .rsplit_once("::")
+        .map(|(_, name)| name)
+        .unwrap_or(chunk_name);
+
+    let mut result: Vec<&str> = Vec::new();
+
+    if let Some(callers) = reverse.get(bare) {
+        for c in callers {
+            // Don't list self-calls
+            if c != chunk_name {
+                result.push(c.as_str());
+            }
+        }
+    }
+
+    // Also check the full qualified name as a key (e.g., someone calls "Foo::bar")
+    if bare != chunk_name
+        && let Some(callers) = reverse.get(chunk_name)
+    {
+        for c in callers {
+            if c != chunk_name && !result.contains(&c.as_str()) {
+                result.push(c.as_str());
+            }
+        }
+    }
+
+    result.sort();
+    result
+}
+
+/// Process code folder: chunk .rs files via tree-sitter, embed, insert.
+///
+/// Two-pass approach:
+/// 1. Chunk all files and collect `calls` data
+/// 2. Build `called_by` reverse index, then generate embed text with it
+pub fn process_code_folder(
+    db_path: &Path,
+    input_path: &Path,
+    model: &Model2VecModel,
+    engine: &mut StorageEngine,
+) -> Result<(u64, u64, Vec<u64>)> {
+    use crate::chunk_code::{CodeChunkConfig, RustCodeChunker};
+
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+
+    // Collect all supported code files recursively
+    let code_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(crate::chunk_code::is_supported_code_file)
+                .unwrap_or(false)
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    if code_files.is_empty() {
+        anyhow::bail!("No supported code files found in {}", input_path.display());
+    }
+
+    println!("Found {} code files", code_files.len());
+
+    // === Pass 1: Chunk all files, collect CodeChunk + metadata ===
+    let mut entries: Vec<CodeChunkEntry> = Vec::new();
+    let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
+
+    for code_path in &code_files {
+        if is_interrupted() {
+            break;
+        }
+
+        let source_code = match std::fs::read_to_string(code_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {e}", code_path.display());
+                continue;
+            }
+        };
+
+        let chunks = chunker.chunk(&source_code);
+        if chunks.is_empty() {
+            continue;
+        }
+
+        let source = common::normalize_source(code_path);
+        let file_path_str = code_path.to_string_lossy().to_string();
+        let mtime = common::get_file_mtime(code_path).unwrap_or(0);
+        let size = file_index::get_file_size(code_path).unwrap_or(0);
+        let mut chunk_ids = Vec::new();
+
+        for chunk in chunks {
+            let id = common::generate_id(&source, chunk.chunk_index);
+            chunk_ids.push(id);
+            entries.push(CodeChunkEntry {
+                chunk,
+                source: source.clone(),
+                file_path_str: file_path_str.clone(),
+                mtime,
+            });
+        }
+
+        file_metadata_map.insert(source, (mtime, size, chunk_ids));
+    }
+
+    // === Pass 2: Build called_by reverse index ===
+    let reverse_index = build_called_by_index(&entries);
+
+    let called_by_count: usize = reverse_index.values().map(Vec::len).sum();
+    println!(
+        "Built called_by index: {} targets, {} reverse edges",
+        reverse_index.len(),
+        called_by_count
+    );
+
+    // === Pass 3: Generate IngestRecords with called_by data ===
+    let chunk_total_map: HashMap<&str, usize> = {
+        let mut m: HashMap<&str, usize> = HashMap::new();
+        for entry in &entries {
+            *m.entry(&entry.source).or_default() += 1;
+        }
+        m
+    };
+
+    let mut records: Vec<IngestRecord> = Vec::with_capacity(entries.len());
+
+    for entry in &entries {
+        let chunk = &entry.chunk;
+        let chunk_total = chunk_total_map
+            .get(entry.source.as_str())
+            .copied()
+            .unwrap_or(1);
+
+        // Resolve called_by for this chunk
+        let called_by_refs = lookup_called_by(&reverse_index, &chunk.name);
+        let called_by: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
+
+        let id = common::generate_id(&entry.source, chunk.chunk_index);
+        let embed_text = chunk.to_embed_text(&entry.file_path_str, &called_by);
+
+        // Build tags from code metadata
+        let mut tags = vec![
+            format!("kind:{}", chunk.kind.as_str()),
+            format!("lang:rust"),
+        ];
+        if !chunk.visibility.is_empty() {
+            tags.push(format!("vis:{}", chunk.visibility));
+        }
+        // Add caller tags for tag-based filtering
+        for caller in &called_by {
+            tags.push(format!("caller:{caller}"));
+        }
+
+        records.push(IngestRecord {
+            id,
+            text: embed_text,
+            source: entry.source.clone(),
+            title: Some(chunk.name.clone()),
+            tags,
+            chunk_index: chunk.chunk_index,
+            chunk_total,
+            source_modified_at: entry.mtime,
+        });
+    }
+
+    println!("Total code chunks to process: {}", records.len());
+
+    let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
+
+    // Save file metadata index
+    let mut file_index = file_index::load_file_index(db_path)?;
+    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
+        file_index.update_file(path, mtime, size, chunk_ids);
+    }
+    file_index::save_file_index(db_path, &file_index)?;
+
+    Ok((inserted, errors, inserted_ids))
+}
+
 /// Process JSONL file: parse records, embed, insert.
 pub fn process_jsonl(
     _db_path: &Path,
@@ -205,117 +439,3 @@ pub fn process_jsonl(
     process_records(records, model, engine)
 }
 
-/// Process Parquet file: read rows, embed, insert.
-pub fn process_parquet(
-    _db_path: &Path,
-    input_path: &Path,
-    model: &Model2VecModel,
-    engine: &mut StorageEngine,
-) -> Result<(u64, u64, Vec<u64>)> {
-    use arrow::array::{Array, StringArray, UInt64Array};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-    let file = std::fs::File::open(input_path)
-        .with_context(|| format!("Failed to open {}", input_path.display()))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .with_context(|| "Failed to create Parquet reader")?;
-
-    let reader = builder
-        .build()
-        .with_context(|| "Failed to build Parquet reader")?;
-
-    let mut records: Vec<IngestRecord> = Vec::new();
-    let source = common::normalize_source(input_path);
-    let mut row_idx = 0u64;
-
-    for batch_result in reader {
-        if is_interrupted() {
-            break;
-        }
-
-        let batch = batch_result.with_context(|| "Failed to read Parquet batch")?;
-        let schema = batch.schema();
-
-        // Find text column
-        let text_col_idx = schema
-            .fields()
-            .iter()
-            .position(|f| f.name() == "text" || f.name() == "content")
-            .ok_or_else(|| {
-                anyhow::anyhow!("No 'text' or 'content' column found in Parquet file")
-            })?;
-
-        let text_array = batch
-            .column(text_col_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("Text column is not a string array"))?;
-
-        // Optional id column
-        let id_col_idx = schema.fields().iter().position(|f| f.name() == "id");
-        let id_array = id_col_idx.and_then(|idx| {
-            batch
-                .column(idx)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-        });
-
-        // Optional title column
-        let title_col_idx = schema.fields().iter().position(|f| f.name() == "title");
-        let title_array = title_col_idx.and_then(|idx| {
-            batch
-                .column(idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-        });
-
-        for i in 0..batch.num_rows() {
-            if text_array.is_null(i) {
-                row_idx += 1;
-                continue;
-            }
-
-            let text = text_array.value(i).to_string();
-            if text.is_empty() {
-                row_idx += 1;
-                continue;
-            }
-
-            let id = id_array
-                .and_then(|arr| {
-                    if arr.is_null(i) {
-                        None
-                    } else {
-                        Some(arr.value(i))
-                    }
-                })
-                .unwrap_or_else(|| common::generate_id(&source, row_idx as usize));
-
-            let title = title_array.and_then(|arr| {
-                if arr.is_null(i) {
-                    None
-                } else {
-                    Some(arr.value(i).to_string())
-                }
-            });
-
-            records.push(IngestRecord {
-                id,
-                text,
-                source: source.clone(),
-                title,
-                tags: Vec::new(),
-                chunk_index: 0,
-                chunk_total: 1,
-                source_modified_at: 0,
-            });
-
-            row_idx += 1;
-        }
-    }
-
-    println!("Total records to process: {}", records.len());
-
-    process_records(records, model, engine)
-}

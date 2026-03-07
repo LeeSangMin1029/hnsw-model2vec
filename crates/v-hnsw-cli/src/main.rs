@@ -4,6 +4,7 @@
 //! Can run as both a daemon server and a direct CLI.
 
 pub mod chunk;
+pub mod chunk_code;
 mod cli;
 mod commands;
 pub mod error;
@@ -82,21 +83,6 @@ fn run() -> anyhow::Result<()> {
         Commands::Delete { path, id } => commands::delete::run(path, id),
         Commands::Bench { path, queries, k } => commands::bench::run(path, queries, k),
         Commands::Export { path, output } => commands::export::run(path, output),
-        Commands::Import { path, input } => commands::import::run(path, input),
-        Commands::Compare {
-            jsonl_dir,
-            queries,
-            k,
-            chunk_size,
-            max_chunks,
-        } => commands::compare::run(jsonl_dir, queries, k, chunk_size, max_chunks),
-        Commands::IndexMd {
-            input,
-            output,
-            chunk_size,
-            chunk_overlap,
-            pattern,
-        } => commands::index_md::run(input, output, chunk_size, chunk_overlap, pattern),
         Commands::Collection { path, action } => commands::collection::run(path, action),
         Commands::BuildIndex { path } => commands::buildindex::run(path),
         Commands::Get { path, ids } => commands::get::run(path, ids),
@@ -107,6 +93,20 @@ fn run() -> anyhow::Result<()> {
                 db, query, k, tags: tag, full, vector, ef,
             })
         }
+        Commands::Symbols { db, name, kind, format } => {
+            commands::code_intel::run_symbols(db, name, kind, format)
+        }
+        Commands::Def { db, name, format } => commands::code_intel::run_def(db, name, format),
+        Commands::Callers { db, function, format } => {
+            commands::code_intel::run_callers(db, function, format)
+        }
+        Commands::Refs { db, name, format } => {
+            commands::code_intel::run_refs(db, name, format)
+        }
+        Commands::Deps { db, file, format, depth } => {
+            commands::code_intel::deps::run_deps(db, file, format, depth)
+        }
+        Commands::Stats { db, format } => commands::code_intel::run_stats(db, format),
         Commands::Serve {
             db,
             port,

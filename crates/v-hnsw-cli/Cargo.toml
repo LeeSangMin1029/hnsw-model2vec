@@ -21,6 +21,10 @@ v-hnsw-embed.workspace = true
 # Markdown chunking (inline module, replaces v-hnsw-chunk crate)
 pulldown-cmark = "0.13"
 
+# Code chunking (tree-sitter AST parsing)
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+
 # CLI
 clap = { workspace = true, features = ["derive"] }
 
@@ -44,10 +48,6 @@ crossbeam.workspace = true
 
 # Ctrl+C handling
 ctrlc = "3.4"
-
-# Arrow / Parquet
-arrow.workspace = true
-parquet.workspace = true
 
 # Dictionary provisioning (all already in dep tree — zero additional compile)
 ureq = "2"

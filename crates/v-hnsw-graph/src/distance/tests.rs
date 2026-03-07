@@ -4,17 +4,10 @@ use proptest::prelude::*;
 use v_hnsw_core::DistanceMetric;
 
 use super::cosine::CosineDistance;
-use super::dispatch::{simd_features, AutoDistance};
+use super::dispatch::AutoDistance;
 use super::dot::DotProductDistance;
 use super::fallback;
 use super::l2::L2Distance;
-
-#[test]
-fn test_simd_detection() {
-    let features = simd_features();
-    assert!(!features.is_empty());
-    println!("SIMD features detected: {features}");
-}
 
 #[test]
 fn test_l2_identical_vectors() {

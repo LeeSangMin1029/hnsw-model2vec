@@ -23,7 +23,7 @@ struct EmbeddedBatch {
 pub fn run_embed(
     path: PathBuf,
     input: PathBuf,
-    text_column: &str,
+    _text_column: &str,
     model_name: &str,
     batch_size: usize,
 ) -> Result<()> {
@@ -39,7 +39,6 @@ pub fn run_embed(
 
     let reader_cfg = ReaderConfig {
         vector_column: None,
-        text_column,
     };
     let mut reader = readers::open_reader(&input, &reader_cfg)
         .with_context(|| format!("failed to open input file: {}", input.display()))?;
