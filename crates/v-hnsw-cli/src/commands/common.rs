@@ -537,6 +537,9 @@ const BUILTIN_SKIP_DIRS: &[&str] = &[
     ".tox",
     ".mypy_cache",
     ".pytest_cache",
+    ".claude",
+    "build",
+    "mutants.out",
 ];
 
 /// Check if a directory entry should be skipped during walkdir scanning.
@@ -545,6 +548,10 @@ const BUILTIN_SKIP_DIRS: &[&str] = &[
 pub fn should_skip_dir(dir_name: &OsStr, exclude: &[String]) -> bool {
     let name = dir_name.to_string_lossy();
     if BUILTIN_SKIP_DIRS.iter().any(|s| *s == name.as_ref()) {
+        return true;
+    }
+    // Skip v-hnsw database directories (e.g., .v-hnsw-code.db, .v-hnsw-sessions.db)
+    if name.starts_with(".v-hnsw") {
         return true;
     }
     exclude.iter().any(|e| e == name.as_ref())

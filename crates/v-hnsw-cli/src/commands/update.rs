@@ -116,6 +116,7 @@ pub(crate) fn run_core(
                     ext == "md"
                         || ext == "markdown"
                         || crate::chunk_code::is_supported_code_file(ext)
+                        || is_supported_text_file(ext)
                 })
                 .unwrap_or(false)
         })
@@ -346,6 +347,17 @@ pub(crate) fn run_core(
     )?;
 
     Ok(stats)
+}
+
+/// Check if a file extension is a supported text-based source file
+/// (not Rust code, but still worth indexing as plain text chunks).
+fn is_supported_text_file(ext: &str) -> bool {
+    matches!(
+        ext,
+        "ts" | "tsx" | "js" | "jsx" | "svelte" | "vue"
+            | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
+            | "toml" | "yaml" | "yml" | "json"
+    )
 }
 
 /// Print update statistics.
