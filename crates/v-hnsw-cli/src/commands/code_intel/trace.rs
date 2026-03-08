@@ -14,14 +14,14 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::graph::CallGraph;
-use super::{cached_json, relative_path, OutputFormat};
+use super::{cached_json, relative_path, OutputFormat, format_lines_opt, format_lines_str_opt};
 use super::context::load_or_build_graph;
 
 /// BFS to find shortest path from any source index to any target index.
 ///
 /// Returns the path as a list of chunk indices (source first, target last),
 /// or `None` if no path exists.
-fn bfs_shortest_path(graph: &CallGraph, sources: &[u32], targets: &[u32]) -> Option<Vec<u32>> {
+pub(crate) fn bfs_shortest_path(graph: &CallGraph, sources: &[u32], targets: &[u32]) -> Option<Vec<u32>> {
     let len = graph.len();
     let mut visited = vec![false; len];
     let mut parent: Vec<Option<u32>> = vec![None; len];
@@ -128,7 +128,7 @@ fn print_path(graph: &CallGraph, path: &[u32]) {
         let file = relative_path(&graph.files[i]);
         let name = &graph.names[i];
         let kind = &graph.kinds[i];
-        let lines = format_lines(graph.lines[i]);
+        let lines = format_lines_opt(graph.lines[i]);
         let test_marker = if graph.is_test[i] { " [test]" } else { "" };
 
         let arrow = if step == 0 { "  " } else { "-> " };
@@ -138,7 +138,7 @@ fn print_path(graph: &CallGraph, path: &[u32]) {
     println!();
 }
 
-fn build_json(graph: &CallGraph, path: &[u32]) -> serde_json::Value {
+pub(crate) fn build_json(graph: &CallGraph, path: &[u32]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert(
         "_s".to_owned(),
@@ -152,7 +152,7 @@ fn build_json(graph: &CallGraph, path: &[u32]) -> serde_json::Value {
             let i = idx as usize;
             serde_json::json!({
                 "f": relative_path(&graph.files[i]),
-                "l": format_lines_str(graph.lines[i]),
+                "l": format_lines_str_opt(graph.lines[i]),
                 "k": &graph.kinds[i],
                 "n": &graph.names[i],
                 "t": graph.is_test[i],
@@ -164,18 +164,3 @@ fn build_json(graph: &CallGraph, path: &[u32]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-fn format_lines(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!(":{s}-{e}")
-    } else {
-        String::new()
-    }
-}
-
-fn format_lines_str(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!("{s}-{e}")
-    } else {
-        String::new()
-    }
-}

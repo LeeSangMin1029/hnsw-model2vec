@@ -9,6 +9,9 @@ mod cli;
 mod commands;
 pub mod error;
 
+#[cfg(test)]
+mod tests;
+
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -116,6 +119,9 @@ fn run() -> anyhow::Result<()> {
             commands::code_intel::detail::run_detail(commands::code_intel::detail::DetailParams {
                 db, symbol, add, decision, why, constraint, rejected, failure, fix, delete,
             })
+        }
+        Commands::Dupes { db, threshold, exclude_tests, k, json, embed, ast, min_lines } => {
+            commands::dupes::run(db, threshold, exclude_tests, k, json, embed, ast, min_lines)
         }
         Commands::Stats { db, format } => commands::code_intel::run_stats(db, format),
         Commands::Serve {

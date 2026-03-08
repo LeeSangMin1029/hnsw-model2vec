@@ -40,11 +40,16 @@ pub(super) struct FindOutput {
     model: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     total_docs: usize,
+    #[serde(default, skip_serializing_if = "is_elapsed_zero")]
     elapsed_ms: f64,
 }
 
 pub(super) fn is_zero(v: &usize) -> bool {
     *v == 0
+}
+
+fn is_elapsed_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// JSON-RPC response for daemon communication.
@@ -135,6 +140,10 @@ pub(super) fn compact_output(mut output: FindOutput) -> FindOutput {
         .replace('\\', "/");
 
     for item in &mut output.results {
+        // Strip id/score in compact mode — reduces noise for AI consumers
+        item.id = 0;
+        item.score = 0.0;
+        item.url = None;
         if let Some(ref text) = item.text {
             let cleaned = text.replace('\n', " ");
             item.text = Some(truncate_text(&cleaned, 150));
@@ -147,15 +156,21 @@ pub(super) fn compact_output(mut output: FindOutput) -> FindOutput {
             item.source = Some(short.to_string());
         }
     }
+    // Strip metadata noise in compact mode
+    output.model = String::new();
+    output.total_docs = 0;
+    output.elapsed_ms = 0.0;
     output
 }
 
 /// Print FindOutput as JSON with optional compaction and score filtering.
 fn print_output(output: FindOutput, full: bool, min_score: f32) -> Result<()> {
-    let mut output = if full { output } else { compact_output(output) };
+    // Apply score filter BEFORE compaction (compact zeroes out scores)
+    let mut output = output;
     if min_score > 0.0 {
         output.results.retain(|item| item.score >= min_score);
     }
+    let output = if full { output } else { compact_output(output) };
     let json = serde_json::to_string_pretty(&output)?;
     println!("{json}");
     Ok(())
@@ -292,6 +307,9 @@ fn parse_vector(s: &str) -> Result<Vec<f32>> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Hybrid search: try daemon first, then direct fallback.
 fn run_hybrid(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, full: bool, min_score: f32) -> Result<()> {

@@ -8,7 +8,7 @@
 //! `g`=group. Links are `[src, tgt, "c"|"t"]` (calls/types).
 
 /// Generate the complete HTML string from pre-built JSON data.
-pub(super) fn render(nodes_json: &str, links_json: &str, groups_json: &str) -> String {
+pub(crate) fn render(nodes_json: &str, links_json: &str, groups_json: &str) -> String {
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">

@@ -1,47 +1,7 @@
 //! Tests for tree-sitter Rust code chunker.
 
-use super::{CodeChunkConfig, RustCodeChunker};
-
-const SAMPLE_RUST: &str = r#"
-use std::collections::HashMap;
-use crate::types::Payment;
-
-/// Process a payment through the gateway.
-///
-/// Validates amount and creates a payment intent.
-pub fn process_payment(amount: f64, currency: &str) -> Result<PaymentIntent, Error> {
-    validate_amount(amount)?;
-    let intent = stripe::create_intent(amount, currency)?;
-    db::insert(&intent)?;
-    Ok(intent)
-}
-
-/// Payment data structure.
-#[derive(Debug, Clone)]
-pub struct PaymentIntent {
-    pub id: String,
-    pub amount: f64,
-    pub currency: String,
-}
-
-impl PaymentIntent {
-    /// Create a new payment intent.
-    pub fn new(id: String, amount: f64, currency: String) -> Self {
-        Self { id, amount, currency }
-    }
-
-    /// Check if the payment is valid.
-    fn is_valid(&self) -> bool {
-        self.amount > 0.0
-    }
-}
-
-enum PaymentStatus {
-    Pending,
-    Completed,
-    Failed,
-}
-"#;
+use crate::chunk_code::{CodeChunkConfig, RustCodeChunker};
+use super::fixtures::SAMPLE_RUST;
 
 #[test]
 fn chunks_basic_rust_file() {
@@ -361,4 +321,140 @@ fn custom_fields_include_type_refs() {
         custom.contains_key("return_type"),
         "should include return_type in custom fields"
     );
+}
+
+// ── Edge case tests ─────────────────────────────────────────────────
+
+#[test]
+fn empty_source_produces_no_chunks() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(super::fixtures::EMPTY_SOURCE);
+    assert!(chunks.is_empty(), "empty source should produce no chunks");
+}
+
+#[test]
+fn whitespace_only_source_produces_no_chunks() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(super::fixtures::WHITESPACE_ONLY);
+    assert!(chunks.is_empty(), "whitespace-only source should produce no chunks");
+}
+
+#[test]
+fn single_line_fn_below_min_lines_excluded() {
+    let config = CodeChunkConfig {
+        min_lines: 2,
+        ..CodeChunkConfig::default()
+    };
+    let chunker = RustCodeChunker::new(config);
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_SINGLE_LINE_FN);
+    assert!(
+        !chunks.iter().any(|c| c.name == "one_liner"),
+        "single-line function should be excluded when min_lines=2"
+    );
+}
+
+#[test]
+fn single_line_fn_included_with_min_lines_1() {
+    let config = CodeChunkConfig {
+        min_lines: 1,
+        ..CodeChunkConfig::default()
+    };
+    let chunker = RustCodeChunker::new(config);
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_SINGLE_LINE_FN);
+    assert!(
+        chunks.iter().any(|c| c.name == "one_liner"),
+        "single-line function should be included when min_lines=1"
+    );
+}
+
+#[test]
+fn nested_module_extracted() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_NESTED);
+    assert!(
+        chunks.iter().any(|c| c.name == "outer"),
+        "should extract module 'outer', got names: {:?}",
+        chunks.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn deeply_nested_impl_extracts_methods() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_DEEPLY_NESTED_IMPL);
+    let names: Vec<&str> = chunks.iter().map(|c| c.name.as_str()).collect();
+
+    assert!(
+        names.iter().any(|n| n.contains("Outer::method_a")),
+        "should extract method_a, got: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("Outer::method_b")),
+        "should extract method_b, got: {names:?}"
+    );
+}
+
+#[test]
+fn trait_impl_has_qualified_name() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_DEEPLY_NESTED_IMPL);
+    let names: Vec<&str> = chunks.iter().map(|c| c.name.as_str()).collect();
+
+    // impl Display for Outer should have "Display for Outer" or similar
+    assert!(
+        names.iter().any(|n| n.contains("Display") && n.contains("Outer")),
+        "trait impl should have qualified name with trait and type, got: {names:?}"
+    );
+}
+
+#[test]
+fn syntax_error_does_not_panic() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    // Malformed Rust source: tree-sitter should handle gracefully
+    let chunks = chunker.chunk("fn broken( { }");
+    // Should not panic; may produce 0 or some partial chunks
+    let _ = chunks;
+}
+
+#[test]
+fn config_disable_imports_and_calls() {
+    let config = CodeChunkConfig {
+        min_lines: 2,
+        extract_imports: false,
+        extract_calls: false,
+    };
+    let chunker = RustCodeChunker::new(config);
+    let chunks = chunker.chunk(SAMPLE_RUST);
+
+    let func = chunks.iter().find(|c| c.name == "process_payment");
+    assert!(func.is_some());
+    let func = func.unwrap();
+    assert!(func.imports.is_empty(), "imports should be empty when disabled");
+    assert!(func.calls.is_empty(), "calls should be empty when disabled");
+}
+
+#[test]
+fn enum_chunk_extracted() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(SAMPLE_RUST);
+    assert!(
+        chunks.iter().any(|c| c.name == "PaymentStatus"),
+        "should extract enum PaymentStatus"
+    );
+}
+
+#[test]
+fn struct_visibility_is_pub() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(SAMPLE_RUST);
+    let s = chunks.iter().find(|c| c.name == "PaymentIntent").unwrap();
+    assert_eq!(s.visibility, "pub", "PaymentIntent should have pub visibility");
+}
+
+#[test]
+fn private_enum_has_empty_visibility() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(SAMPLE_RUST);
+    let e = chunks.iter().find(|c| c.name == "PaymentStatus").unwrap();
+    assert_eq!(e.visibility, "", "PaymentStatus should have empty visibility (private)");
 }

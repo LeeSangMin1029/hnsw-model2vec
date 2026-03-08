@@ -7,18 +7,37 @@
 //! with the same `chunk()` -> `Vec<CodeChunk>` interface, using the
 //! appropriate tree-sitter grammar crate.
 
-
-mod extract;
+pub(crate) mod extract;
+mod rust;
+mod typescript;
+mod python;
+mod go_lang;
+mod java;
+mod c_lang;
+mod cpp;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod tests_multilang;
-
 use std::collections::HashMap;
 
 use v_hnsw_core::PayloadValue;
+
+/// Define a code chunker struct with a standard `new(config)` constructor.
+macro_rules! define_chunker {
+    ($name:ident) => {
+        pub struct $name {
+            config: super::CodeChunkConfig,
+        }
+
+        impl $name {
+            pub fn new(config: super::CodeChunkConfig) -> Self {
+                Self { config }
+            }
+        }
+    };
+}
+pub(crate) use define_chunker;
 
 /// Configuration for code chunking.
 #[derive(Debug, Clone)]
@@ -54,6 +73,8 @@ pub enum CodeNodeKind {
     Static,
     Module,
     MacroDefinition,
+    Class,
+    Interface,
 }
 
 impl CodeNodeKind {
@@ -70,6 +91,8 @@ impl CodeNodeKind {
             Self::Static => "static",
             Self::Module => "module",
             Self::MacroDefinition => "macro",
+            Self::Class => "class",
+            Self::Interface => "interface",
         }
     }
 }
@@ -108,6 +131,10 @@ pub struct CodeChunk {
     pub param_types: Vec<(String, String)>,
     /// Return type string (e.g., `"Result<Vec<Item>>"`).
     pub return_type: Option<String>,
+    /// Structural AST hash for clone detection (0 = not computed).
+    pub ast_hash: u64,
+    /// Normalized body text hash for exact-logic clone detection (0 = not computed).
+    pub body_hash: u64,
 }
 
 impl CodeChunk {
@@ -231,139 +258,43 @@ impl CodeChunk {
         if let Some(ref ret) = self.return_type {
             custom.insert("return_type".to_owned(), PayloadValue::String(ret.clone()));
         }
+        if self.ast_hash != 0 {
+            #[expect(clippy::cast_possible_wrap, reason = "hash bits reinterpreted")]
+            custom.insert(
+                "ast_hash".to_owned(),
+                PayloadValue::Integer(self.ast_hash as i64),
+            );
+        }
+        if self.body_hash != 0 {
+            #[expect(clippy::cast_possible_wrap, reason = "hash bits reinterpreted")]
+            custom.insert(
+                "body_hash".to_owned(),
+                PayloadValue::Integer(self.body_hash as i64),
+            );
+        }
+
+        // MinHash token fingerprint for near-duplicate detection
+        let tokens = extract::code_tokens(&self.text);
+        if tokens.len() >= 10 {
+            let sig = extract::minhash_signature(&tokens, extract::MINHASH_K);
+            custom.insert(
+                "minhash".to_owned(),
+                PayloadValue::String(extract::minhash_to_hex(&sig)),
+            );
+        }
 
         custom
     }
 }
 
-/// Tree-sitter based Rust code chunker.
-pub struct RustCodeChunker {
-    config: CodeChunkConfig,
-}
-
-impl RustCodeChunker {
-    pub fn new(config: CodeChunkConfig) -> Self {
-        Self { config }
-    }
-
-    /// Parse Rust source and extract semantic code chunks.
-    pub fn chunk(&self, source: &str) -> Vec<CodeChunk> {
-        let mut parser = tree_sitter::Parser::new();
-        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        if parser.set_language(&language).is_err() {
-            return Vec::new();
-        }
-
-        let Some(tree) = parser.parse(source, None) else {
-            return Vec::new();
-        };
-
-        let root = tree.root_node();
-        let src = source.as_bytes();
-
-        // File-level imports
-        let imports = if self.config.extract_imports {
-            extract::extract_imports(&root, src)
-        } else {
-            Vec::new()
-        };
-
-        let mut chunks = Vec::new();
-        let mut cursor = root.walk();
-
-        for child in root.children(&mut cursor) {
-            // Extract doc comments preceding this node
-            let doc = extract::extract_doc_comment_before(&root, &child, src);
-
-            if let Some(mut chunk) = self.node_to_chunk(&child, src, &imports, chunks.len()) {
-                chunk.doc_comment = doc;
-                chunks.push(chunk);
-            }
-
-            // For impl/trait blocks, also extract individual methods
-            if child.kind() == "impl_item" || child.kind() == "trait_item" {
-                let parent_name = extract::extract_name(&child, src);
-                extract::extract_body_methods(
-                    &self.config,
-                    &child,
-                    src,
-                    &imports,
-                    &parent_name,
-                    &mut chunks,
-                );
-            }
-        }
-
-        chunks
-    }
-
-    /// Convert a tree-sitter node to a `CodeChunk`.
-    fn node_to_chunk(
-        &self,
-        node: &tree_sitter::Node,
-        src: &[u8],
-        imports: &[String],
-        index: usize,
-    ) -> Option<CodeChunk> {
-        let kind = match node.kind() {
-            "function_item" => CodeNodeKind::Function,
-            "struct_item" => CodeNodeKind::Struct,
-            "enum_item" => CodeNodeKind::Enum,
-            "impl_item" => CodeNodeKind::Impl,
-            "trait_item" => CodeNodeKind::Trait,
-            "type_item" => CodeNodeKind::TypeAlias,
-            "const_item" => CodeNodeKind::Const,
-            "static_item" => CodeNodeKind::Static,
-            "mod_item" => CodeNodeKind::Module,
-            "macro_definition" => CodeNodeKind::MacroDefinition,
-            _ => return None,
-        };
-
-        let text = node.utf8_text(src).ok()?.to_owned();
-        let line_count = text.lines().count();
-        if line_count < self.config.min_lines {
-            return None;
-        }
-
-        let name = extract::extract_name(node, src);
-        let visibility = extract::extract_visibility(node, src);
-
-        let signature = if kind == CodeNodeKind::Function {
-            Some(extract::extract_function_signature(node, src))
-        } else {
-            None
-        };
-
-        let calls = if self.config.extract_calls && kind == CodeNodeKind::Function {
-            extract::extract_calls(node, src)
-        } else {
-            Vec::new()
-        };
-
-        let type_refs = extract::extract_type_refs(node, src);
-        let param_types = extract::extract_param_types(node, src);
-        let return_type = extract::extract_return_type(node, src);
-
-        Some(CodeChunk {
-            text,
-            kind,
-            name,
-            signature,
-            doc_comment: None, // filled by caller
-            visibility,
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            chunk_index: index,
-            imports: imports.to_vec(),
-            calls,
-            type_refs,
-            param_types,
-            return_type,
-        })
-    }
-}
+// Re-export chunkers
+pub use rust::RustCodeChunker;
+pub use typescript::TypeScriptCodeChunker;
+pub use python::PythonCodeChunker;
+pub use go_lang::GoCodeChunker;
+pub use java::JavaCodeChunker;
+pub use c_lang::CCodeChunker;
+pub use cpp::CppCodeChunker;
 
 /// Check if a file extension is a supported code file.
 pub fn is_supported_code_file(ext: &str) -> bool {
@@ -375,61 +306,75 @@ pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
     match ext {
         "rs" => Some("rust"),
         "ts" | "tsx" => Some("typescript"),
-        "py" => Some("python"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "py" | "pyi" => Some("python"),
         "go" => Some("go"),
         "java" => Some("java"),
         "c" | "h" => Some("c"),
-        "cpp" | "hpp" => Some("cpp"),
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" | "hh" => Some("cpp"),
         _ => None,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Multi-language chunker stubs (T002 will provide real implementations)
+// Multi-language dispatch
 // ---------------------------------------------------------------------------
-
-macro_rules! define_lang_chunker {
-    ($name:ident) => {
-        /// Language-specific code chunker (stub — implementation in T002).
-        pub struct $name {
-            #[allow(dead_code)]
-            config: CodeChunkConfig,
-        }
-
-        impl $name {
-            pub fn new(config: CodeChunkConfig) -> Self {
-                Self { config }
-            }
-
-            /// Parse source and extract semantic code chunks.
-            pub fn chunk(&self, _source: &str) -> Vec<CodeChunk> {
-                // Stub: returns empty until T002 implements the parser
-                Vec::new()
-            }
-        }
-    };
-}
-
-define_lang_chunker!(TypeScriptCodeChunker);
-define_lang_chunker!(PythonCodeChunker);
-define_lang_chunker!(GoCodeChunker);
-define_lang_chunker!(JavaCodeChunker);
-define_lang_chunker!(CCodeChunker);
-define_lang_chunker!(CppCodeChunker);
 
 /// Dispatch to the appropriate language chunker based on file extension.
 ///
 /// Returns `None` for unsupported extensions.
 pub fn chunk_for_language(ext: &str, source: &str) -> Option<Vec<CodeChunk>> {
     let config = CodeChunkConfig::default();
-    match ext {
+    let mut chunks = match ext {
         "rs" => Some(RustCodeChunker::new(config).chunk(source)),
         "ts" | "tsx" => Some(TypeScriptCodeChunker::new(config).chunk(source)),
-        "py" => Some(PythonCodeChunker::new(config).chunk(source)),
+        "js" | "jsx" | "mjs" | "cjs" => Some(TypeScriptCodeChunker::new(config).chunk_js(source)),
+        "py" | "pyi" => Some(PythonCodeChunker::new(config).chunk(source)),
         "go" => Some(GoCodeChunker::new(config).chunk(source)),
         "java" => Some(JavaCodeChunker::new(config).chunk(source)),
         "c" | "h" => Some(CCodeChunker::new(config).chunk(source)),
-        "cpp" | "hpp" => Some(CppCodeChunker::new(config).chunk(source)),
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" | "hh" => Some(CppCodeChunker::new(config).chunk(source)),
         _ => None,
+    }?;
+
+    // Post-process: compute AST structural hashes for clone detection
+    fill_ast_hashes(ext, source, &mut chunks);
+
+    Some(chunks)
+}
+
+/// Parse the full source once and fill `ast_hash` for each chunk by byte range.
+fn fill_ast_hashes(ext: &str, source: &str, chunks: &mut [CodeChunk]) {
+    let language: tree_sitter::Language = match ext {
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "ts" | "tsx" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "py" | "pyi" => tree_sitter_python::LANGUAGE.into(),
+        "go" => tree_sitter_go::LANGUAGE.into(),
+        "java" => tree_sitter_java::LANGUAGE.into(),
+        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" | "hh" => tree_sitter_cpp::LANGUAGE.into(),
+        _ => return,
+    };
+
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&language).is_err() {
+        return;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return;
+    };
+
+    let src = source.as_bytes();
+    for chunk in chunks {
+        // Find the deepest node that spans this chunk's byte range
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(chunk.start_byte, chunk.end_byte.saturating_sub(1));
+        if let Some(node) = node {
+            chunk.ast_hash = extract::ast_structure_hash(&node, src);
+        }
+        chunk.body_hash = extract::body_hash(&chunk.text);
     }
 }
+

@@ -36,6 +36,9 @@ mod error;
 mod model;
 mod model2vec;
 
+#[cfg(test)]
+mod tests;
+
 pub use crate::error::EmbedError;
 pub use crate::model::{EmbeddingModel, Result};
 pub use crate::model2vec::Model2VecModel;

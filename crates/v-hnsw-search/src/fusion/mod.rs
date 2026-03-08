@@ -4,4 +4,7 @@
 
 mod convex;
 
+#[cfg(test)]
+mod tests;
+
 pub use convex::ConvexFusion;

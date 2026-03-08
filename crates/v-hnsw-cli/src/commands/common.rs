@@ -169,13 +169,14 @@ pub fn make_payload(
     chunk_index: usize,
     chunk_total: usize,
     source_modified_at: u64,
+    extra_custom: &HashMap<String, PayloadValue>,
 ) -> Payload {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut custom = HashMap::new();
+    let mut custom = extra_custom.clone();
     if let Some(t) = title {
         custom.insert("title".to_string(), PayloadValue::String(t.to_string()));
     }
@@ -413,7 +414,9 @@ pub fn update_indexes_incremental(
 /// Search result common to both find and serve.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultItem {
+    #[serde(default, skip_serializing_if = "is_id_zero")]
     pub id: u64,
+    #[serde(default, skip_serializing_if = "is_score_zero")]
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -423,6 +426,14 @@ pub struct SearchResultItem {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+fn is_id_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_score_zero(v: &f32) -> bool {
+    *v == 0.0
 }
 
 /// Build search result items from raw (id, score) pairs.
@@ -522,6 +533,8 @@ pub struct IngestRecord {
     pub chunk_index: usize,
     pub chunk_total: usize,
     pub source_modified_at: u64,
+    /// Extra custom fields to merge into payload (e.g., ast_hash).
+    pub custom: HashMap<String, PayloadValue>,
 }
 
 /// Built-in directory names always skipped during file scanning.

@@ -23,4 +23,4 @@ pub use snapshot::HnswSnapshot;
 pub use store::InMemoryVectorStore;
 
 #[cfg(test)]
-mod proptests;
+mod tests;

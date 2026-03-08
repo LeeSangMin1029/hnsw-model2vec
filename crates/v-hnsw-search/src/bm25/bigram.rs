@@ -15,34 +15,3 @@ pub fn generate(tokens: &[String]) -> Vec<String> {
         .map(|w| format!("{}{SEP}{}", w[0], w[1]))
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_empty() {
-        assert!(generate(&[]).is_empty());
-    }
-
-    #[test]
-    fn test_single_token() {
-        let tokens = vec!["hello".to_string()];
-        assert!(generate(&tokens).is_empty());
-    }
-
-    #[test]
-    fn test_two_tokens() {
-        let tokens = vec!["hello".to_string(), "world".to_string()];
-        let bigrams = generate(&tokens);
-        assert_eq!(bigrams.len(), 1);
-        assert_eq!(bigrams[0], "hello\x01world");
-    }
-
-    #[test]
-    fn test_three_tokens() {
-        let tokens = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let bigrams = generate(&tokens);
-        assert_eq!(bigrams, vec!["a\x01b", "b\x01c"]);
-    }
-}

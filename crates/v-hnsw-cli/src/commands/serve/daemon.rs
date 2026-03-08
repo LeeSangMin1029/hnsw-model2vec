@@ -294,7 +294,7 @@ fn load_db(db_path: &Path) -> Result<DbIndexes> {
 }
 
 /// Check if `a` is newer than `b` by file modification time.
-fn is_newer(a: &Path, b: &Path) -> bool {
+pub(crate) fn is_newer(a: &Path, b: &Path) -> bool {
     let Ok(ma) = std::fs::metadata(a) else { return false };
     let Ok(mb) = std::fs::metadata(b) else { return true };
     let Ok(ta) = ma.modified() else { return false };

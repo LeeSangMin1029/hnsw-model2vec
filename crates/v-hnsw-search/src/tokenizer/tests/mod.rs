@@ -1,5 +1,10 @@
 //! Integration tests for the tokenizer crate.
 
+mod filters;
+mod jamo;
+mod korean;
+mod user_dict;
+
 use std::path::PathBuf;
 
 use super::filters::{FilterChain, MinLengthFilter, StopwordFilter, TokenFilter};

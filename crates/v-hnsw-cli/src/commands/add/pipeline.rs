@@ -104,6 +104,7 @@ pub fn process_records(
                         rec.chunk_index,
                         rec.chunk_total,
                         rec.source_modified_at,
+                        &rec.custom,
                     );
                     (rec.id, emb.as_slice(), payload, rec.text.as_str())
                 })

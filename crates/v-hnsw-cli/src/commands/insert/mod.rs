@@ -11,7 +11,7 @@ use v_hnsw_core::Payload;
 
 
 /// Build a [`Payload`] with current timestamp (for raw vector insert).
-fn make_payload(source: Option<String>, tags: Option<Vec<String>>) -> Payload {
+pub(crate) fn make_payload(source: Option<String>, tags: Option<Vec<String>>) -> Payload {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

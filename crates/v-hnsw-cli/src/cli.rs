@@ -315,6 +315,33 @@ pub enum Commands {
         #[arg(long)]
         delete: bool,
     },
+    /// Find duplicate code (token Jaccard default, --ast structural, --embed semantic).
+    #[command(visible_alias = "dup")]
+    Dupes {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Similarity threshold (Jaccard or cosine, 0.0-1.0).
+        #[arg(long, default_value = "0.5")]
+        threshold: f32,
+        /// Exclude test functions from comparison.
+        #[arg(long)]
+        exclude_tests: bool,
+        /// Max number of results to show.
+        #[arg(short, long, default_value = "50")]
+        k: usize,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Use embedding cosine similarity (slower, Type-3/4).
+        #[arg(long)]
+        embed: bool,
+        /// Use AST structural hash (Type-1/2, ignores identifier names).
+        #[arg(long)]
+        ast: bool,
+        /// Skip functions shorter than N lines.
+        #[arg(long, default_value = "5")]
+        min_lines: usize,
+    },
     /// Show per-crate code statistics (functions, structs, enums).
     ///
     /// JSON schema: {_s, "crate":{p=prod_fn,t=test_fn,s=struct,e=enum}}

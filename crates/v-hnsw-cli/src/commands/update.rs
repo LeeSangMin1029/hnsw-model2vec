@@ -3,6 +3,7 @@
 //! Compares modification times and file sizes against a stored file index
 //! to detect new, modified, and deleted files. Re-processes only changed files.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -202,11 +203,6 @@ pub(crate) fn run_core(
         None
     };
 
-    // Code chunker for .rs files
-    let code_chunker = crate::chunk_code::RustCodeChunker::new(
-        crate::chunk_code::CodeChunkConfig::default(),
-    );
-
     // Process changed files
     for (file_path, source, mtime, size, hash) in &pending_files {
         if is_interrupted() {
@@ -246,9 +242,15 @@ pub(crate) fn run_core(
                     continue;
                 }
             };
-            let chunks = code_chunker.chunk(&source_code);
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let chunks = crate::chunk_code::chunk_for_language(ext, &source_code)
+                .unwrap_or_default();
             let file_path_str = file_path.to_string_lossy().to_string();
             let chunk_total = chunks.len();
+            let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
 
             for chunk in &chunks {
                 let id = common::generate_id(source, chunk.chunk_index);
@@ -256,7 +258,7 @@ pub(crate) fn run_core(
                 let embed_text = chunk.to_embed_text(&file_path_str, &[]);
                 let mut tags = vec![
                     format!("kind:{}", chunk.kind.as_str()),
-                    "lang:rust".to_owned(),
+                    format!("lang:{lang}"),
                 ];
                 if !chunk.visibility.is_empty() {
                     tags.push(format!("vis:{}", chunk.visibility));
@@ -270,6 +272,7 @@ pub(crate) fn run_core(
                     chunk_index: chunk.chunk_index,
                     chunk_total,
                     source_modified_at: *mtime,
+                    custom: chunk.to_custom_fields(&[]),
                 });
             }
         } else {
@@ -301,6 +304,7 @@ pub(crate) fn run_core(
                     chunk_index: chunk.chunk_index,
                     chunk_total,
                     source_modified_at: *mtime,
+                    custom: HashMap::new(),
                 });
             }
         }
@@ -351,7 +355,7 @@ pub(crate) fn run_core(
 
 /// Check if a file extension is a supported text-based source file
 /// (not Rust code, but still worth indexing as plain text chunks).
-fn is_supported_text_file(ext: &str) -> bool {
+pub(crate) fn is_supported_text_file(ext: &str) -> bool {
     matches!(
         ext,
         "ts" | "tsx" | "js" | "jsx" | "svelte" | "vue"
@@ -466,6 +470,7 @@ fn process_records(
                 rec.chunk_index,
                 rec.chunk_total,
                 rec.source_modified_at,
+                &rec.custom,
             );
             (rec.id, emb.as_slice(), payload, rec.text.as_str())
         })

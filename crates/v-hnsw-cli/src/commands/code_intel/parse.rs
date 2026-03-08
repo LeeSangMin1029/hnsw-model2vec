@@ -90,53 +90,9 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
 }
 
 /// Normalize Windows backslashes and strip leading `.\` for display.
-fn normalize_path(p: &str) -> String {
+pub(crate) fn normalize_path(p: &str) -> String {
     let s = p.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
     s.to_owned()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_simple_function() {
-        let text = "[function] topological_sort\n\
-                     File: .\\crates\\swarm-cli\\src\\engine.rs:47-54\n\
-                     Signature: fn topological_sort(dag: &Dag) -> Option<Vec<String>>\n\
-                     Calls: toposort, sort_by";
-        let chunk = parse_chunk(text).unwrap();
-        assert_eq!(chunk.kind, "function");
-        assert_eq!(chunk.name, "topological_sort");
-        assert_eq!(chunk.file, "crates/swarm-cli/src/engine.rs");
-        assert_eq!(chunk.lines, Some((47, 54)));
-        assert_eq!(chunk.calls, vec!["toposort", "sort_by"]);
-    }
-
-    #[test]
-    fn parse_pub_method() {
-        let text = "[function] pub ReadyQueue::pop_batch\n\
-                     File: .\\crates\\swarm-core\\src\\ready_queue.rs:99-137\n\
-                     Doc comment here\n\
-                     Signature: pub fn pop_batch(&mut self, dag: &Dag) -> Vec<String>\n\
-                     Types: Dag, Reverse\n\
-                     Calls: Vec::new, batch.push";
-        let chunk = parse_chunk(text).unwrap();
-        assert_eq!(chunk.name, "ReadyQueue::pop_batch");
-        assert_eq!(chunk.types, vec!["Dag", "Reverse"]);
-        assert_eq!(chunk.calls, vec!["Vec::new", "batch.push"]);
-    }
-
-    #[test]
-    fn parse_non_code_returns_none() {
-        let text = "Just a regular markdown paragraph.";
-        assert!(parse_chunk(text).is_none());
-    }
-
-    #[test]
-    fn normalize_backslashes() {
-        assert_eq!(normalize_path(".\\crates\\foo.rs"), "crates/foo.rs");
-        assert_eq!(normalize_path("./src/main.rs"), "src/main.rs");
-    }
-}

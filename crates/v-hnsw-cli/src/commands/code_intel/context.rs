@@ -8,51 +8,32 @@
 //! - Add scoring strategies by modifying `score_fn`.
 //! - Add output formats by adding branches in `run_context`.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
 
 use super::graph::CallGraph;
-use super::{load_chunks, OutputFormat, cached_json, relative_path};
+use super::{load_chunks, OutputFormat, cached_json, relative_path, format_lines_opt, format_lines_str_opt, HasIdx, bfs_generic, BfsDirection};
 
 /// BFS result entry with depth and score.
-struct BfsEntry {
-    idx: u32,
-    depth: u32,
-    score: f64,
+pub(crate) struct BfsEntry {
+    pub(crate) idx: u32,
+    pub(crate) depth: u32,
+    pub(crate) score: f64,
+}
+
+impl HasIdx for BfsEntry {
+    fn idx(&self) -> u32 { self.idx }
 }
 
 /// Run depth-limited BFS on the callees direction.
-fn bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<BfsEntry> {
-    let mut visited = vec![false; graph.len()];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    let mut results = Vec::new();
-
-    for &seed in seeds {
-        if (seed as usize) < graph.len() && !visited[seed as usize] {
-            visited[seed as usize] = true;
-            queue.push_back((seed, 0));
-        }
-    }
-
-    while let Some((idx, depth)) = queue.pop_front() {
+pub(crate) fn bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<BfsEntry> {
+    bfs_generic(graph, seeds, max_depth, BfsDirection::Forward, |idx, depth| {
         let is_test = graph.is_test[idx as usize];
         let score = (1.0 / f64::from(depth + 1)) * if is_test { 0.1 } else { 1.0 };
-
-        results.push(BfsEntry { idx, depth, score });
-
-        if depth < max_depth {
-            for &callee in &graph.callees[idx as usize] {
-                if !visited[callee as usize] {
-                    visited[callee as usize] = true;
-                    queue.push_back((callee, depth + 1));
-                }
-            }
-        }
-    }
-
-    results
+        Some(BfsEntry { idx, depth, score })
+    })
 }
 
 /// `v-hnsw context <db> <symbol> --depth N --k K [--include-tests] [--detail]`
@@ -89,35 +70,10 @@ pub fn run_context(
     print_grouped(&graph, &entries);
 
     if detail {
-        print_detail_annotations(&db, &graph, &entries);
+        super::print_detail_annotations(&db, &graph, &entries);
     }
 
     Ok(())
-}
-
-/// Print reasoning annotations for BFS entries that have reason data.
-fn print_detail_annotations(db: &std::path::Path, graph: &CallGraph, entries: &[BfsEntry]) {
-    use std::collections::HashSet;
-    use super::reason;
-
-    let mut found = false;
-    let mut seen = HashSet::new();
-    for e in entries {
-        let name = &graph.names[e.idx as usize];
-        if !seen.insert(name.as_str()) {
-            continue;
-        }
-        if let Ok(Some(entry)) = reason::load_reason(db, name) {
-            if !found {
-                println!("  [reasoning]");
-                found = true;
-            }
-            println!("    {name}: {}", reason::one_line_summary(&entry));
-        }
-    }
-    if found {
-        println!();
-    }
 }
 
 fn compute_context_json(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<String> {
@@ -168,7 +124,7 @@ fn print_grouped(graph: &CallGraph, entries: &[BfsEntry]) {
             let file = relative_path(&graph.files[i]);
             let name = &graph.names[i];
             let kind = &graph.kinds[i];
-            let lines = format_lines(graph.lines[i]);
+            let lines = format_lines_opt(graph.lines[i]);
             let test_marker = if graph.is_test[i] { " [test]" } else { "" };
             println!("    {file}{lines}  [{kind}] {name}{test_marker}  (score={:.2})", e.score);
         }
@@ -190,7 +146,7 @@ fn build_json(graph: &CallGraph, entries: &[BfsEntry]) -> serde_json::Value {
             let i = e.idx as usize;
             serde_json::json!({
                 "f": relative_path(&graph.files[i]),
-                "l": format_lines_str(graph.lines[i]),
+                "l": format_lines_str_opt(graph.lines[i]),
                 "k": &graph.kinds[i],
                 "n": &graph.names[i],
                 "d": e.depth,
@@ -204,18 +160,3 @@ fn build_json(graph: &CallGraph, entries: &[BfsEntry]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-fn format_lines(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!(":{s}-{e}")
-    } else {
-        String::new()
-    }
-}
-
-fn format_lines_str(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!("{s}-{e}")
-    } else {
-        String::new()
-    }
-}

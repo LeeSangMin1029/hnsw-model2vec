@@ -13,25 +13,29 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::graph::CallGraph;
-use super::{cached_json, relative_path, OutputFormat};
+use super::{cached_json, relative_path, OutputFormat, format_lines_opt, format_lines_str_opt, HasIdx, bfs_generic, BfsDirection};
 use super::context::load_or_build_graph;
 
 /// Unified BFS entry with direction and score.
-struct GatherEntry {
-    idx: u32,
-    depth: u32,
-    score: f64,
-    direction: Direction,
+pub(crate) struct GatherEntry {
+    pub(crate) idx: u32,
+    pub(crate) depth: u32,
+    pub(crate) score: f64,
+    pub(crate) direction: Direction,
 }
 
-#[derive(Clone, Copy)]
-enum Direction {
+impl HasIdx for GatherEntry {
+    fn idx(&self) -> u32 { self.idx }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Direction {
     Forward,
     Reverse,
 }
 
 impl Direction {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Forward => "callee",
             Self::Reverse => "caller",
@@ -39,80 +43,30 @@ impl Direction {
     }
 }
 
-/// BFS forward (callees) collecting scored entries.
-fn bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32, include_tests: bool) -> Vec<GatherEntry> {
-    use std::collections::VecDeque;
-
-    let mut visited = vec![false; graph.len()];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    let mut results = Vec::new();
-
-    for &seed in seeds {
-        if (seed as usize) < graph.len() && !visited[seed as usize] {
-            visited[seed as usize] = true;
-            queue.push_back((seed, 0));
-        }
-    }
-
-    while let Some((idx, depth)) = queue.pop_front() {
+/// BFS in a given direction, collecting scored entries.
+pub(crate) fn bfs_directed(
+    graph: &CallGraph,
+    seeds: &[u32],
+    max_depth: u32,
+    include_tests: bool,
+    direction: Direction,
+) -> Vec<GatherEntry> {
+    let bfs_dir = match direction {
+        Direction::Forward => BfsDirection::Forward,
+        Direction::Reverse => BfsDirection::Reverse,
+    };
+    bfs_generic(graph, seeds, max_depth, bfs_dir, |idx, depth| {
         let is_test = graph.is_test[idx as usize];
         if !include_tests && is_test {
-            continue;
+            return None;
         }
         let score = (1.0 / f64::from(depth + 1)) * if is_test { 0.1 } else { 1.0 };
-        results.push(GatherEntry { idx, depth, score, direction: Direction::Forward });
-
-        if depth < max_depth {
-            for &callee in &graph.callees[idx as usize] {
-                if !visited[callee as usize] {
-                    visited[callee as usize] = true;
-                    queue.push_back((callee, depth + 1));
-                }
-            }
-        }
-    }
-
-    results
-}
-
-/// BFS reverse (callers) collecting scored entries.
-fn bfs_reverse(graph: &CallGraph, seeds: &[u32], max_depth: u32, include_tests: bool) -> Vec<GatherEntry> {
-    use std::collections::VecDeque;
-
-    let mut visited = vec![false; graph.len()];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    let mut results = Vec::new();
-
-    for &seed in seeds {
-        if (seed as usize) < graph.len() && !visited[seed as usize] {
-            visited[seed as usize] = true;
-            queue.push_back((seed, 0));
-        }
-    }
-
-    while let Some((idx, depth)) = queue.pop_front() {
-        let is_test = graph.is_test[idx as usize];
-        if !include_tests && is_test {
-            continue;
-        }
-        let score = (1.0 / f64::from(depth + 1)) * if is_test { 0.1 } else { 1.0 };
-        results.push(GatherEntry { idx, depth, score, direction: Direction::Reverse });
-
-        if depth < max_depth {
-            for &caller in &graph.callers[idx as usize] {
-                if !visited[caller as usize] {
-                    visited[caller as usize] = true;
-                    queue.push_back((caller, depth + 1));
-                }
-            }
-        }
-    }
-
-    results
+        Some(GatherEntry { idx, depth, score, direction })
+    })
 }
 
 /// Merge forward and reverse results, dedup by idx (keep higher score).
-fn merge_entries(forward: Vec<GatherEntry>, reverse: Vec<GatherEntry>) -> Vec<GatherEntry> {
+pub(crate) fn merge_entries(forward: Vec<GatherEntry>, reverse: Vec<GatherEntry>) -> Vec<GatherEntry> {
     let mut best: BTreeMap<u32, GatherEntry> = BTreeMap::new();
 
     for entry in forward.into_iter().chain(reverse) {
@@ -158,8 +112,8 @@ pub fn run_gather(
         return Ok(());
     }
 
-    let forward = bfs_forward(&graph, &seeds, depth, include_tests);
-    let reverse = bfs_reverse(&graph, &seeds, depth, include_tests);
+    let forward = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Forward);
+    let reverse = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Reverse);
     let mut entries = merge_entries(forward, reverse);
     entries.truncate(k);
 
@@ -167,43 +121,18 @@ pub fn run_gather(
     print_gathered(&graph, &entries);
 
     if detail {
-        print_detail_annotations(&db, &graph, &entries);
+        super::print_detail_annotations(&db, &graph, &entries);
     }
 
     Ok(())
-}
-
-/// Print reasoning annotations for gather entries that have reason data.
-fn print_detail_annotations(db: &std::path::Path, graph: &CallGraph, entries: &[GatherEntry]) {
-    use std::collections::HashSet;
-    use super::reason;
-
-    let mut found = false;
-    let mut seen = HashSet::new();
-    for e in entries {
-        let name = &graph.names[e.idx as usize];
-        if !seen.insert(name.as_str()) {
-            continue;
-        }
-        if let Ok(Some(entry)) = reason::load_reason(db, name) {
-            if !found {
-                println!("  [reasoning]");
-                found = true;
-            }
-            println!("    {name}: {}", reason::one_line_summary(&entry));
-        }
-    }
-    if found {
-        println!();
-    }
 }
 
 fn compute_gather_json(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<String> {
     let graph = load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
 
-    let forward = bfs_forward(&graph, &seeds, depth, include_tests);
-    let reverse = bfs_reverse(&graph, &seeds, depth, include_tests);
+    let forward = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Forward);
+    let reverse = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Reverse);
     let mut entries = merge_entries(forward, reverse);
     entries.truncate(k);
 
@@ -231,7 +160,7 @@ fn print_gathered(graph: &CallGraph, entries: &[GatherEntry]) {
             let file = relative_path(&graph.files[i]);
             let name = &graph.names[i];
             let kind = &graph.kinds[i];
-            let lines = format_lines(graph.lines[i]);
+            let lines = format_lines_opt(graph.lines[i]);
             let dir_tag = e.direction.label();
             let test_marker = if graph.is_test[i] { " [test]" } else { "" };
             println!("    {file}{lines}  [{kind}] {name}{test_marker}  ({dir_tag}, score={:.2})", e.score);
@@ -240,7 +169,7 @@ fn print_gathered(graph: &CallGraph, entries: &[GatherEntry]) {
     }
 }
 
-fn build_json(graph: &CallGraph, entries: &[GatherEntry]) -> serde_json::Value {
+pub(crate) fn build_json(graph: &CallGraph, entries: &[GatherEntry]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert(
         "_s".to_owned(),
@@ -253,7 +182,7 @@ fn build_json(graph: &CallGraph, entries: &[GatherEntry]) -> serde_json::Value {
             let i = e.idx as usize;
             serde_json::json!({
                 "f": relative_path(&graph.files[i]),
-                "l": format_lines_str(graph.lines[i]),
+                "l": format_lines_str_opt(graph.lines[i]),
                 "k": &graph.kinds[i],
                 "n": &graph.names[i],
                 "d": e.depth,
@@ -268,18 +197,3 @@ fn build_json(graph: &CallGraph, entries: &[GatherEntry]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-fn format_lines(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!(":{s}-{e}")
-    } else {
-        String::new()
-    }
-}
-
-fn format_lines_str(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!("{s}-{e}")
-    } else {
-        String::new()
-    }
-}

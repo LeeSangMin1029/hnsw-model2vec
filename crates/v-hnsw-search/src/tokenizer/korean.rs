@@ -39,7 +39,7 @@ pub enum TokenKind {
 
 impl TokenKind {
     /// Parse from Korean POS tag (e.g., "NNG", "VV", "JKS").
-    fn from_pos(pos: &str) -> Self {
+    pub(crate) fn from_pos(pos: &str) -> Self {
         if pos.is_empty() {
             return Self::Unknown;
         }
@@ -319,122 +319,5 @@ impl Tokenizer for WhitespaceTokenizer {
         }
 
         Ok(tokens)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    /// Resolve ko-dic path for tests.
-    /// Uses LINDERA_KO_DIC_PATH env var, falls back to ~/.v-hnsw/dict/ko-dic/
-    fn test_dict_path() -> PathBuf {
-        if let Ok(path) = std::env::var("LINDERA_KO_DIC_PATH") {
-            return PathBuf::from(path);
-        }
-        v_hnsw_core::ko_dic_dir()
-    }
-
-    #[test]
-    fn test_token_kind_from_pos() {
-        assert_eq!(TokenKind::from_pos("NNG"), TokenKind::Noun);
-        assert_eq!(TokenKind::from_pos("NNP"), TokenKind::Noun);
-        assert_eq!(TokenKind::from_pos("VV"), TokenKind::Verb);
-        assert_eq!(TokenKind::from_pos("JKS"), TokenKind::Particle);
-        assert_eq!(TokenKind::from_pos("SF"), TokenKind::Punctuation);
-        assert_eq!(TokenKind::from_pos("SN"), TokenKind::Number);
-        assert_eq!(TokenKind::from_pos("SL"), TokenKind::Foreign);
-        assert_eq!(TokenKind::from_pos(""), TokenKind::Unknown);
-    }
-
-    #[test]
-    fn test_token_kind_is_searchable() {
-        assert!(TokenKind::Noun.is_searchable());
-        assert!(TokenKind::Verb.is_searchable());
-        assert!(TokenKind::Adjective.is_searchable());
-        assert!(!TokenKind::Particle.is_searchable());
-        assert!(!TokenKind::Punctuation.is_searchable());
-    }
-
-    #[test]
-    fn test_whitespace_tokenizer() {
-        let tokenizer = WhitespaceTokenizer::new();
-        let tokens = tokenizer.tokenize("Hello World Test").expect("tokenize");
-
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0].text, "hello");
-        assert_eq!(tokens[1].text, "world");
-        assert_eq!(tokens[2].text, "test");
-    }
-
-    #[test]
-    fn test_whitespace_tokenizer_no_lowercase() {
-        let tokenizer = WhitespaceTokenizer::with_lowercase(false);
-        let tokens = tokenizer.tokenize("Hello World").expect("tokenize");
-
-        assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].text, "Hello");
-        assert_eq!(tokens[1].text, "World");
-    }
-
-    #[test]
-    fn test_whitespace_tokenizer_empty() {
-        let tokenizer = WhitespaceTokenizer::new();
-        let tokens = tokenizer.tokenize("").expect("tokenize");
-        assert!(tokens.is_empty());
-    }
-
-    #[test]
-    fn test_korean_tokenizer_creation() {
-        let result = KoreanTokenizer::new(&test_dict_path());
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_korean_tokenizer_basic() {
-        let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
-        let tokens = tokenizer.tokenize("안녕하세요").expect("tokenize");
-
-        assert!(!tokens.is_empty());
-        // The exact tokenization depends on ko-dic
-    }
-
-    #[test]
-    fn test_korean_tokenizer_mixed() {
-        let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
-        let tokens = tokenizer.tokenize("Hello 세계").expect("tokenize");
-
-        assert!(!tokens.is_empty());
-    }
-
-    #[test]
-    fn test_korean_tokenizer_empty() {
-        let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
-        let tokens = tokenizer.tokenize("").expect("tokenize");
-        assert!(tokens.is_empty());
-    }
-
-    #[test]
-    fn test_korean_tokenizer_for_index() {
-        let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
-        let tokens = tokenizer.tokenize_for_index("한국은 아름다운 나라입니다").expect("tokenize");
-
-        // Should filter out stopwords and short tokens
-        for token in &tokens {
-            // Stopwords like "은" should be filtered
-            assert_ne!(token.text, "은");
-        }
-    }
-
-    #[test]
-    fn test_korean_tokenizer_unicode_normalization() {
-        let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
-
-        // Full-width characters should be normalized
-        let tokens = tokenizer.tokenize("１２３").expect("tokenize");
-        // After NFKC normalization, full-width digits become ASCII
-        assert!(!tokens.is_empty());
     }
 }

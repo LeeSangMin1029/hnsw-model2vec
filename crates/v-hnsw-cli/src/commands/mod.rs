@@ -18,3 +18,7 @@ pub mod readers;
 pub mod serve;
 pub mod update;
 pub mod code_intel;
+pub mod dupes;
+
+#[cfg(test)]
+mod tests;

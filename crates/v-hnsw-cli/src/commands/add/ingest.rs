@@ -97,6 +97,7 @@ pub fn process_markdown_folder(
                 chunk_index: chunk.chunk_index,
                 chunk_total,
                 source_modified_at: mtime,
+                custom: HashMap::new(),
             });
         }
 
@@ -119,11 +120,12 @@ pub fn process_markdown_folder(
 }
 
 /// Intermediate data collected per code chunk before `called_by` resolution.
-struct CodeChunkEntry {
-    chunk: crate::chunk_code::CodeChunk,
-    source: String,
-    file_path_str: String,
-    mtime: u64,
+pub(super) struct CodeChunkEntry {
+    pub(super) chunk: crate::chunk_code::CodeChunk,
+    pub(super) source: String,
+    pub(super) file_path_str: String,
+    pub(super) mtime: u64,
+    pub(super) lang: &'static str,
 }
 
 /// Build `called_by` reverse index from all chunks' `calls` data.
@@ -131,7 +133,7 @@ struct CodeChunkEntry {
 /// For each call target, extracts the bare function name (last segment after
 /// `::` or `.`) and maps it to the set of callers (qualified chunk names).
 /// Returns `HashMap<bare_fn_name, Vec<caller_name>>`.
-fn build_called_by_index(entries: &[CodeChunkEntry]) -> HashMap<String, Vec<String>> {
+pub(super) fn build_called_by_index(entries: &[CodeChunkEntry]) -> HashMap<String, Vec<String>> {
     let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
 
     for entry in entries {
@@ -165,7 +167,7 @@ fn build_called_by_index(entries: &[CodeChunkEntry]) -> HashMap<String, Vec<Stri
 ///
 /// Checks both the full qualified name and the bare (last segment) name
 /// against the reverse index built by [`build_called_by_index`].
-fn lookup_called_by<'a>(
+pub(super) fn lookup_called_by<'a>(
     reverse: &'a HashMap<String, Vec<String>>,
     chunk_name: &str,
 ) -> Vec<&'a str> {
@@ -213,10 +215,6 @@ pub fn process_code_folder(
     engine: &mut StorageEngine,
     exclude: &[String],
 ) -> Result<(u64, u64, Vec<u64>)> {
-    use crate::chunk_code::{CodeChunkConfig, RustCodeChunker};
-
-    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
-
     // Collect all supported code files recursively
     let code_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
         .into_iter()
@@ -261,7 +259,14 @@ pub fn process_code_folder(
             }
         };
 
-        let chunks = chunker.chunk(&source_code);
+        let ext = code_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let chunks = match crate::chunk_code::chunk_for_language(ext, &source_code) {
+            Some(c) => c,
+            None => continue,
+        };
         if chunks.is_empty() {
             continue;
         }
@@ -272,6 +277,7 @@ pub fn process_code_folder(
         let size = file_index::get_file_size(code_path).unwrap_or(0);
         let mut chunk_ids = Vec::new();
 
+        let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
         for chunk in chunks {
             let id = common::generate_id(&source, chunk.chunk_index);
             chunk_ids.push(id);
@@ -280,6 +286,7 @@ pub fn process_code_folder(
                 source: source.clone(),
                 file_path_str: file_path_str.clone(),
                 mtime,
+                lang,
             });
         }
 
@@ -324,7 +331,7 @@ pub fn process_code_folder(
         // Build tags from code metadata
         let mut tags = vec![
             format!("kind:{}", chunk.kind.as_str()),
-            format!("lang:rust"),
+            format!("lang:{}", entry.lang),
         ];
         if !chunk.visibility.is_empty() {
             tags.push(format!("vis:{}", chunk.visibility));
@@ -343,6 +350,7 @@ pub fn process_code_folder(
             chunk_index: chunk.chunk_index,
             chunk_total,
             source_modified_at: entry.mtime,
+            custom: chunk.to_custom_fields(&called_by),
         });
     }
 
@@ -447,6 +455,7 @@ pub fn process_jsonl(
             chunk_index: 0,
             chunk_total: 1,
             source_modified_at: 0,
+            custom: HashMap::new(),
         });
     }
 

@@ -15,24 +15,24 @@ use super::{cached_json, load_chunks, OutputFormat};
 const DEPS_SCHEMA: &str = "o=outgoing(uses),i=incoming(used_by),n=name,v=via";
 
 /// A dependency edge: target file + relationship type.
-type DepSet = BTreeSet<(String, &'static str)>;
+pub(crate) type DepSet = BTreeSet<(String, &'static str)>;
 
 /// Complete bidirectional graph for a single file.
-struct FileNode {
+pub(crate) struct FileNode {
     /// Files this file depends on (outgoing).
-    outgoing: DepSet,
+    pub(crate) outgoing: DepSet,
     /// Files that depend on this file (incoming).
-    incoming: DepSet,
+    pub(crate) incoming: DepSet,
 }
 
 /// Full bidirectional dependency graph.
-struct DepGraph {
-    nodes: BTreeMap<String, FileNode>,
+pub(crate) struct DepGraph {
+    pub(crate) nodes: BTreeMap<String, FileNode>,
 }
 
 impl DepGraph {
     /// Build from code chunks.
-    fn build(chunks: &[CodeChunk]) -> Self {
+    pub(crate) fn build(chunks: &[CodeChunk]) -> Self {
         // Build symbol → file index.
         let mut sym_to_file: BTreeMap<String, String> = BTreeMap::new();
         for c in chunks {
@@ -109,7 +109,7 @@ impl DepGraph {
     }
 
     /// Find a file by suffix match.
-    fn match_file(&self, query: &str) -> Vec<&str> {
+    pub(crate) fn match_file(&self, query: &str) -> Vec<&str> {
         self.nodes
             .keys()
             .filter(|k| k.ends_with(query) || *k == query)
@@ -118,7 +118,7 @@ impl DepGraph {
     }
 
     /// Count total edges (outgoing only, to avoid double-counting).
-    fn total_edges(&self) -> usize {
+    pub(crate) fn total_edges(&self) -> usize {
         self.nodes.values().map(|n| n.outgoing.len()).sum()
     }
 }
@@ -155,7 +155,7 @@ pub fn run_deps(
 }
 
 /// Resolve a symbol name to its defining file.
-fn resolve_symbol(symbol: &str, index: &BTreeMap<String, String>) -> Option<String> {
+pub(crate) fn resolve_symbol(symbol: &str, index: &BTreeMap<String, String>) -> Option<String> {
     let lower = symbol.to_lowercase();
 
     if let Some(f) = index.get(&lower) {
@@ -170,7 +170,7 @@ fn resolve_symbol(symbol: &str, index: &BTreeMap<String, String>) -> Option<Stri
 }
 
 /// Merge dep edges by file, joining via labels.
-fn merge_deps(deps: &DepSet) -> BTreeMap<&str, Vec<&str>> {
+pub(crate) fn merge_deps(deps: &DepSet) -> BTreeMap<&str, Vec<&str>> {
     let mut merged: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (file, via) in deps {
         merged.entry(file.as_str()).or_default().push(via);
@@ -312,7 +312,7 @@ fn compute_deps_json(db: &Path, file: Option<&str>, depth: usize) -> Result<Stri
 // ── HTML visualization ──────────────────────────────────────────────────
 
 /// Extract crate name from path for color grouping.
-fn crate_group(path: &str) -> &str {
+pub(crate) fn crate_group(path: &str) -> &str {
     if let Some(start) = path.find("crates/") {
         let rest = &path[start + 7..];
         if let Some(end) = rest.find('/') {
@@ -442,7 +442,7 @@ fn build_func_graph_json(chunks: &[CodeChunk]) -> (String, String, String) {
 }
 
 /// Find the length of the common path prefix among all file paths.
-fn common_prefix_len(paths: &[&str]) -> usize {
+pub(crate) fn common_prefix_len(paths: &[&str]) -> usize {
     if paths.is_empty() {
         return 0;
     }

@@ -6,6 +6,9 @@
 mod daemon;
 mod handler;
 
+#[cfg(test)]
+mod tests;
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};

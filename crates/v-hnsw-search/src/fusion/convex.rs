@@ -94,7 +94,7 @@ impl ConvexFusion {
 
 /// Min-max normalize scores to [0, 1].
 /// If `invert`, lower values → higher scores (for distance metrics).
-fn normalize(results: &[(PointId, f32)], invert: bool) -> HashMap<PointId, f32> {
+pub(super) fn normalize(results: &[(PointId, f32)], invert: bool) -> HashMap<PointId, f32> {
     let mut scores = HashMap::with_capacity(results.len());
     if results.is_empty() {
         return scores;
@@ -130,110 +130,4 @@ fn min_max_values(results: &[(PointId, f32)]) -> (f32, f32) {
         }
     }
     (min_val, max_val)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_alpha() {
-        let fusion = ConvexFusion::new();
-        assert!((fusion.alpha() - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_custom_alpha() {
-        let fusion = ConvexFusion::with_alpha(0.7);
-        assert!((fusion.alpha() - 0.7).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_alpha_clamping() {
-        let fusion = ConvexFusion::with_alpha(1.5);
-        assert!((fusion.alpha() - 1.0).abs() < f32::EPSILON);
-
-        let fusion = ConvexFusion::with_alpha(-0.3);
-        assert!((fusion.alpha() - 0.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_fuse_empty() {
-        let fusion = ConvexFusion::new();
-        let result = fusion.fuse(&[], &[], 10);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_fuse_dense_only() {
-        let fusion = ConvexFusion::with_alpha(1.0);
-        let dense = vec![(1, 0.1), (2, 0.5), (3, 0.9)];
-        let result = fusion.fuse(&dense, &[], 10);
-
-        assert_eq!(result.len(), 3);
-        // Closest (smallest distance) should be first
-        assert_eq!(result[0].0, 1);
-    }
-
-    #[test]
-    fn test_fuse_sparse_only() {
-        let fusion = ConvexFusion::with_alpha(0.0);
-        let sparse = vec![(1, 5.0), (2, 3.0), (3, 1.0)];
-        let result = fusion.fuse(&[], &sparse, 10);
-
-        assert_eq!(result.len(), 3);
-        // Highest BM25 score should be first
-        assert_eq!(result[0].0, 1);
-    }
-
-    #[test]
-    fn test_fuse_balanced() {
-        let fusion = ConvexFusion::with_alpha(0.5);
-        // Doc 1: close in vector space (dist=0.1), low BM25 (1.0)
-        // Doc 2: far in vector space (dist=0.9), high BM25 (5.0)
-        let dense = vec![(1, 0.1), (2, 0.9)];
-        let sparse = vec![(1, 1.0), (2, 5.0)];
-        let result = fusion.fuse(&dense, &sparse, 10);
-
-        assert_eq!(result.len(), 2);
-        // With equal weights, both should contribute equally
-        // Doc 1: 0.5 * 1.0 (dense normalized) + 0.5 * 0.0 (sparse normalized) = 0.5
-        // Doc 2: 0.5 * 0.0 (dense normalized) + 0.5 * 1.0 (sparse normalized) = 0.5
-        // They should be tied (or close)
-        let score_diff = (result[0].1 - result[1].1).abs();
-        assert!(score_diff < 0.01);
-    }
-
-    #[test]
-    fn test_fuse_with_limit() {
-        let fusion = ConvexFusion::new();
-        let dense = vec![(1, 0.1), (2, 0.2), (3, 0.3)];
-        let sparse = vec![(4, 5.0), (5, 4.0), (6, 3.0)];
-        let result = fusion.fuse(&dense, &sparse, 2);
-
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn test_fuse_overlapping_docs() {
-        let fusion = ConvexFusion::with_alpha(0.5);
-        // Doc 1 appears in both lists
-        let dense = vec![(1, 0.1), (2, 0.5)];
-        let sparse = vec![(1, 5.0), (3, 3.0)];
-        let result = fusion.fuse(&dense, &sparse, 10);
-
-        assert_eq!(result.len(), 3);
-        // Doc 1 should be first (appears in both, good scores)
-        assert_eq!(result[0].0, 1);
-    }
-
-    #[test]
-    fn test_normalize_same_values() {
-        // When all distances are the same, all should get max score
-        let results = vec![(1, 0.5), (2, 0.5), (3, 0.5)];
-        let scores = normalize(&results, true);
-        for (_, score) in &scores {
-            assert!((*score - 1.0).abs() < f32::EPSILON);
-        }
-    }
 }

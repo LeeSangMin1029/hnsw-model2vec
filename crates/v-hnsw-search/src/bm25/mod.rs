@@ -10,6 +10,9 @@ mod maxscore;
 mod scorer;
 pub(crate) mod snapshot;
 
+#[cfg(test)]
+mod tests;
+
 pub use index::{Bm25Index, Posting, PostingList};
 pub use scorer::Bm25Params;
 pub use snapshot::Bm25Snapshot;

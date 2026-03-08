@@ -1,76 +1,12 @@
-//! Tests for distance functions.
+//! Property-based tests for distance functions.
 
 use proptest::prelude::*;
 use v_hnsw_core::DistanceMetric;
 
-use super::cosine::CosineDistance;
-use super::dispatch::AutoDistance;
-use super::dot::DotProductDistance;
-use super::fallback;
-use super::l2::L2Distance;
+use crate::distance::cosine::CosineDistance;
+use crate::distance::fallback;
+use crate::distance::l2::L2Distance;
 
-#[test]
-fn test_l2_identical_vectors() {
-    let a = vec![1.0, 2.0, 3.0, 4.0];
-    let dist = L2Distance.distance(&a, &a);
-    assert!((dist - 0.0).abs() < 1e-6);
-}
-
-#[test]
-fn test_l2_known_values() {
-    let a = vec![0.0, 0.0, 0.0];
-    let b = vec![1.0, 1.0, 1.0];
-    let dist = L2Distance.distance(&a, &b);
-    assert!((dist - 3.0).abs() < 1e-6); // 1^2 + 1^2 + 1^2 = 3
-}
-
-#[test]
-fn test_cosine_identical() {
-    let a = vec![1.0, 2.0, 3.0];
-    let dist = CosineDistance.distance(&a, &a);
-    assert!(dist.abs() < 1e-6);
-}
-
-#[test]
-fn test_cosine_orthogonal() {
-    let a = vec![1.0, 0.0];
-    let b = vec![0.0, 1.0];
-    let dist = CosineDistance.distance(&a, &b);
-    assert!((dist - 1.0).abs() < 1e-6);
-}
-
-#[test]
-fn test_cosine_opposite() {
-    let a = vec![1.0, 0.0];
-    let b = vec![-1.0, 0.0];
-    let dist = CosineDistance.distance(&a, &b);
-    assert!((dist - 2.0).abs() < 1e-6);
-}
-
-#[test]
-fn test_dot_product_known() {
-    let a = vec![1.0, 2.0, 3.0];
-    let b = vec![4.0, 5.0, 6.0];
-    // dot = 4 + 10 + 18 = 32, distance = -32
-    let dist = DotProductDistance.distance(&a, &b);
-    assert!((dist - (-32.0)).abs() < 1e-6);
-}
-
-#[test]
-fn test_auto_distance() {
-    let a = vec![1.0, 2.0, 3.0];
-    let b = vec![4.0, 5.0, 6.0];
-
-    let l2 = AutoDistance::L2.distance(&a, &b);
-    let cos = AutoDistance::Cosine.distance(&a, &b);
-    let dot = AutoDistance::DotProduct.distance(&a, &b);
-
-    assert!(l2 > 0.0);
-    assert!(cos >= 0.0);
-    assert!(dot < 0.0); // negative dot product
-}
-
-// Property-based tests
 proptest! {
     #[test]
     fn l2_non_negative(

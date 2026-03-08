@@ -77,39 +77,3 @@ impl HybridSearchConfigBuilder {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config() {
-        let config = HybridSearchConfig::default();
-        assert_eq!(config.ef_search, 200);
-        assert_eq!(config.dense_limit, 100);
-        assert_eq!(config.sparse_limit, 100);
-        assert!((config.fusion_alpha - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_builder() {
-        let config = HybridSearchConfig::builder()
-            .ef_search(300)
-            .dense_limit(50)
-            .sparse_limit(200)
-            .build();
-
-        assert_eq!(config.ef_search, 300);
-        assert_eq!(config.dense_limit, 50);
-        assert_eq!(config.sparse_limit, 200);
-    }
-
-    #[test]
-    fn test_builder_partial() {
-        let config = HybridSearchConfig::builder().fusion_alpha(0.8).build();
-
-        assert!((config.fusion_alpha - 0.8).abs() < f32::EPSILON);
-        // Other values should be defaults
-        assert_eq!(config.ef_search, 200);
-    }
-}

@@ -4,6 +4,9 @@ mod error;
 mod traits;
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::VhnswError;
 pub use traits::{DistanceMetric, PayloadStore, VectorIndex, VectorStore};
 pub use types::{Dim, LayerId, Payload, PayloadValue, PointId};

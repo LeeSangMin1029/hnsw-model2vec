@@ -6,6 +6,9 @@
 mod ingest;
 mod pipeline;
 
+#[cfg(test)]
+mod tests;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;

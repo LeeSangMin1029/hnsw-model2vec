@@ -9,7 +9,7 @@
 #[allow(dead_code)]
 pub mod context;
 pub mod deps;
-mod deps_html;
+pub(crate) mod deps_html;
 pub mod detail;
 pub mod gather;
 pub mod graph;
@@ -17,6 +17,9 @@ pub mod impact;
 pub(crate) mod parse;
 pub mod reason;
 pub mod trace;
+
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,6 +31,106 @@ use v_hnsw_core::PayloadStore;
 use v_hnsw_storage::StorageEngine;
 
 use parse::CodeChunk;
+
+// ── Shared trait for BFS entry types ─────────────────────────────────────
+
+/// Trait for BFS entry types that carry a graph index.
+///
+/// Implemented by `context::BfsEntry`, `gather::GatherEntry`, and
+/// `impact::BfsEntry` so that `print_detail_annotations` can be shared.
+pub(crate) trait HasIdx {
+    fn idx(&self) -> u32;
+}
+
+/// Print reasoning annotations for entries that have reason data.
+///
+/// Shared by context, gather, and impact modules.
+pub(crate) fn print_detail_annotations(
+    db: &Path,
+    graph: &graph::CallGraph,
+    entries: &[impl HasIdx],
+) {
+    use std::collections::HashSet;
+
+    let mut found = false;
+    let mut seen = HashSet::new();
+    for e in entries {
+        let name = &graph.names[e.idx() as usize];
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        if let Ok(Some(entry)) = reason::load_reason(db, name) {
+            if !found {
+                println!("  [reasoning]");
+                found = true;
+            }
+            println!("    {name}: {}", reason::one_line_summary(&entry));
+        }
+    }
+    if found {
+        println!();
+    }
+}
+
+// ── Generic BFS ──────────────────────────────────────────────────────────
+
+use std::collections::VecDeque;
+
+use graph::CallGraph;
+
+/// Adjacency selector for BFS direction.
+pub(crate) enum BfsDirection {
+    /// Follow callees (forward traversal).
+    Forward,
+    /// Follow callers (reverse traversal).
+    Reverse,
+}
+
+/// Run a depth-limited BFS on the call graph.
+///
+/// The `direction` parameter selects which adjacency list to follow.
+/// For each visited node the `make_entry` callback produces the result entry;
+/// returning `None` skips the node (useful for test filtering) but still
+/// continues BFS through its neighbours.
+pub(crate) fn bfs_generic<T>(
+    graph: &CallGraph,
+    seeds: &[u32],
+    max_depth: u32,
+    direction: BfsDirection,
+    mut make_entry: impl FnMut(u32, u32) -> Option<T>,
+) -> Vec<T> {
+    let mut visited = vec![false; graph.len()];
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+    let mut results = Vec::new();
+
+    for &seed in seeds {
+        if (seed as usize) < graph.len() && !visited[seed as usize] {
+            visited[seed as usize] = true;
+            queue.push_back((seed, 0));
+        }
+    }
+
+    while let Some((idx, depth)) = queue.pop_front() {
+        if let Some(entry) = make_entry(idx, depth) {
+            results.push(entry);
+        }
+
+        if depth < max_depth {
+            let neighbours = match direction {
+                BfsDirection::Forward => &graph.callees[idx as usize],
+                BfsDirection::Reverse => &graph.callers[idx as usize],
+            };
+            for &next in neighbours {
+                if !visited[next as usize] {
+                    visited[next as usize] = true;
+                    queue.push_back((next, depth + 1));
+                }
+            }
+        }
+    }
+
+    results
+}
 
 // ── Load all code chunks (with cache) ────────────────────────────────────
 
@@ -159,7 +262,7 @@ pub fn run_stats(db: PathBuf, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn build_stats(chunks: &[CodeChunk]) -> BTreeMap<String, [usize; 4]> {
+pub(crate) fn build_stats(chunks: &[CodeChunk]) -> BTreeMap<String, [usize; 4]> {
     let mut stats: BTreeMap<String, [usize; 4]> = BTreeMap::new();
     for c in chunks {
         let crate_name = extract_crate_name(&c.file);
@@ -176,15 +279,20 @@ fn build_stats(chunks: &[CodeChunk]) -> BTreeMap<String, [usize; 4]> {
     stats
 }
 
+/// Build stats JSON Value from a `BTreeMap` of crate stats.
+pub(crate) fn stats_to_json(stats: &BTreeMap<String, [usize; 4]>) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("_s".to_owned(), serde_json::Value::String(STATS_SCHEMA.to_owned()));
+    for (name, row) in stats {
+        map.insert(name.clone(), serde_json::json!({"p":row[0],"t":row[1],"s":row[2],"e":row[3]}));
+    }
+    serde_json::Value::Object(map)
+}
+
 fn compute_stats_json(db: &Path) -> Result<String> {
     let chunks = load_chunks(db)?;
     let stats = build_stats(&chunks);
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::Value::String(STATS_SCHEMA.to_owned()));
-    for (name, row) in &stats {
-        map.insert(name.clone(), serde_json::json!({"p":row[0],"t":row[1],"s":row[2],"e":row[3]}));
-    }
-    Ok(serde_json::to_string(&serde_json::Value::Object(map))?)
+    Ok(serde_json::to_string(&stats_to_json(&stats))?)
 }
 
 /// `v-hnsw symbols` — list symbols matching filters.
@@ -318,7 +426,7 @@ pub fn run_refs(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
         println!("  {dir}/");
         for (c, via) in items {
             let filename = file_name(&c.file);
-            let lines = format_lines(c);
+            let lines = format_lines_chunk(c);
             let via_str = via.join(", ");
             println!("    {filename}{lines}  [{kind}] {name} (via {via_str})",
                 kind = c.kind, name = c.name);
@@ -365,7 +473,7 @@ fn print_grouped(chunks: &[&CodeChunk], _label: Option<&str>) {
         println!("  {dir}/");
         for c in items {
             let filename = file_name(&c.file);
-            let lines = format_lines(c);
+            let lines = format_lines_chunk(c);
             let sig = c.signature.as_deref().unwrap_or("");
             println!("    {filename}{lines}  [{kind}] {name}",
                 kind = c.kind, name = c.name);
@@ -395,9 +503,27 @@ fn file_name(path: &str) -> &str {
     }
 }
 
-fn format_lines(c: &CodeChunk) -> String {
-    if let Some((start, end)) = c.lines {
-        format!(":{start}-{end}")
+fn format_lines_chunk(c: &CodeChunk) -> String {
+    format_lines_opt(c.lines)
+}
+
+/// Format an optional line range as `":start-end"` or empty string.
+///
+/// Shared by context, gather, impact, trace modules.
+pub(crate) fn format_lines_opt(lines: Option<(usize, usize)>) -> String {
+    if let Some((s, e)) = lines {
+        format!(":{s}-{e}")
+    } else {
+        String::new()
+    }
+}
+
+/// Format an optional line range as `"start-end"` (no colon) or empty string.
+///
+/// Shared by context, gather, impact, trace modules.
+pub(crate) fn format_lines_str_opt(lines: Option<(usize, usize)>) -> String {
+    if let Some((s, e)) = lines {
+        format!("{s}-{e}")
     } else {
         String::new()
     }
@@ -407,7 +533,7 @@ fn format_lines(c: &CodeChunk) -> String {
 ///
 /// Looks for `crates/` as the project-relative anchor. Falls back to the
 /// original path when no anchor is found.
-fn relative_path(path: &str) -> &str {
+pub(crate) fn relative_path(path: &str) -> &str {
     // Normalise backslashes for matching.
     if let Some(idx) = path.find("crates/") {
         &path[idx..]
@@ -419,7 +545,7 @@ fn relative_path(path: &str) -> &str {
 }
 
 /// Format line range as `"start-end"` or empty string.
-fn lines_str(c: &CodeChunk) -> String {
+pub(crate) fn lines_str(c: &CodeChunk) -> String {
     if let Some((start, end)) = c.lines {
         format!("{start}-{end}")
     } else {
@@ -434,7 +560,7 @@ const STATS_SCHEMA: &str = "p=prod_fn,t=test_fn,s=struct,e=enum";
 /// Build file-grouped JSON with `_s` schema header.
 ///
 /// Output: `{"_s":"...","crates/foo/src/bar.rs":[{"l":"1-10","k":"fn","n":"run"}]}`
-fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
+pub(crate) fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("_s".to_owned(), serde_json::Value::String(SCHEMA.to_owned()));
 
@@ -454,7 +580,7 @@ fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
 }
 
 /// Build file-grouped JSON for refs (includes `v` field).
-fn grouped_json_refs(refs: &[(&CodeChunk, Vec<&str>)]) -> serde_json::Value {
+pub(crate) fn grouped_json_refs(refs: &[(&CodeChunk, Vec<&str>)]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("_s".to_owned(), serde_json::Value::String(SCHEMA.to_owned()));
 
@@ -475,7 +601,7 @@ fn grouped_json_refs(refs: &[(&CodeChunk, Vec<&str>)]) -> serde_json::Value {
 }
 
 /// Extract crate name from file path: `crates/foo-bar/src/...` → `foo-bar`.
-fn extract_crate_name(path: &str) -> String {
+pub(crate) fn extract_crate_name(path: &str) -> String {
     if let Some(start) = path.find("crates/") {
         let rest = &path[start + 7..];
         if let Some(slash) = rest.find('/') {

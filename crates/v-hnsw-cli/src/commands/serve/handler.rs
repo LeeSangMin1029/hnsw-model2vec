@@ -220,11 +220,12 @@ fn handle_code_intel(method: &str, params: &CodeIntelParams) -> Result<serde_jso
 }
 
 // ── Individual code-intel handlers ───────────────────────────────────────
+// Reuse shared helpers from code_intel module instead of reimplementing.
 
 fn ci_stats(db: &Path) -> Result<serde_json::Value> {
     let chunks = code_intel::load_chunks(db)?;
-    let stats = build_stats_map(&chunks);
-    Ok(stats)
+    let stats = code_intel::build_stats(&chunks);
+    Ok(code_intel::stats_to_json(&stats))
 }
 
 fn ci_def(db: &Path, name: &str) -> Result<serde_json::Value> {
@@ -234,7 +235,7 @@ fn ci_def(db: &Path, name: &str) -> Result<serde_json::Value> {
         c.name.to_lowercase() == name_lower
             || c.name.to_lowercase().ends_with(&format!("::{name_lower}"))
     }).collect();
-    Ok(grouped_json(&matches))
+    Ok(code_intel::grouped_json(&matches))
 }
 
 fn ci_refs(db: &Path, name: &str) -> Result<serde_json::Value> {
@@ -256,7 +257,7 @@ fn ci_refs(db: &Path, name: &str) -> Result<serde_json::Value> {
         }
         if via.is_empty() { None } else { Some((c, via)) }
     }).collect();
-    Ok(grouped_json_refs(&refs))
+    Ok(code_intel::grouped_json_refs(&refs))
 }
 
 fn ci_symbols(db: &Path, name: Option<&str>, kind: Option<&str>) -> Result<serde_json::Value> {
@@ -268,35 +269,44 @@ fn ci_symbols(db: &Path, name: Option<&str>, kind: Option<&str>) -> Result<serde
             && c.kind.to_lowercase() != k.to_lowercase() { return false; }
         true
     }).collect();
-    Ok(grouped_json(&filtered))
+    Ok(code_intel::grouped_json(&filtered))
 }
 
 fn ci_gather(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<serde_json::Value> {
+    use code_intel::gather::{bfs_directed, merge_entries, build_json, Direction};
+
     let graph = code_intel::context::load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
     if seeds.is_empty() {
         return Ok(serde_json::json!({"results": [], "message": format!("No symbol found matching \"{symbol}\"")}));
     }
-    // Use gather's compute function via JSON format
-    // Re-implement inline to avoid stdout capture
-    let forward = gather_bfs_forward(&graph, &seeds, depth, include_tests);
-    let reverse = gather_bfs_reverse(&graph, &seeds, depth, include_tests);
-    let mut entries = merge_gather(forward, reverse);
+    let forward = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Forward);
+    let reverse = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Reverse);
+    let mut entries = merge_entries(forward, reverse);
     entries.truncate(k);
-    Ok(build_gather_json(&graph, &entries))
+    Ok(build_json(&graph, &entries))
 }
 
 fn ci_impact(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result<serde_json::Value> {
+    use code_intel::impact::{bfs_reverse, build_json};
+
     let graph = code_intel::context::load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
     if seeds.is_empty() {
         return Ok(serde_json::json!({"results": [], "message": format!("No symbol found matching \"{symbol}\"")}));
     }
-    let entries = impact_bfs_reverse(&graph, &seeds, depth, include_tests);
-    Ok(build_impact_json(&graph, &entries))
+    let all_entries = bfs_reverse(&graph, &seeds, depth);
+    let entries: Vec<_> = if include_tests {
+        all_entries
+    } else {
+        all_entries.into_iter().filter(|e| !e.is_test).collect()
+    };
+    Ok(build_json(&graph, &entries))
 }
 
 fn ci_trace(db: &Path, from: &str, to: &str) -> Result<serde_json::Value> {
+    use code_intel::trace::{bfs_shortest_path, build_json};
+
     let graph = code_intel::context::load_or_build_graph(db)?;
     let sources = graph.resolve(from);
     let targets = graph.resolve(to);
@@ -306,8 +316,8 @@ fn ci_trace(db: &Path, from: &str, to: &str) -> Result<serde_json::Value> {
     if targets.is_empty() {
         return Ok(serde_json::json!({"path": null, "message": format!("No symbol found matching \"{to}\"")}));
     }
-    match trace_bfs(&graph, &sources, &targets) {
-        Some(path) => Ok(build_trace_json(&graph, &path)),
+    match bfs_shortest_path(&graph, &sources, &targets) {
+        Some(path) => Ok(build_json(&graph, &path)),
         None => Ok(serde_json::json!({"path": null, "hops": null})),
     }
 }
@@ -319,326 +329,3 @@ fn ci_detail(db: &Path, symbol: &str) -> Result<serde_json::Value> {
     }
 }
 
-// ── Stats helper ─────────────────────────────────────────────────────────
-
-fn build_stats_map(chunks: &[code_intel::parse::CodeChunk]) -> serde_json::Value {
-    use std::collections::BTreeMap;
-    let mut stats: BTreeMap<String, [usize; 4]> = BTreeMap::new();
-    for c in chunks {
-        let crate_name = extract_crate_name(&c.file);
-        let row = stats.entry(crate_name).or_insert([0; 4]);
-        let is_test = c.file.contains("/tests/") || c.name.starts_with("test_");
-        match (c.kind.as_str(), is_test) {
-            ("function", false) => row[0] += 1,
-            ("function", true) => row[1] += 1,
-            ("struct", _) => row[2] += 1,
-            ("enum", _) => row[3] += 1,
-            _ => {}
-        }
-    }
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::json!("p=prod_fn,t=test_fn,s=struct,e=enum"));
-    for (name, row) in &stats {
-        map.insert(name.clone(), serde_json::json!({"p":row[0],"t":row[1],"s":row[2],"e":row[3]}));
-    }
-    serde_json::Value::Object(map)
-}
-
-fn extract_crate_name(path: &str) -> String {
-    if let Some(start) = path.find("crates/") {
-        let rest = &path[start + 7..];
-        if let Some(slash) = rest.find('/') {
-            return rest[..slash].to_owned();
-        }
-    }
-    "(root)".to_owned()
-}
-
-// ── Grouped JSON builders ────────────────────────────────────────────────
-
-fn relative_path(path: &str) -> &str {
-    if let Some(idx) = path.find("crates/") {
-        &path[idx..]
-    } else if let Some(idx) = path.find("src/") {
-        &path[idx..]
-    } else {
-        path
-    }
-}
-
-fn lines_str(c: &code_intel::parse::CodeChunk) -> String {
-    if let Some((start, end)) = c.lines {
-        format!("{start}-{end}")
-    } else {
-        String::new()
-    }
-}
-
-fn grouped_json(chunks: &[&code_intel::parse::CodeChunk]) -> serde_json::Value {
-    use std::collections::BTreeMap;
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::json!("f=file,l=lines,k=kind,n=name"));
-    let mut groups: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
-    for c in chunks {
-        let path = relative_path(&c.file);
-        groups.entry(path).or_default().push(serde_json::json!({
-            "l": lines_str(c),
-            "k": &c.kind,
-            "n": &c.name,
-        }));
-    }
-    for (path, items) in groups {
-        map.insert(path.to_owned(), serde_json::Value::Array(items));
-    }
-    serde_json::Value::Object(map)
-}
-
-fn grouped_json_refs(refs: &[(&code_intel::parse::CodeChunk, Vec<&str>)]) -> serde_json::Value {
-    use std::collections::BTreeMap;
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::json!("f=file,l=lines,k=kind,n=name,v=via"));
-    let mut groups: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
-    for (c, via) in refs {
-        let path = relative_path(&c.file);
-        groups.entry(path).or_default().push(serde_json::json!({
-            "l": lines_str(c),
-            "k": &c.kind,
-            "n": &c.name,
-            "v": via,
-        }));
-    }
-    for (path, items) in groups {
-        map.insert(path.to_owned(), serde_json::Value::Array(items));
-    }
-    serde_json::Value::Object(map)
-}
-
-// ── Graph-based BFS (gather/impact/trace) ────────────────────────────────
-
-use crate::commands::code_intel::graph::CallGraph;
-
-struct GatherEntry {
-    idx: u32,
-    depth: u32,
-    score: f64,
-    direction: &'static str,
-}
-
-fn gather_bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32, include_tests: bool) -> Vec<GatherEntry> {
-    use std::collections::VecDeque;
-    let mut visited = vec![false; graph.len()];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    let mut results = Vec::new();
-    for &seed in seeds {
-        if (seed as usize) < graph.len() && !visited[seed as usize] {
-            visited[seed as usize] = true;
-            queue.push_back((seed, 0));
-        }
-    }
-    while let Some((idx, depth)) = queue.pop_front() {
-        let is_test = graph.is_test[idx as usize];
-        if !include_tests && is_test { continue; }
-        let score = (1.0 / f64::from(depth + 1)) * if is_test { 0.1 } else { 1.0 };
-        results.push(GatherEntry { idx, depth, score, direction: "callee" });
-        if depth < max_depth {
-            for &callee in &graph.callees[idx as usize] {
-                if !visited[callee as usize] {
-                    visited[callee as usize] = true;
-                    queue.push_back((callee, depth + 1));
-                }
-            }
-        }
-    }
-    results
-}
-
-fn gather_bfs_reverse(graph: &CallGraph, seeds: &[u32], max_depth: u32, include_tests: bool) -> Vec<GatherEntry> {
-    use std::collections::VecDeque;
-    let mut visited = vec![false; graph.len()];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    let mut results = Vec::new();
-    for &seed in seeds {
-        if (seed as usize) < graph.len() && !visited[seed as usize] {
-            visited[seed as usize] = true;
-            queue.push_back((seed, 0));
-        }
-    }
-    while let Some((idx, depth)) = queue.pop_front() {
-        let is_test = graph.is_test[idx as usize];
-        if !include_tests && is_test { continue; }
-        let score = (1.0 / f64::from(depth + 1)) * if is_test { 0.1 } else { 1.0 };
-        results.push(GatherEntry { idx, depth, score, direction: "caller" });
-        if depth < max_depth {
-            for &caller in &graph.callers[idx as usize] {
-                if !visited[caller as usize] {
-                    visited[caller as usize] = true;
-                    queue.push_back((caller, depth + 1));
-                }
-            }
-        }
-    }
-    results
-}
-
-fn merge_gather(forward: Vec<GatherEntry>, reverse: Vec<GatherEntry>) -> Vec<GatherEntry> {
-    use std::collections::BTreeMap;
-    let mut best: BTreeMap<u32, GatherEntry> = BTreeMap::new();
-    for entry in forward.into_iter().chain(reverse) {
-        best.entry(entry.idx)
-            .and_modify(|existing| {
-                if entry.score > existing.score {
-                    *existing = GatherEntry {
-                        idx: entry.idx,
-                        depth: entry.depth,
-                        score: entry.score,
-                        direction: entry.direction,
-                    };
-                }
-            })
-            .or_insert(entry);
-    }
-    let mut results: Vec<GatherEntry> = best.into_values().collect();
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    results
-}
-
-fn build_gather_json(graph: &CallGraph, entries: &[GatherEntry]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::json!("f=file,l=lines,k=kind,n=name,d=depth,sc=score,dir=direction,t=test"));
-    let items: Vec<serde_json::Value> = entries.iter().map(|e| {
-        let i = e.idx as usize;
-        serde_json::json!({
-            "f": relative_path(&graph.files[i]),
-            "l": graph_lines_str(graph.lines[i]),
-            "k": &graph.kinds[i],
-            "n": &graph.names[i],
-            "d": e.depth,
-            "sc": format!("{:.2}", e.score),
-            "dir": e.direction,
-            "t": graph.is_test[i],
-        })
-    }).collect();
-    map.insert("results".to_owned(), serde_json::Value::Array(items));
-    serde_json::Value::Object(map)
-}
-
-struct ImpactEntry {
-    idx: u32,
-    depth: u32,
-    is_test: bool,
-}
-
-fn impact_bfs_reverse(graph: &CallGraph, seeds: &[u32], max_depth: u32, include_tests: bool) -> Vec<ImpactEntry> {
-    use std::collections::VecDeque;
-    let mut visited = vec![false; graph.len()];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
-    let mut results = Vec::new();
-    for &seed in seeds {
-        if (seed as usize) < graph.len() && !visited[seed as usize] {
-            visited[seed as usize] = true;
-            queue.push_back((seed, 0));
-        }
-    }
-    while let Some((idx, depth)) = queue.pop_front() {
-        let is_test = graph.is_test[idx as usize];
-        results.push(ImpactEntry { idx, depth, is_test });
-        if depth < max_depth {
-            for &caller in &graph.callers[idx as usize] {
-                if !visited[caller as usize] {
-                    visited[caller as usize] = true;
-                    queue.push_back((caller, depth + 1));
-                }
-            }
-        }
-    }
-    if !include_tests {
-        results.retain(|e| !e.is_test);
-    }
-    results
-}
-
-fn build_impact_json(graph: &CallGraph, entries: &[ImpactEntry]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::json!("f=file,l=lines,k=kind,n=name,d=depth,t=test"));
-    let prod_count = entries.iter().filter(|e| e.depth > 0 && !e.is_test).count();
-    let test_count = entries.iter().filter(|e| e.depth > 0 && e.is_test).count();
-    map.insert("prod_callers".to_owned(), serde_json::json!(prod_count));
-    map.insert("test_callers".to_owned(), serde_json::json!(test_count));
-    let items: Vec<serde_json::Value> = entries.iter().map(|e| {
-        let i = e.idx as usize;
-        serde_json::json!({
-            "f": relative_path(&graph.files[i]),
-            "l": graph_lines_str(graph.lines[i]),
-            "k": &graph.kinds[i],
-            "n": &graph.names[i],
-            "d": e.depth,
-            "t": e.is_test,
-        })
-    }).collect();
-    map.insert("results".to_owned(), serde_json::Value::Array(items));
-    serde_json::Value::Object(map)
-}
-
-fn trace_bfs(graph: &CallGraph, sources: &[u32], targets: &[u32]) -> Option<Vec<u32>> {
-    use std::collections::VecDeque;
-    let len = graph.len();
-    let mut visited = vec![false; len];
-    let mut parent: Vec<Option<u32>> = vec![None; len];
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    let mut is_target = vec![false; len];
-    for &t in targets {
-        if (t as usize) < len { is_target[t as usize] = true; }
-    }
-    for &s in sources {
-        if (s as usize) < len && !visited[s as usize] {
-            visited[s as usize] = true;
-            queue.push_back(s);
-        }
-    }
-    while let Some(idx) = queue.pop_front() {
-        if is_target[idx as usize] {
-            let mut path = vec![idx];
-            let mut current = idx;
-            while let Some(p) = parent[current as usize] {
-                path.push(p);
-                current = p;
-            }
-            path.reverse();
-            return Some(path);
-        }
-        for &callee in &graph.callees[idx as usize] {
-            if !visited[callee as usize] {
-                visited[callee as usize] = true;
-                parent[callee as usize] = Some(idx);
-                queue.push_back(callee);
-            }
-        }
-    }
-    None
-}
-
-fn build_trace_json(graph: &CallGraph, path: &[u32]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::json!("f=file,l=lines,k=kind,n=name,t=test"));
-    map.insert("hops".to_owned(), serde_json::json!(path.len() - 1));
-    let items: Vec<serde_json::Value> = path.iter().map(|&idx| {
-        let i = idx as usize;
-        serde_json::json!({
-            "f": relative_path(&graph.files[i]),
-            "l": graph_lines_str(graph.lines[i]),
-            "k": &graph.kinds[i],
-            "n": &graph.names[i],
-            "t": graph.is_test[i],
-        })
-    }).collect();
-    map.insert("path".to_owned(), serde_json::Value::Array(items));
-    serde_json::Value::Object(map)
-}
-
-fn graph_lines_str(lines: Option<(usize, usize)>) -> String {
-    if let Some((s, e)) = lines {
-        format!("{s}-{e}")
-    } else {
-        String::new()
-    }
-}

@@ -89,7 +89,7 @@ pub fn run(path: PathBuf) -> Result<()> {
 }
 
 /// Sort IDs by mmap slot for sequential memory access during build.
-fn sorted_ids_by_slot(id_map: &HashMap<PointId, u32>) -> Vec<u64> {
+pub(crate) fn sorted_ids_by_slot(id_map: &HashMap<PointId, u32>) -> Vec<u64> {
     let mut pairs: Vec<(u64, u32)> = id_map.iter().map(|(&id, &slot)| (id, slot)).collect();
     pairs.sort_unstable_by_key(|&(_, slot)| slot);
     pairs.into_iter().map(|(id, _)| id).collect()

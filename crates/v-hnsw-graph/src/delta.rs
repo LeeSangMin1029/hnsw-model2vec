@@ -17,7 +17,7 @@ pub(crate) struct DeltaNeighbors {
 }
 
 /// Encode a `u64` value as an unsigned LEB128 varint, appending bytes to `buf`.
-fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
+pub(crate) fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
     loop {
         let byte = (value & 0x7F) as u8;
         value >>= 7;
@@ -33,7 +33,7 @@ fn encode_varint(buf: &mut Vec<u8>, mut value: u64) {
 ///
 /// Advances `*pos` past the consumed bytes. Returns 0 if `pos` is out of
 /// bounds (callers rely on `count` to avoid calling this in that situation).
-fn decode_varint(data: &[u8], pos: &mut usize) -> u64 {
+pub(crate) fn decode_varint(data: &[u8], pos: &mut usize) -> u64 {
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
     loop {
@@ -161,124 +161,5 @@ impl DeltaNeighbors {
     /// Actual heap memory used: encoded bytes + 2 bytes for the count field.
     pub fn memory_bytes(&self) -> usize {
         self.data.len() + 2
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_empty() {
-        let dn = DeltaNeighbors::new();
-        assert!(dn.is_empty());
-        assert_eq!(dn.len(), 0);
-        assert_eq!(dn.decode(), Vec::<PointId>::new());
-    }
-
-    #[test]
-    fn test_single() {
-        let dn = DeltaNeighbors::from_ids(&[42]);
-        assert_eq!(dn.len(), 1);
-        assert!(!dn.is_empty());
-        assert_eq!(dn.decode(), vec![42]);
-    }
-
-    #[test]
-    fn test_multiple_sorted() {
-        let ids = vec![10, 20, 30, 40, 50];
-        let dn = DeltaNeighbors::from_ids(&ids);
-        assert_eq!(dn.len(), 5);
-        assert_eq!(dn.decode(), ids);
-    }
-
-    #[test]
-    fn test_multiple_unsorted() {
-        let ids = vec![50, 10, 30, 20, 40];
-        let dn = DeltaNeighbors::from_ids(&ids);
-        assert_eq!(dn.len(), 5);
-        assert_eq!(dn.decode(), vec![10, 20, 30, 40, 50]);
-    }
-
-    #[test]
-    fn test_duplicates() {
-        let ids = vec![10, 20, 10, 30, 20];
-        let dn = DeltaNeighbors::from_ids(&ids);
-        assert_eq!(dn.len(), 3);
-        assert_eq!(dn.decode(), vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn test_push() {
-        let mut dn = DeltaNeighbors::from_ids(&[10, 30]);
-        dn.push(20);
-        assert_eq!(dn.len(), 3);
-        assert_eq!(dn.decode(), vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn test_contains() {
-        let dn = DeltaNeighbors::from_ids(&[10, 20, 30, 40, 50]);
-        assert!(dn.contains(10));
-        assert!(dn.contains(30));
-        assert!(dn.contains(50));
-        assert!(!dn.contains(15));
-        assert!(!dn.contains(0));
-        assert!(!dn.contains(60));
-    }
-
-    #[test]
-    fn test_contains_empty() {
-        let dn = DeltaNeighbors::new();
-        assert!(!dn.contains(1));
-    }
-
-    #[test]
-    fn test_large_ids() {
-        let ids = vec![
-            1_000_000_000,
-            2_000_000_000,
-            u64::MAX - 1000,
-            u64::MAX - 500,
-            u64::MAX,
-        ];
-        let dn = DeltaNeighbors::from_ids(&ids);
-        assert_eq!(dn.len(), 5);
-        assert_eq!(dn.decode(), ids);
-    }
-
-    #[test]
-    fn test_memory_savings() {
-        // Sequential IDs: deltas are 1, which encode as a single byte each.
-        let ids: Vec<PointId> = (0..100).collect();
-        let dn = DeltaNeighbors::from_ids(&ids);
-        let raw_size = 8 * ids.len(); // 800 bytes for Vec<u64>
-        let encoded_size = dn.memory_bytes();
-        assert!(
-            encoded_size < raw_size,
-            "encoded {encoded_size} should be < raw {raw_size}"
-        );
-    }
-
-    #[test]
-    fn test_push_duplicate() {
-        let mut dn = DeltaNeighbors::from_ids(&[10, 20, 30]);
-        dn.push(20); // duplicate — should be deduplicated
-        assert_eq!(dn.len(), 3);
-        assert_eq!(dn.decode(), vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn test_varint_roundtrip() {
-        // Test various varint sizes (1-byte, 2-byte, multi-byte).
-        let values: Vec<u64> = vec![0, 1, 127, 128, 16383, 16384, u64::MAX];
-        for &v in &values {
-            let mut buf = Vec::new();
-            encode_varint(&mut buf, v);
-            let mut pos = 0;
-            let decoded = decode_varint(&buf, &mut pos);
-            assert_eq!(decoded, v, "varint roundtrip failed for {v}");
-            assert_eq!(pos, buf.len(), "not all bytes consumed for {v}");
-        }
     }
 }
