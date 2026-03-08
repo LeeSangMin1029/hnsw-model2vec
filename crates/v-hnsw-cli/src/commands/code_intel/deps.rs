@@ -57,8 +57,8 @@ impl DepGraph {
 
             // Resolve calls → outgoing edges.
             for call in &c.calls {
-                if let Some(target) = resolve_symbol(call, &sym_to_file) {
-                    if target != *src {
+                if let Some(target) = resolve_symbol(call, &sym_to_file)
+                    && target != *src {
                         nodes
                             .entry(src.clone())
                             .or_insert_with(|| FileNode {
@@ -78,13 +78,12 @@ impl DepGraph {
                             .incoming
                             .insert((src.clone(), "calls"));
                     }
-                }
             }
 
             // Resolve types → outgoing edges.
             for ty in &c.types {
-                if let Some(target) = resolve_symbol(ty, &sym_to_file) {
-                    if target != *src {
+                if let Some(target) = resolve_symbol(ty, &sym_to_file)
+                    && target != *src {
                         nodes
                             .entry(src.clone())
                             .or_insert_with(|| FileNode {
@@ -103,7 +102,6 @@ impl DepGraph {
                             .incoming
                             .insert((src.clone(), "types"));
                     }
-                }
             }
         }
 
@@ -361,22 +359,20 @@ fn build_func_graph_json(chunks: &[CodeChunk]) -> (String, String, String) {
 
     for (src, c) in chunks.iter().enumerate() {
         for call in &c.calls {
-            if let Some(tgt) = resolve(call) {
-                if tgt != src {
+            if let Some(tgt) = resolve(call)
+                && tgt != src {
                     edges.push((src, tgt, "c"));
                     connected.insert(src);
                     connected.insert(tgt);
                 }
-            }
         }
         for ty in &c.types {
-            if let Some(tgt) = resolve(ty) {
-                if tgt != src {
+            if let Some(tgt) = resolve(ty)
+                && tgt != src {
                     edges.push((src, tgt, "t"));
                     connected.insert(src);
                     connected.insert(tgt);
                 }
-            }
         }
     }
 

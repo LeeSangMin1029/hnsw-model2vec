@@ -63,6 +63,7 @@ pub fn spawn_daemon(db_path: &Path) -> Result<()> {
 }
 
 /// Raw vector search (dense-only or dense+BM25 hybrid).
+#[expect(clippy::too_many_arguments)]
 pub fn run_raw_vector(
     db_path: PathBuf,
     raw_vec: Vec<f32>,

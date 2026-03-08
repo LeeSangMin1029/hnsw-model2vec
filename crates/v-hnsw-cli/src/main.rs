@@ -139,11 +139,10 @@ fn log_to_file(err: &CliError) {
     let log_path = log_dir.join("v-hnsw.log");
 
     // Truncate if file exceeds 1 MB
-    if let Ok(meta) = std::fs::metadata(&log_path) {
-        if meta.len() > 1_000_000 {
+    if let Ok(meta) = std::fs::metadata(&log_path)
+        && meta.len() > 1_000_000 {
             let _ = std::fs::remove_file(&log_path);
         }
-    }
 
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)

@@ -454,8 +454,8 @@ impl<T: Tokenizer> Bm25Index<T> {
     /// Load index from file. Prefers FST format if available, falls back to bincode.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
         // Try FST format first (compact, faster load)
-        if let Some(dir) = path.as_ref().parent() {
-            if super::fst_storage::fst_exists(dir) {
+        if let Some(dir) = path.as_ref().parent()
+            && super::fst_storage::fst_exists(dir) {
                 let fst = super::fst_storage::load_fst::<T>(dir)?;
                 return Ok(Self {
                     tokenizer: fst.tokenizer,
@@ -470,7 +470,6 @@ impl<T: Tokenizer> Bm25Index<T> {
                     max_doc_id: fst.max_doc_id,
                 });
             }
-        }
 
         // Fall back to bincode (mutable HashMap mode)
         Self::load_mutable(path)

@@ -6,6 +6,7 @@
 //!
 //! These commands are read-only and do not modify the database.
 
+#[allow(dead_code)]
 pub mod context;
 pub mod deps;
 mod deps_html;
@@ -60,20 +61,17 @@ pub(crate) fn load_chunks(path: &Path) -> Result<Vec<CodeChunk>> {
         .ok();
 
     // Try cache hit
-    if let Some(db_t) = db_mtime {
-        if let Ok(cache_meta) = fs::metadata(&cache) {
-            if let Ok(cache_t) = cache_meta.modified() {
-                if cache_t >= db_t {
-                    if let Ok(bytes) = fs::read(&cache) {
-                        let config = bincode::config::standard();
-                        if let Ok((chunks, _)) =
-                            bincode::decode_from_slice::<Vec<CodeChunk>, _>(&bytes, config)
-                        {
-                            return Ok(chunks);
-                        }
-                    }
-                }
-            }
+    if let Some(db_t) = db_mtime
+        && let Ok(cache_meta) = fs::metadata(&cache)
+        && let Ok(cache_t) = cache_meta.modified()
+        && cache_t >= db_t
+        && let Ok(bytes) = fs::read(&cache)
+    {
+        let config = bincode::config::standard();
+        if let Ok((chunks, _)) =
+            bincode::decode_from_slice::<Vec<CodeChunk>, _>(&bytes, config)
+        {
+            return Ok(chunks);
         }
     }
 
@@ -101,17 +99,14 @@ pub(super) fn cached_json(db: &Path, cache_key: &str, compute: impl FnOnce() -> 
     let cache_file = cache_dir.join(format!("{hash:x}.json"));
 
     let db_mtime = fs::metadata(db).and_then(|m| m.modified()).ok();
-    if let Some(db_t) = db_mtime {
-        if let Ok(meta) = fs::metadata(&cache_file) {
-            if let Ok(cache_t) = meta.modified() {
-                if cache_t >= db_t {
-                    if let Ok(content) = fs::read_to_string(&cache_file) {
-                        println!("{content}");
-                        return Ok(());
-                    }
-                }
-            }
-        }
+    if let Some(db_t) = db_mtime
+        && let Ok(meta) = fs::metadata(&cache_file)
+        && let Ok(cache_t) = meta.modified()
+        && cache_t >= db_t
+        && let Ok(content) = fs::read_to_string(&cache_file)
+    {
+        println!("{content}");
+        return Ok(());
     }
 
     let output = compute()?;
@@ -204,12 +199,10 @@ pub fn run_symbols(
         return cached_json(&db, &key, || {
             let chunks = load_chunks(&db)?;
             let filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| {
-                if let Some(ref n) = name {
-                    if !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
-                }
-                if let Some(ref k) = kind {
-                    if c.kind.to_lowercase() != k.to_lowercase() { return false; }
-                }
+                if let Some(ref n) = name
+                    && !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
+                if let Some(ref k) = kind
+                    && c.kind.to_lowercase() != k.to_lowercase() { return false; }
                 true
             }).collect();
             Ok(serde_json::to_string(&grouped_json(&filtered))?)
@@ -217,12 +210,10 @@ pub fn run_symbols(
     }
     let chunks = load_chunks(&db)?;
     let filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| {
-        if let Some(ref n) = name {
-            if !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
-        }
-        if let Some(ref k) = kind {
-            if c.kind.to_lowercase() != k.to_lowercase() { return false; }
-        }
+        if let Some(ref n) = name
+            && !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
+        if let Some(ref k) = kind
+            && c.kind.to_lowercase() != k.to_lowercase() { return false; }
         true
     }).collect();
     if filtered.is_empty() {
@@ -264,6 +255,7 @@ pub fn run_def(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
 }
 
 /// `v-hnsw callers` — find all callers of a function.
+#[allow(dead_code)]
 pub fn run_callers(db: PathBuf, function: String, format: OutputFormat) -> Result<()> {
     if matches!(format, OutputFormat::Json) {
         let key = format!("callers:{function}");

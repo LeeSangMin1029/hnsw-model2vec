@@ -13,6 +13,9 @@ mod extract;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tests_multilang;
+
 use std::collections::HashMap;
 
 use v_hnsw_core::PayloadValue;
@@ -364,5 +367,69 @@ impl RustCodeChunker {
 
 /// Check if a file extension is a supported code file.
 pub fn is_supported_code_file(ext: &str) -> bool {
-    ext == "rs"
+    lang_for_extension(ext).is_some()
+}
+
+/// Map a file extension to a language name for tagging.
+pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
+    match ext {
+        "rs" => Some("rust"),
+        "ts" | "tsx" => Some("typescript"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cpp" | "hpp" => Some("cpp"),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-language chunker stubs (T002 will provide real implementations)
+// ---------------------------------------------------------------------------
+
+macro_rules! define_lang_chunker {
+    ($name:ident) => {
+        /// Language-specific code chunker (stub — implementation in T002).
+        pub struct $name {
+            #[allow(dead_code)]
+            config: CodeChunkConfig,
+        }
+
+        impl $name {
+            pub fn new(config: CodeChunkConfig) -> Self {
+                Self { config }
+            }
+
+            /// Parse source and extract semantic code chunks.
+            pub fn chunk(&self, _source: &str) -> Vec<CodeChunk> {
+                // Stub: returns empty until T002 implements the parser
+                Vec::new()
+            }
+        }
+    };
+}
+
+define_lang_chunker!(TypeScriptCodeChunker);
+define_lang_chunker!(PythonCodeChunker);
+define_lang_chunker!(GoCodeChunker);
+define_lang_chunker!(JavaCodeChunker);
+define_lang_chunker!(CCodeChunker);
+define_lang_chunker!(CppCodeChunker);
+
+/// Dispatch to the appropriate language chunker based on file extension.
+///
+/// Returns `None` for unsupported extensions.
+pub fn chunk_for_language(ext: &str, source: &str) -> Option<Vec<CodeChunk>> {
+    let config = CodeChunkConfig::default();
+    match ext {
+        "rs" => Some(RustCodeChunker::new(config).chunk(source)),
+        "ts" | "tsx" => Some(TypeScriptCodeChunker::new(config).chunk(source)),
+        "py" => Some(PythonCodeChunker::new(config).chunk(source)),
+        "go" => Some(GoCodeChunker::new(config).chunk(source)),
+        "java" => Some(JavaCodeChunker::new(config).chunk(source)),
+        "c" | "h" => Some(CCodeChunker::new(config).chunk(source)),
+        "cpp" | "hpp" => Some(CppCodeChunker::new(config).chunk(source)),
+        _ => None,
+    }
 }

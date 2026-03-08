@@ -110,6 +110,7 @@ pub(crate) fn search_ext<D: DistanceMetric>(
 }
 
 /// Internal search implementation, generic over node access.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn search_with_store<D: DistanceMetric, N: NodeGraph>(
     nodes: &N,
     store: &dyn VectorStore,
@@ -263,11 +264,10 @@ pub(crate) fn search_layer<D: DistanceMetric, N: NodeGraph>(
                 // Prefetch ahead to hide memory latency (~60ns L3 miss vs ~20ns distance)
                 if i + PREFETCH_AHEAD < neighbor_ids.len() {
                     let ahead_id = neighbor_ids[i + PREFETCH_AHEAD];
-                    if !buf.visited.contains(&ahead_id) {
-                        if let Ok(ahead_vec) = store.get(ahead_id) {
+                    if !buf.visited.contains(&ahead_id)
+                        && let Ok(ahead_vec) = store.get(ahead_id) {
                             prefetch_vector(ahead_vec);
                         }
-                    }
                 }
 
                 let vec = store.get(neighbor_id)?;

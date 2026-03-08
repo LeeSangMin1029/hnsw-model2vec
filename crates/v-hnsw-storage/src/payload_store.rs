@@ -474,11 +474,10 @@ impl PayloadStore for FilePayloadStore {
         }
 
         // Try zstd compressed store first (less I/O)
-        if let Some(reader) = &self.compressed_reader {
-            if let Some(text) = reader.get_text(id)? {
+        if let Some(reader) = &self.compressed_reader
+            && let Some(text) = reader.get_text(id)? {
                 return Ok(Some(text));
             }
-        }
 
         // Fall back to raw text.dat
         if let Some(&(offset, length)) = raw_entry {

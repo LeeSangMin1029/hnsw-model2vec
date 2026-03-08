@@ -602,17 +602,17 @@ impl QueryCache {
         let mut cache = LruCache::new(cap);
 
         let cache_path = db_path.join(QUERY_CACHE_FILE);
-        if let Ok(data) = std::fs::read(&cache_path) {
-            if let Ok((entries, _)) = bincode::serde::decode_from_slice::<Vec<CacheEntry>, _>(
+        if let Ok(data) = std::fs::read(&cache_path)
+            && let Ok((entries, _)) = bincode::serde::decode_from_slice::<Vec<CacheEntry>, _>(
                 &data,
                 bincode::config::standard(),
-            ) {
-                // Insert in reverse to preserve LRU order (most recent last)
-                for entry in entries.into_iter().rev() {
-                    cache.put(entry.query, entry.embedding);
-                }
-                tracing::debug!(count = cache.len(), "Query cache loaded");
+            )
+        {
+            // Insert in reverse to preserve LRU order (most recent last)
+            for entry in entries.into_iter().rev() {
+                cache.put(entry.query, entry.embedding);
             }
+            tracing::debug!(count = cache.len(), "Query cache loaded");
         }
 
         Self {

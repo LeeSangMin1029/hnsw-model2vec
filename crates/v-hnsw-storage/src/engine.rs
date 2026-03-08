@@ -175,6 +175,7 @@ impl StorageEngine {
         let lock_path = dir.join("write.lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&lock_path)?;
 

@@ -113,6 +113,7 @@ pub fn delete_reason(db: &Path, symbol: &str) -> Result<bool> {
 }
 
 /// List all reason entries in the database.
+#[allow(dead_code)]
 pub fn list_reasons(db: &Path) -> Result<Vec<ReasonEntry>> {
     let dir = reasons_dir(db);
     if !dir.exists() {
@@ -125,12 +126,11 @@ pub fn list_reasons(db: &Path) -> Result<Vec<ReasonEntry>> {
     {
         let item = item?;
         let path = item.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(entry) = serde_json::from_str::<ReasonEntry>(&content) {
-                    entries.push(entry);
-                }
-            }
+        if path.extension().is_some_and(|ext| ext == "json")
+            && let Ok(content) = fs::read_to_string(&path)
+            && let Ok(entry) = serde_json::from_str::<ReasonEntry>(&content)
+        {
+            entries.push(entry);
         }
     }
 

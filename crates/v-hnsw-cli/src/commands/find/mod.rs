@@ -198,15 +198,13 @@ pub fn run(params: FindParams) -> Result<()> {
     let query = query.unwrap();
 
     // Code DB + code-like query → try code-intel first
-    if looks_like_code_symbol(&query) {
-        if let Ok(config) = super::create::DbConfig::load(&db)
-            && config.content_type == "code"
-        {
-            if try_code_intel(&db, &query)? {
-                return Ok(());
-            }
-            // code-intel found nothing, fall through to vector search
-        }
+    if looks_like_code_symbol(&query)
+        && let Ok(config) = super::create::DbConfig::load(&db)
+        && config.content_type == "code"
+        && try_code_intel(&db, &query)?
+    {
+        return Ok(());
+        // code-intel found nothing, fall through to vector search
     }
 
     // Hybrid vector search (default)

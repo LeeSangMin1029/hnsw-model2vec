@@ -117,12 +117,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         InputType::MarkdownFolder => "markdown",
         InputType::Jsonl => "mixed",
     };
-    if let Ok(mut config) = DbConfig::load(&db_path) {
-        if config.content_type.is_empty() || config.content_type == "mixed" {
+    if let Ok(mut config) = DbConfig::load(&db_path)
+        && (config.content_type.is_empty() || config.content_type == "mixed") {
             config.content_type = content_type.to_owned();
             let _ = config.save(&db_path);
         }
-    }
 
     // Process based on input type
     let (inserted, errors, added_ids) = match input_type {

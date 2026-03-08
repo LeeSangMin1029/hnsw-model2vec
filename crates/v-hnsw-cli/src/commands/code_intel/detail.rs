@@ -62,7 +62,7 @@ pub fn run_detail(params: DetailParams) -> Result<()> {
 }
 
 /// Show reasoning for a symbol.
-fn run_show(db: &PathBuf, symbol: &str) -> Result<()> {
+fn run_show(db: &std::path::Path, symbol: &str) -> Result<()> {
     match reason::load_reason(db, symbol)? {
         Some(entry) => print_entry(&entry),
         None => println!("No reasoning found for \"{symbol}\"."),
@@ -71,7 +71,7 @@ fn run_show(db: &PathBuf, symbol: &str) -> Result<()> {
 }
 
 /// Delete reasoning for a symbol.
-fn run_delete(db: &PathBuf, symbol: &str) -> Result<()> {
+fn run_delete(db: &std::path::Path, symbol: &str) -> Result<()> {
     if reason::delete_reason(db, symbol)? {
         println!("Deleted reasoning for \"{symbol}\".");
     } else {
@@ -83,7 +83,7 @@ fn run_delete(db: &PathBuf, symbol: &str) -> Result<()> {
 /// Add or update reasoning for a symbol.
 #[expect(clippy::too_many_arguments)]
 fn run_mutate(
-    db: &PathBuf,
+    db: &std::path::Path,
     symbol: &str,
     add: Option<String>,
     decision: Option<String>,
@@ -206,6 +206,7 @@ fn run_mutate(
 }
 
 /// List all reasoning entries in the database.
+#[cfg(test)]
 pub fn run_list(db: &std::path::Path) -> Result<Vec<ReasonEntry>> {
     reason::list_reasons(db)
 }

@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -221,13 +221,13 @@ fn handle_code_intel(method: &str, params: &CodeIntelParams) -> Result<serde_jso
 
 // ── Individual code-intel handlers ───────────────────────────────────────
 
-fn ci_stats(db: &PathBuf) -> Result<serde_json::Value> {
+fn ci_stats(db: &Path) -> Result<serde_json::Value> {
     let chunks = code_intel::load_chunks(db)?;
     let stats = build_stats_map(&chunks);
     Ok(stats)
 }
 
-fn ci_def(db: &PathBuf, name: &str) -> Result<serde_json::Value> {
+fn ci_def(db: &Path, name: &str) -> Result<serde_json::Value> {
     let chunks = code_intel::load_chunks(db)?;
     let name_lower = name.to_lowercase();
     let matches: Vec<&code_intel::parse::CodeChunk> = chunks.iter().filter(|c| {
@@ -237,7 +237,7 @@ fn ci_def(db: &PathBuf, name: &str) -> Result<serde_json::Value> {
     Ok(grouped_json(&matches))
 }
 
-fn ci_refs(db: &PathBuf, name: &str) -> Result<serde_json::Value> {
+fn ci_refs(db: &Path, name: &str) -> Result<serde_json::Value> {
     let chunks = code_intel::load_chunks(db)?;
     let name_lower = name.to_lowercase();
     let refs: Vec<(&code_intel::parse::CodeChunk, Vec<&str>)> = chunks.iter().filter_map(|c| {
@@ -259,21 +259,19 @@ fn ci_refs(db: &PathBuf, name: &str) -> Result<serde_json::Value> {
     Ok(grouped_json_refs(&refs))
 }
 
-fn ci_symbols(db: &PathBuf, name: Option<&str>, kind: Option<&str>) -> Result<serde_json::Value> {
+fn ci_symbols(db: &Path, name: Option<&str>, kind: Option<&str>) -> Result<serde_json::Value> {
     let chunks = code_intel::load_chunks(db)?;
     let filtered: Vec<&code_intel::parse::CodeChunk> = chunks.iter().filter(|c| {
-        if let Some(n) = name {
-            if !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
-        }
-        if let Some(k) = kind {
-            if c.kind.to_lowercase() != k.to_lowercase() { return false; }
-        }
+        if let Some(n) = name
+            && !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
+        if let Some(k) = kind
+            && c.kind.to_lowercase() != k.to_lowercase() { return false; }
         true
     }).collect();
     Ok(grouped_json(&filtered))
 }
 
-fn ci_gather(db: &PathBuf, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<serde_json::Value> {
+fn ci_gather(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<serde_json::Value> {
     let graph = code_intel::context::load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
     if seeds.is_empty() {
@@ -288,7 +286,7 @@ fn ci_gather(db: &PathBuf, symbol: &str, depth: u32, k: usize, include_tests: bo
     Ok(build_gather_json(&graph, &entries))
 }
 
-fn ci_impact(db: &PathBuf, symbol: &str, depth: u32, include_tests: bool) -> Result<serde_json::Value> {
+fn ci_impact(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result<serde_json::Value> {
     let graph = code_intel::context::load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
     if seeds.is_empty() {
@@ -298,7 +296,7 @@ fn ci_impact(db: &PathBuf, symbol: &str, depth: u32, include_tests: bool) -> Res
     Ok(build_impact_json(&graph, &entries))
 }
 
-fn ci_trace(db: &PathBuf, from: &str, to: &str) -> Result<serde_json::Value> {
+fn ci_trace(db: &Path, from: &str, to: &str) -> Result<serde_json::Value> {
     let graph = code_intel::context::load_or_build_graph(db)?;
     let sources = graph.resolve(from);
     let targets = graph.resolve(to);
@@ -314,7 +312,7 @@ fn ci_trace(db: &PathBuf, from: &str, to: &str) -> Result<serde_json::Value> {
     }
 }
 
-fn ci_detail(db: &PathBuf, symbol: &str) -> Result<serde_json::Value> {
+fn ci_detail(db: &Path, symbol: &str) -> Result<serde_json::Value> {
     match code_intel::reason::load_reason(db, symbol)? {
         Some(entry) => Ok(serde_json::to_value(entry)?),
         None => Ok(serde_json::json!({"symbol": symbol, "found": false})),

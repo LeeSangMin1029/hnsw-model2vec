@@ -63,7 +63,7 @@ impl HnswSnapshot {
         let mut data = Vec::new();
         let mut entries = Vec::with_capacity(nodes.len());
 
-        for &(&id, ref node) in &nodes {
+        for &(&id, node) in &nodes {
             let offset = data.len() as u64;
             let flags = (node.max_layer as u64) | if node.deleted { 1u64 << 32 } else { 0 };
             entries.push(LookupEntry {
@@ -171,6 +171,11 @@ impl HnswSnapshot {
     /// Number of live (non-deleted) nodes.
     pub fn len(&self) -> usize {
         self.count
+    }
+
+    /// Returns `true` if there are no live nodes.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
     }
 
     /// Get the snapshot configuration.

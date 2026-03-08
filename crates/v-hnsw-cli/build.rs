@@ -24,14 +24,12 @@ fn read_lindera_version() -> Option<String> {
     let mut lines = reader.lines();
 
     while let Some(Ok(line)) = lines.next() {
-        if line.trim() == "name = \"lindera\"" {
-            if let Some(Ok(ver_line)) = lines.next() {
-                return ver_line
-                    .trim()
-                    .strip_prefix("version = \"")
-                    .and_then(|s| s.strip_suffix('"'))
-                    .map(|s| s.to_owned());
-            }
+        if line.trim() == "name = \"lindera\"" && let Some(Ok(ver_line)) = lines.next() {
+            return ver_line
+                .trim()
+                .strip_prefix("version = \"")
+                .and_then(|s| s.strip_suffix('"'))
+                .map(|s| s.to_owned());
         }
     }
     None

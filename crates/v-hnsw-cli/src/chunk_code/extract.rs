@@ -45,11 +45,10 @@ pub(super) fn extract_function_signature(node: &tree_sitter::Node, src: &[u8]) -
     if let Some(body) = node.child_by_field_name("body") {
         let sig_start = node.start_byte();
         let sig_end = body.start_byte();
-        if sig_end > sig_start {
-            if let Ok(sig) = std::str::from_utf8(&src[sig_start..sig_end]) {
+        if sig_end > sig_start
+            && let Ok(sig) = std::str::from_utf8(&src[sig_start..sig_end]) {
                 return sig.trim().to_owned();
             }
-        }
     }
     node.utf8_text(src).unwrap_or_default().to_owned()
 }
@@ -59,11 +58,10 @@ pub(super) fn extract_imports(root: &tree_sitter::Node, src: &[u8]) -> Vec<Strin
     let mut imports = Vec::new();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        if child.kind() == "use_declaration" {
-            if let Ok(text) = child.utf8_text(src) {
+        if child.kind() == "use_declaration"
+            && let Ok(text) = child.utf8_text(src) {
                 imports.push(text.to_owned());
             }
-        }
     }
     imports
 }
@@ -79,13 +77,11 @@ pub(super) fn extract_calls(node: &tree_sitter::Node, src: &[u8]) -> Vec<String>
 
 /// Recursively walk to find `call_expression` nodes.
 pub(super) fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<String>) {
-    if node.kind() == "call_expression" {
-        if let Some(func) = node.child_by_field_name("function") {
-            if let Ok(text) = func.utf8_text(src) {
-                calls.push(text.to_owned());
-            }
+    if node.kind() == "call_expression"
+        && let Some(func) = node.child_by_field_name("function")
+        && let Ok(text) = func.utf8_text(src) {
+            calls.push(text.to_owned());
         }
-    }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -142,11 +138,10 @@ pub(super) fn extract_type_refs(node: &tree_sitter::Node, src: &[u8]) -> Vec<Str
 
 /// Walk recursively to collect `type_identifier` texts.
 fn walk_for_type_ids(node: &tree_sitter::Node, src: &[u8], refs: &mut Vec<String>) {
-    if node.kind() == "type_identifier" {
-        if let Ok(text) = node.utf8_text(src) {
+    if node.kind() == "type_identifier"
+        && let Ok(text) = node.utf8_text(src) {
             refs.push(text.to_owned());
         }
-    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_for_type_ids(&child, src, refs);

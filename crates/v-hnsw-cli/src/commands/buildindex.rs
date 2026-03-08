@@ -65,7 +65,9 @@ pub fn run(path: PathBuf) -> Result<()> {
             build_bm25(payload_store, &ids, &bm25_path, &path)
         });
 
+        #[expect(clippy::expect_used, reason = "thread panics are unrecoverable")]
         hnsw_handle.join().expect("HNSW thread panicked")?;
+        #[expect(clippy::expect_used, reason = "thread panics are unrecoverable")]
         bm25_handle.join().expect("BM25 thread panicked")?;
         Ok(())
     })?;
@@ -122,12 +124,11 @@ fn build_bm25(
     let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let mut text_count = 0;
     for &id in ids {
-        if let Ok(Some(text)) = payload_store.get_text(id) {
-            if !text.is_empty() {
+        if let Ok(Some(text)) = payload_store.get_text(id)
+            && !text.is_empty() {
                 bm25.add_document(id, &text);
                 text_count += 1;
             }
-        }
     }
     bm25.save(path).with_context(|| "failed to save BM25")?;
     bm25.save_snapshot(db_dir).with_context(|| "failed to save BM25 snapshot")?;
