@@ -25,6 +25,10 @@ enum InputType {
     MarkdownFolder,
     /// Folder containing code files (.rs, etc.).
     CodeFolder,
+    /// Single markdown file.
+    SingleMarkdown,
+    /// Single code file (.rs, .py, etc.).
+    SingleCode,
     /// JSONL file.
     Jsonl,
 }
@@ -76,13 +80,12 @@ fn detect_input_type(path: &Path, exclude: &[String]) -> Result<InputType> {
             .map(|e| e.to_lowercase());
         match ext.as_deref() {
             Some("jsonl") | Some("ndjson") => Ok(InputType::Jsonl),
-            Some("md") | Some("markdown") => {
-                anyhow::bail!(
-                    "Single markdown file not supported. Use a folder containing .md files."
-                )
+            Some("md") | Some("markdown") => Ok(InputType::SingleMarkdown),
+            Some(ext) if crate::chunk_code::is_supported_code_file(ext) => {
+                Ok(InputType::SingleCode)
             }
             _ => anyhow::bail!(
-                "Unsupported file type: {}. Supported: folder with .md files, .jsonl",
+                "Unsupported file type: {}. Supported: .md, .rs, .py, .ts, .jsonl, or folder",
                 path.display()
             ),
         }
@@ -116,8 +119,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 
     // Record content type in config
     let content_type = match input_type {
-        InputType::CodeFolder => "code",
-        InputType::MarkdownFolder => "markdown",
+        InputType::CodeFolder | InputType::SingleCode => "code",
+        InputType::MarkdownFolder | InputType::SingleMarkdown => "markdown",
         InputType::Jsonl => "mixed",
     };
     if let Ok(mut config) = DbConfig::load(&db_path)
@@ -131,8 +134,14 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         InputType::MarkdownFolder => {
             ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine, exclude)?
         }
+        InputType::SingleMarkdown => {
+            ingest::process_markdown_files(&db_path, &[input_path.clone()], &model, &mut engine)?
+        }
         InputType::CodeFolder => {
             ingest::process_code_folder(&db_path, &input_path, &model, &mut engine, exclude)?
+        }
+        InputType::SingleCode => {
+            ingest::process_code_files(&db_path, &[input_path.clone()], &model, &mut engine)?
         }
         InputType::Jsonl => {
             ingest::process_jsonl(&db_path, &input_path, &model, &mut engine)?

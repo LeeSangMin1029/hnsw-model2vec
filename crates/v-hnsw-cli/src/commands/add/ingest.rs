@@ -22,13 +22,6 @@ pub fn process_markdown_folder(
     engine: &mut StorageEngine,
     exclude: &[String],
 ) -> Result<(u64, u64, Vec<u64>)> {
-    let chunker = MarkdownChunker::new(ChunkConfig {
-        target_size: 1000,
-        overlap: 200,
-        min_size: 100,
-        include_heading_context: true,
-    });
-
     // Collect all markdown files recursively
     let md_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
         .into_iter()
@@ -53,13 +46,31 @@ pub fn process_markdown_folder(
         anyhow::bail!("No markdown files found in {}", input_path.display());
     }
 
-    println!("Found {} markdown files", md_files.len());
+    process_markdown_files(db_path, &md_files, model, engine)
+}
 
-    // First pass: collect all chunks and track file metadata
+/// Process a list of markdown files: chunk, embed, insert.
+///
+/// Shared implementation for both folder and single-file ingestion.
+pub fn process_markdown_files(
+    db_path: &Path,
+    md_files: &[PathBuf],
+    model: &Model2VecModel,
+    engine: &mut StorageEngine,
+) -> Result<(u64, u64, Vec<u64>)> {
+    let chunker = MarkdownChunker::new(ChunkConfig {
+        target_size: 1000,
+        overlap: 200,
+        min_size: 100,
+        include_heading_context: true,
+    });
+
+    println!("Found {} markdown file(s)", md_files.len());
+
     let mut records: Vec<IngestRecord> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
 
-    for md_path in &md_files {
+    for md_path in md_files {
         if is_interrupted() {
             break;
         }
@@ -80,7 +91,6 @@ pub fn process_markdown_folder(
             .unwrap_or_default();
         let chunk_total = chunks.len();
 
-        // Get file metadata
         let mtime = common::get_file_mtime(md_path).unwrap_or(0);
         let size = file_index::get_file_size(md_path).unwrap_or(0);
         let mut chunk_ids = Vec::new();
@@ -106,10 +116,8 @@ pub fn process_markdown_folder(
 
     println!("Total chunks to process: {}", records.len());
 
-    // Process in batches
     let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
 
-    // Save file metadata index
     let mut file_index = file_index::load_file_index(db_path)?;
     for (path, (mtime, size, chunk_ids)) in file_metadata_map {
         file_index.update_file(path, mtime, size, chunk_ids);
@@ -240,13 +248,25 @@ pub fn process_code_folder(
         anyhow::bail!("No supported code files found in {}", input_path.display());
     }
 
-    println!("Found {} code files", code_files.len());
+    process_code_files(db_path, &code_files, model, engine)
+}
+
+/// Process a list of code files: chunk via tree-sitter, embed, insert.
+///
+/// Shared implementation for both folder and single-file ingestion.
+pub fn process_code_files(
+    db_path: &Path,
+    code_files: &[PathBuf],
+    model: &Model2VecModel,
+    engine: &mut StorageEngine,
+) -> Result<(u64, u64, Vec<u64>)> {
+    println!("Found {} code file(s)", code_files.len());
 
     // === Pass 1: Chunk all files, collect CodeChunk + metadata ===
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
 
-    for code_path in &code_files {
+    for code_path in code_files {
         if is_interrupted() {
             break;
         }
