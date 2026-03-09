@@ -54,7 +54,7 @@ impl JavaCodeChunker {
 
             match child.kind() {
                 "class_declaration" => {
-                    if let Some(mut chunk) = self.java_class_to_chunk(&child, src, imports, chunks.len()) {
+                    if let Some(mut chunk) = self.java_type_decl_to_chunk(&child, src, imports, chunks.len(), CodeNodeKind::Class) {
                         chunk.doc_comment = doc;
                         chunks.push(chunk);
                     }
@@ -83,38 +83,6 @@ impl JavaCodeChunker {
                 _ => {}
             }
         }
-    }
-
-    fn java_class_to_chunk(
-        &self,
-        node: &tree_sitter::Node,
-        src: &[u8],
-        imports: &[String],
-        index: usize,
-    ) -> Option<CodeChunk> {
-        let text = node.utf8_text(src).ok()?.to_owned();
-        let name = extract::extract_name(node, src);
-        let visibility = extract::extract_java_visibility(node, src);
-        let type_refs = extract::extract_type_refs(node, src);
-
-        Some(CodeChunk {
-            text,
-            kind: CodeNodeKind::Class,
-            name,
-            signature: None,
-            doc_comment: None,
-            visibility,
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            chunk_index: index,
-            imports: imports.to_vec(),
-            calls: Vec::new(),
-            type_refs,
-            param_types: Vec::new(),
-            return_type: None, ast_hash: 0, body_hash: 0,
-        })
     }
 
     fn java_type_decl_to_chunk(

@@ -342,13 +342,20 @@ pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<Stri
 }
 
 /// Extract doc comments (`///` or `//!`) preceding a node.
-pub fn extract_doc_comment_before(
+/// Collect doc-comment lines immediately before `target` under `root`.
+///
+/// `comment_kind` is the tree-sitter node kind for comments (e.g. `"line_comment"`,
+/// `"comment"`). `prefixes` lists the prefix strings to strip (e.g. `&["///", "//!"]`).
+/// Only comments that match at least one prefix are kept.
+fn collect_doc_comment_lines(
     root: &tree_sitter::Node,
     target: &tree_sitter::Node,
     src: &[u8],
+    comment_kind: &str,
+    prefixes: &[&str],
 ) -> Option<String> {
     let target_start = target.start_position().row;
-    let mut doc_lines = Vec::new();
+    let mut doc_lines: Vec<String> = Vec::new();
     let mut cursor = root.walk();
 
     for child in root.children(&mut cursor) {
@@ -356,11 +363,12 @@ pub fn extract_doc_comment_before(
             break;
         }
 
-        if child.kind() == "line_comment" {
+        if child.kind() == comment_kind {
             if let Ok(text) = child.utf8_text(src) {
-                if let Some(doc) = text.strip_prefix("///") {
-                    doc_lines.push(doc.trim().to_owned());
-                } else if let Some(doc) = text.strip_prefix("//!") {
+                let stripped = prefixes
+                    .iter()
+                    .find_map(|p| text.strip_prefix(p));
+                if let Some(doc) = stripped {
                     doc_lines.push(doc.trim().to_owned());
                 }
             }
@@ -375,6 +383,14 @@ pub fn extract_doc_comment_before(
     } else {
         Some(doc_lines.join("\n"))
     }
+}
+
+pub fn extract_doc_comment_before(
+    root: &tree_sitter::Node,
+    target: &tree_sitter::Node,
+    src: &[u8],
+) -> Option<String> {
+    collect_doc_comment_lines(root, target, src, "line_comment", &["///", "//!"])
 }
 
 /// Recursively collect all `type_identifier` node texts from a subtree.
@@ -535,31 +551,7 @@ pub fn extract_go_doc_comment_before(
     target: &tree_sitter::Node,
     src: &[u8],
 ) -> Option<String> {
-    let target_start = target.start_position().row;
-    let mut doc_lines = Vec::new();
-    let mut cursor = root.walk();
-
-    for child in root.children(&mut cursor) {
-        if child.start_position().row >= target_start {
-            break;
-        }
-
-        if child.kind() == "comment" {
-            if let Ok(text) = child.utf8_text(src) {
-                if let Some(doc) = text.strip_prefix("//") {
-                    doc_lines.push(doc.trim().to_owned());
-                }
-            }
-        } else {
-            doc_lines.clear();
-        }
-    }
-
-    if doc_lines.is_empty() {
-        None
-    } else {
-        Some(doc_lines.join("\n"))
-    }
+    collect_doc_comment_lines(root, target, src, "comment", &["//"])
 }
 
 /// Extract Python docstring from the first statement in a function/class body.
@@ -658,18 +650,25 @@ pub fn extract_ts_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<St
         })
 }
 
-/// Extract return type from Python type annotation ("-> Type").
-pub fn extract_python_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
-    node.child_by_field_name("return_type")
+/// Extract text from a named field on a tree-sitter node.
+///
+/// Common helper for return-type extractors that simply read a field's text
+/// without any prefix-stripping logic (e.g., C `"type"`, Python `"return_type"`,
+/// Go `"result"`, Java `"type"`).
+fn extract_field_text(node: &tree_sitter::Node, field_name: &str, src: &[u8]) -> Option<String> {
+    node.child_by_field_name(field_name)
         .and_then(|n| n.utf8_text(src).ok())
         .map(|s| s.to_owned())
 }
 
+/// Extract return type from Python type annotation ("-> Type").
+pub fn extract_python_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    extract_field_text(node, "return_type", src)
+}
+
 /// Extract Go function return type(s).
 pub fn extract_go_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
-    node.child_by_field_name("result")
-        .and_then(|n| n.utf8_text(src).ok())
-        .map(|s| s.to_owned())
+    extract_field_text(node, "result", src)
 }
 
 /// Build a `CodeChunk` for a simple named type declaration (struct/enum).
@@ -952,9 +951,7 @@ pub fn extract_c_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, St
 
 /// Extract return type from C/C++ function_definition (child field "type").
 pub fn extract_c_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
-    node.child_by_field_name("type")
-        .and_then(|n| n.utf8_text(src).ok())
-        .map(|s| s.to_owned())
+    extract_field_text(node, "type", src)
 }
 
 /// No visibility (returns empty string). Used for languages without visibility modifiers.
@@ -1048,9 +1045,7 @@ pub fn extract_java_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String,
 
 /// Extract Java return type from a method's "type" field.
 pub fn extract_java_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
-    node.child_by_field_name("type")
-        .and_then(|n| n.utf8_text(src).ok())
-        .map(|s| s.to_owned())
+    extract_field_text(node, "type", src)
 }
 
 // ---------------------------------------------------------------------------
