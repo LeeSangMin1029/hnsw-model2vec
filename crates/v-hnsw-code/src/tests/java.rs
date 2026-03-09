@@ -1,6 +1,6 @@
 //! Tests for Java code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, JavaCodeChunker};
+use crate::{CodeChunkConfig, JavaCodeChunker};
 use super::fixtures::SAMPLE_JAVA;
 
 

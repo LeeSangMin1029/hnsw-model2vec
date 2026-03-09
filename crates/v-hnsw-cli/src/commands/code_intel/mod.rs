@@ -42,6 +42,110 @@ pub(crate) trait HasIdx {
     fn idx(&self) -> u32;
 }
 
+/// Trait for BFS entry types that can be serialized to JSON and printed.
+///
+/// Each entry type provides its depth, test status, optional score/direction,
+/// and a depth label for grouped text output.
+pub(crate) trait BfsEntryExt: HasIdx {
+    fn depth(&self) -> u32;
+    fn is_test(&self, graph: &graph::CallGraph) -> bool;
+
+    /// Extra JSON fields beyond the common `f/l/k/n/d/t`.
+    fn extra_json_fields(&self) -> Vec<(&'static str, serde_json::Value)> {
+        Vec::new()
+    }
+
+    /// Schema suffix appended after the common `f=file,l=lines,k=kind,n=name,d=depth,t=test`.
+    fn schema_suffix() -> &'static str { "" }
+
+    /// Label for a given depth level in text output.
+    fn depth_label(depth: u32) -> String {
+        match depth {
+            0 => "target".to_owned(),
+            1 => "depth 1 (direct)".to_owned(),
+            d => format!("depth {d}"),
+        }
+    }
+
+    /// Extra text suffix after the standard `file:lines [kind] name [test]` line.
+    fn extra_text_suffix(&self) -> String {
+        String::new()
+    }
+
+    /// Extra top-level JSON fields inserted before `results`.
+    fn extra_top_level_json(_entries: &[Self]) -> Vec<(String, serde_json::Value)>
+    where Self: Sized
+    {
+        Vec::new()
+    }
+}
+
+/// Build JSON output for any BFS entry type implementing `BfsEntryExt`.
+pub(crate) fn build_bfs_json<E: BfsEntryExt>(
+    graph: &graph::CallGraph,
+    entries: &[E],
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+
+    let suffix = E::schema_suffix();
+    let schema = if suffix.is_empty() {
+        "f=file,l=lines,k=kind,n=name,d=depth,t=test".to_owned()
+    } else {
+        format!("f=file,l=lines,k=kind,n=name,d=depth,t=test,{suffix}")
+    };
+    map.insert("_s".to_owned(), serde_json::Value::String(schema));
+
+    for (key, val) in E::extra_top_level_json(entries) {
+        map.insert(key, val);
+    }
+
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            let i = e.idx() as usize;
+            let mut obj = serde_json::json!({
+                "f": relative_path(&graph.files[i]),
+                "l": format_lines_str_opt(graph.lines[i]),
+                "k": &graph.kinds[i],
+                "n": &graph.names[i],
+                "d": e.depth(),
+                "t": e.is_test(graph),
+            });
+            for (key, val) in e.extra_json_fields() {
+                obj[key] = val;
+            }
+            obj
+        })
+        .collect();
+
+    map.insert("results".to_owned(), serde_json::Value::Array(items));
+    serde_json::Value::Object(map)
+}
+
+/// Print BFS results grouped by depth for any entry type implementing `BfsEntryExt`.
+pub(crate) fn print_bfs_grouped<E: BfsEntryExt>(graph: &graph::CallGraph, entries: &[E]) {
+    let mut by_depth: BTreeMap<u32, Vec<&E>> = BTreeMap::new();
+    for e in entries {
+        by_depth.entry(e.depth()).or_default().push(e);
+    }
+
+    for (depth, items) in &by_depth {
+        let label = E::depth_label(*depth);
+        println!("  [{label}]");
+        for e in items {
+            let i = e.idx() as usize;
+            let file = relative_path(&graph.files[i]);
+            let name = &graph.names[i];
+            let kind = &graph.kinds[i];
+            let lines = format_lines_opt(graph.lines[i]);
+            let test_marker = if e.is_test(graph) { " [test]" } else { "" };
+            let suffix = e.extra_text_suffix();
+            println!("    {file}{lines}  [{kind}] {name}{test_marker}{suffix}");
+        }
+        println!();
+    }
+}
+
 /// Print reasoning annotations for entries that have reason data.
 ///
 /// Shared by context, gather, and impact modules.
@@ -557,21 +661,28 @@ pub(crate) fn lines_str(c: &CodeChunk) -> String {
 const SCHEMA: &str = "f=file,l=lines,k=kind,n=name,v=via";
 const STATS_SCHEMA: &str = "p=prod_fn,t=test_fn,s=struct,e=enum";
 
-/// Build file-grouped JSON with `_s` schema header.
+/// Build file-grouped JSON from chunks, applying `extra_fields` to each entry.
 ///
-/// Output: `{"_s":"...","crates/foo/src/bar.rs":[{"l":"1-10","k":"fn","n":"run"}]}`
-pub(crate) fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
+/// The closure receives a chunk and returns additional key-value pairs to merge.
+fn build_grouped_json_with<'a, F>(chunks: impl Iterator<Item = &'a CodeChunk>, extra_fields: F) -> serde_json::Value
+where
+    F: Fn(&CodeChunk) -> Vec<(&'static str, serde_json::Value)>,
+{
     let mut map = serde_json::Map::new();
     map.insert("_s".to_owned(), serde_json::Value::String(SCHEMA.to_owned()));
 
     let mut groups: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
     for c in chunks {
         let path = relative_path(&c.file);
-        groups.entry(path).or_default().push(serde_json::json!({
+        let mut obj = serde_json::json!({
             "l": lines_str(c),
             "k": &c.kind,
             "n": &c.name,
-        }));
+        });
+        for (key, val) in extra_fields(c) {
+            obj[key] = val;
+        }
+        groups.entry(path).or_default().push(obj);
     }
     for (path, items) in groups {
         map.insert(path.to_owned(), serde_json::Value::Array(items));
@@ -579,25 +690,27 @@ pub(crate) fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+/// Build file-grouped JSON with `_s` schema header.
+///
+/// Output: `{"_s":"...","crates/foo/src/bar.rs":[{"l":"1-10","k":"fn","n":"run"}]}`
+pub(crate) fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
+    build_grouped_json_with(chunks.iter().copied(), |_| Vec::new())
+}
+
 /// Build file-grouped JSON for refs (includes `v` field).
 pub(crate) fn grouped_json_refs(refs: &[(&CodeChunk, Vec<&str>)]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::Value::String(SCHEMA.to_owned()));
-
-    let mut groups: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
-    for (c, via) in refs {
-        let path = relative_path(&c.file);
-        groups.entry(path).or_default().push(serde_json::json!({
-            "l": lines_str(c),
-            "k": &c.kind,
-            "n": &c.name,
-            "v": via,
-        }));
-    }
-    for (path, items) in groups {
-        map.insert(path.to_owned(), serde_json::Value::Array(items));
-    }
-    serde_json::Value::Object(map)
+    // Build a lookup map from chunk pointer to via list.
+    let via_map: std::collections::HashMap<*const CodeChunk, &Vec<&str>> = refs
+        .iter()
+        .map(|(c, v)| (*c as *const CodeChunk, v))
+        .collect();
+    build_grouped_json_with(refs.iter().map(|(c, _)| *c), |c| {
+        if let Some(via) = via_map.get(&(c as *const CodeChunk)) {
+            vec![("v", serde_json::json!(via))]
+        } else {
+            Vec::new()
+        }
+    })
 }
 
 /// Extract crate name from file path: `crates/foo-bar/src/...` → `foo-bar`.

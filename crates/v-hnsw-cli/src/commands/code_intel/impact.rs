@@ -7,13 +7,12 @@
 //! - Add risk scoring by weighing test vs prod callers differently.
 //! - Add `--exclude` flag to skip known stable callers.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
 
 use super::graph::CallGraph;
-use super::{cached_json, relative_path, OutputFormat, format_lines_opt, format_lines_str_opt, HasIdx, bfs_generic, BfsDirection};
+use super::{cached_json, OutputFormat, HasIdx, bfs_generic, BfsDirection, BfsEntryExt, build_bfs_json, print_bfs_grouped};
 use super::context::load_or_build_graph;
 
 /// BFS result entry with depth.
@@ -25,6 +24,31 @@ pub(crate) struct BfsEntry {
 
 impl HasIdx for BfsEntry {
     fn idx(&self) -> u32 { self.idx }
+}
+
+impl BfsEntryExt for BfsEntry {
+    fn depth(&self) -> u32 { self.depth }
+
+    fn is_test(&self, _graph: &super::graph::CallGraph) -> bool {
+        self.is_test
+    }
+
+    fn depth_label(depth: u32) -> String {
+        match depth {
+            0 => "target".to_owned(),
+            1 => "depth 1 (direct callers)".to_owned(),
+            d => format!("depth {d} (transitive callers)"),
+        }
+    }
+
+    fn extra_top_level_json(entries: &[Self]) -> Vec<(String, serde_json::Value)> {
+        let prod_count = entries.iter().filter(|e| e.depth > 0 && !e.is_test).count();
+        let test_count = entries.iter().filter(|e| e.depth > 0 && e.is_test).count();
+        vec![
+            ("prod_callers".to_owned(), serde_json::json!(prod_count)),
+            ("test_callers".to_owned(), serde_json::json!(test_count)),
+        ]
+    }
 }
 
 /// Run depth-limited BFS on the callers direction (reverse).
@@ -74,7 +98,7 @@ pub fn run_impact(
 
     println!("Impact of \"{symbol}\" (depth={depth}):");
     println!("  {prod_count} production callers, {test_count} test callers\n");
-    print_grouped(&graph, &entries);
+    print_bfs_grouped(&graph, &entries);
 
     if detail {
         super::print_detail_annotations(&db, &graph, &entries);
@@ -92,66 +116,7 @@ fn compute_impact_json(db: &Path, symbol: &str, depth: u32, include_tests: bool)
     } else {
         all_entries.into_iter().filter(|e| !e.is_test).collect()
     };
-    let json = build_json(&graph, &entries);
+    let json = build_bfs_json(&graph, &entries);
     Ok(serde_json::to_string(&json)?)
-}
-
-// ── Output helpers ───────────────────────────────────────────────────────
-
-fn print_grouped(graph: &CallGraph, entries: &[BfsEntry]) {
-    let mut by_depth: BTreeMap<u32, Vec<&BfsEntry>> = BTreeMap::new();
-    for e in entries {
-        by_depth.entry(e.depth).or_default().push(e);
-    }
-
-    for (depth, items) in &by_depth {
-        let label = match *depth {
-            0 => "target".to_owned(),
-            1 => "depth 1 (direct callers)".to_owned(),
-            d => format!("depth {d} (transitive callers)"),
-        };
-        println!("  [{label}]");
-        for e in items {
-            let i = e.idx as usize;
-            let file = relative_path(&graph.files[i]);
-            let name = &graph.names[i];
-            let kind = &graph.kinds[i];
-            let lines = format_lines_opt(graph.lines[i]);
-            let test_marker = if e.is_test { " [test]" } else { "" };
-            println!("    {file}{lines}  [{kind}] {name}{test_marker}");
-        }
-        println!();
-    }
-}
-
-pub(crate) fn build_json(graph: &CallGraph, entries: &[BfsEntry]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "_s".to_owned(),
-        serde_json::Value::String("f=file,l=lines,k=kind,n=name,d=depth,t=test".to_owned()),
-    );
-
-    let prod_count = entries.iter().filter(|e| e.depth > 0 && !e.is_test).count();
-    let test_count = entries.iter().filter(|e| e.depth > 0 && e.is_test).count();
-    map.insert("prod_callers".to_owned(), serde_json::json!(prod_count));
-    map.insert("test_callers".to_owned(), serde_json::json!(test_count));
-
-    let items: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            let i = e.idx as usize;
-            serde_json::json!({
-                "f": relative_path(&graph.files[i]),
-                "l": format_lines_str_opt(graph.lines[i]),
-                "k": &graph.kinds[i],
-                "n": &graph.names[i],
-                "d": e.depth,
-                "t": e.is_test,
-            })
-        })
-        .collect();
-
-    map.insert("results".to_owned(), serde_json::Value::Array(items));
-    serde_json::Value::Object(map)
 }
 

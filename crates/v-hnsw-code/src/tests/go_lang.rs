@@ -1,6 +1,6 @@
 //! Tests for Go code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, CodeNodeKind, GoCodeChunker};
+use crate::{CodeChunkConfig, CodeNodeKind, GoCodeChunker};
 use super::fixtures::SAMPLE_GO;
 
 

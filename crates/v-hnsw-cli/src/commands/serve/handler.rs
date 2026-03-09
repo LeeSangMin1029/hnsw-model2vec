@@ -273,7 +273,7 @@ fn ci_symbols(db: &Path, name: Option<&str>, kind: Option<&str>) -> Result<serde
 }
 
 fn ci_gather(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool) -> Result<serde_json::Value> {
-    use code_intel::gather::{bfs_directed, merge_entries, build_json, Direction};
+    use code_intel::gather::{bfs_directed, merge_entries, Direction};
 
     let graph = code_intel::context::load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
@@ -284,11 +284,11 @@ fn ci_gather(db: &Path, symbol: &str, depth: u32, k: usize, include_tests: bool)
     let reverse = bfs_directed(&graph, &seeds, depth, include_tests, Direction::Reverse);
     let mut entries = merge_entries(forward, reverse);
     entries.truncate(k);
-    Ok(build_json(&graph, &entries))
+    Ok(code_intel::build_bfs_json(&graph, &entries))
 }
 
 fn ci_impact(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result<serde_json::Value> {
-    use code_intel::impact::{bfs_reverse, build_json};
+    use code_intel::impact::bfs_reverse;
 
     let graph = code_intel::context::load_or_build_graph(db)?;
     let seeds = graph.resolve(symbol);
@@ -301,7 +301,7 @@ fn ci_impact(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result
     } else {
         all_entries.into_iter().filter(|e| !e.is_test).collect()
     };
-    Ok(build_json(&graph, &entries))
+    Ok(code_intel::build_bfs_json(&graph, &entries))
 }
 
 fn ci_trace(db: &Path, from: &str, to: &str) -> Result<serde_json::Value> {

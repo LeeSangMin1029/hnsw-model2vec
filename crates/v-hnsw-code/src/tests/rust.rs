@@ -1,6 +1,6 @@
 //! Tests for tree-sitter Rust code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, RustCodeChunker};
+use crate::{CodeChunkConfig, RustCodeChunker};
 use super::fixtures::SAMPLE_RUST;
 
 #[test]

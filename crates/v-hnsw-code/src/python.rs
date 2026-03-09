@@ -2,6 +2,19 @@ use super::{CodeChunk, CodeNodeKind, extract};
 
 super::define_chunker!(PythonCodeChunker);
 
+const PY_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
+    kind_map: &[
+        ("function_definition", CodeNodeKind::Function),
+        ("class_definition", CodeNodeKind::Class),
+    ],
+    extract_name_fn: extract::extract_name,
+    extract_vis_fn: extract::no_visibility,
+    extract_params_fn: extract::extract_py_params,
+    extract_return_fn: extract::extract_python_return_type,
+    extract_doc_fn: extract::extract_block_doc_comment_before,
+    method_kinds: &["function_definition"],
+};
+
 impl PythonCodeChunker {
     pub fn chunk(&self, source: &str) -> Vec<CodeChunk> {
         let mut parser = tree_sitter::Parser::new();
@@ -45,7 +58,11 @@ impl PythonCodeChunker {
                 child
             };
 
-            if let Some(chunk) = self.py_node_to_chunk(&actual_node, src, &imports, chunks.len()) {
+            if let Some(mut chunk) = extract::build_chunk(
+                &self.config, &PY_EXTRACTORS, &actual_node, src, &imports, chunks.len(),
+            ) {
+                // Python uses docstrings instead of preceding comments
+                chunk.doc_comment = extract::extract_python_docstring(&actual_node, src);
                 chunks.push(chunk);
             }
 
@@ -59,102 +76,10 @@ impl PythonCodeChunker {
         chunks
     }
 
-    fn py_node_to_chunk(
-        &self,
-        node: &tree_sitter::Node,
-        src: &[u8],
-        imports: &[String],
-        index: usize,
-    ) -> Option<CodeChunk> {
-        let kind = match node.kind() {
-            "function_definition" => CodeNodeKind::Function,
-            "class_definition" => CodeNodeKind::Class,
-            _ => return None,
-        };
-
-        let text = node.utf8_text(src).ok()?.to_owned();
-        let line_count = text.lines().count();
-        if line_count < self.config.min_lines {
-            return None;
-        }
-
-        let name = extract::extract_name(node, src);
-        let visibility = String::new();
-
-        let signature = if kind == CodeNodeKind::Function {
-            Some(extract::extract_function_signature(node, src))
-        } else {
-            None
-        };
-
-        let calls = if self.config.extract_calls && kind == CodeNodeKind::Function {
-            extract::extract_calls(node, src)
-        } else {
-            Vec::new()
-        };
-
-        let doc_comment = extract::extract_python_docstring(node, src);
-
-        let type_refs = extract::extract_type_refs(node, src);
-        let param_types = self.extract_py_params(node, src);
-        let return_type = extract::extract_python_return_type(node, src);
-
-        Some(CodeChunk {
-            text,
-            kind,
-            name,
-            signature,
-            doc_comment,
-            visibility,
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            chunk_index: index,
-            imports: imports.to_vec(),
-            calls,
-            type_refs,
-            param_types,
-            return_type, ast_hash: 0, body_hash: 0,
-        })
-    }
-
-    fn extract_py_params(&self, node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
-        let Some(params) = node.child_by_field_name("parameters") else {
-            return Vec::new();
-        };
-
-        let mut result = Vec::new();
-        let mut cursor = params.walk();
-
-        for child in params.children(&mut cursor) {
-            if child.kind() == "identifier" {
-                continue; // Skip bare identifiers like self/cls
-            }
-
-            if child.kind() == "typed_parameter" || child.kind() == "typed_default_parameter" {
-                let name = child
-                    .child_by_field_name("name")
-                    .or_else(|| {
-                        let mut c = child.walk();
-                        child.children(&mut c).find(|n| n.kind() == "identifier")
-                    })
-                    .and_then(|n| n.utf8_text(src).ok())
-                    .unwrap_or_default();
-                let ty = child
-                    .child_by_field_name("type")
-                    .and_then(|n| n.utf8_text(src).ok())
-                    .unwrap_or_default();
-
-                if !name.is_empty() && !ty.is_empty() && name != "self" && name != "cls" {
-                    result.push((name.to_owned(), ty.to_owned()));
-                }
-            }
-        }
-
-        result
-    }
-
+    /// Python method extraction with decorated_definition handling.
+    ///
+    /// Cannot use generic `extract_methods` because Python has `decorated_definition`
+    /// wrappers around methods and uses docstrings instead of preceding comments.
     fn extract_py_class_methods(
         &self,
         class_node: &tree_sitter::Node,
@@ -187,8 +112,7 @@ impl PythonCodeChunker {
                 Err(_) => continue,
             };
 
-            let line_count = text.lines().count();
-            if line_count < self.config.min_lines {
+            if text.lines().count() < self.config.min_lines {
                 continue;
             }
 
@@ -203,7 +127,7 @@ impl PythonCodeChunker {
             };
             let doc = extract::extract_python_docstring(&method_node, src);
             let type_refs = extract::extract_type_refs(&method_node, src);
-            let param_types = self.extract_py_params(&method_node, src);
+            let param_types = extract::extract_py_params(&method_node, src);
             let return_type = extract::extract_python_return_type(&method_node, src);
 
             chunks.push(CodeChunk {

@@ -16,7 +16,7 @@ use super::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 /// Identifier/literal *values* are ignored (normalized), so two functions
 /// that differ only in variable names produce the same hash (Type-2 clones).
 /// The hash captures: node kinds, child structure, and operator tokens.
-pub(crate) fn ast_structure_hash(node: &tree_sitter::Node, src: &[u8]) -> u64 {
+pub fn ast_structure_hash(node: &tree_sitter::Node, src: &[u8]) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     hash_node_recursive(node, src, &mut hasher);
     hasher.finish()
@@ -77,7 +77,7 @@ fn is_identifier_or_literal(kind: &str) -> bool {
 /// variable/function names but strips comments and normalizes whitespace.
 /// This catches truly duplicated logic — `fn len()` and `fn dim()` will
 /// differ because identifiers are preserved.
-pub(crate) fn body_hash(text: &str) -> u64 {
+pub fn body_hash(text: &str) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     for line in text.lines() {
         let trimmed = line.trim();
@@ -108,7 +108,7 @@ pub(crate) fn body_hash(text: &str) -> u64 {
 ///
 /// Strips comments, normalizes number literals to `$N`, keeps identifiers
 /// and keywords. Returns unigram tokens.
-pub(crate) fn code_tokens(text: &str) -> Vec<String> {
+pub fn code_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut in_block_comment = false;
 
@@ -160,7 +160,7 @@ fn tokenize_line(code: &str, tokens: &mut Vec<String>) {
 ///
 /// Returns `k` minimum hash values, one per hash function.
 /// Jaccard similarity ≈ fraction of matching positions between two signatures.
-pub(crate) fn minhash_signature(tokens: &[String], k: usize) -> Vec<u64> {
+pub fn minhash_signature(tokens: &[String], k: usize) -> Vec<u64> {
     // Build feature set: unigrams + bigrams for sequence sensitivity
     let n_features = tokens.len() + tokens.len().saturating_sub(1);
     let mut features = Vec::with_capacity(n_features);
@@ -194,7 +194,7 @@ pub(crate) fn minhash_signature(tokens: &[String], k: usize) -> Vec<u64> {
 }
 
 /// Estimate Jaccard similarity from two MinHash signatures.
-pub(crate) fn jaccard_from_minhash(a: &[u64], b: &[u64]) -> f64 {
+pub fn jaccard_from_minhash(a: &[u64], b: &[u64]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -203,7 +203,7 @@ pub(crate) fn jaccard_from_minhash(a: &[u64], b: &[u64]) -> f64 {
 }
 
 /// Encode MinHash signature as compact hex string.
-pub(crate) fn minhash_to_hex(sig: &[u64]) -> String {
+pub fn minhash_to_hex(sig: &[u64]) -> String {
     let mut hex = String::with_capacity(sig.len() * 16);
     for h in sig {
         use std::fmt::Write;
@@ -213,7 +213,7 @@ pub(crate) fn minhash_to_hex(sig: &[u64]) -> String {
 }
 
 /// Decode MinHash signature from hex string.
-pub(crate) fn minhash_from_hex(hex: &str) -> Option<Vec<u64>> {
+pub fn minhash_from_hex(hex: &str) -> Option<Vec<u64>> {
     if hex.len() % 16 != 0 {
         return None;
     }
@@ -227,10 +227,10 @@ pub(crate) fn minhash_from_hex(hex: &str) -> Option<Vec<u64>> {
 }
 
 /// Number of MinHash functions to use.
-pub(crate) const MINHASH_K: usize = 64;
+pub const MINHASH_K: usize = 64;
 
 /// Extract the symbol name from a node.
-pub(crate) fn extract_name(node: &tree_sitter::Node, src: &[u8]) -> String {
+pub fn extract_name(node: &tree_sitter::Node, src: &[u8]) -> String {
     // Most items have a `name` field.
     if let Some(name_node) = node.child_by_field_name("name") {
         return name_node.utf8_text(src).unwrap_or_default().to_owned();
@@ -254,7 +254,7 @@ pub(crate) fn extract_name(node: &tree_sitter::Node, src: &[u8]) -> String {
 }
 
 /// Extract visibility modifier (`pub`, `pub(crate)`, etc.).
-pub(crate) fn extract_visibility(node: &tree_sitter::Node, src: &[u8]) -> String {
+pub fn extract_visibility(node: &tree_sitter::Node, src: &[u8]) -> String {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "visibility_modifier" {
@@ -265,7 +265,7 @@ pub(crate) fn extract_visibility(node: &tree_sitter::Node, src: &[u8]) -> String
 }
 
 /// Extract function signature (everything before the body block).
-pub(crate) fn extract_function_signature(node: &tree_sitter::Node, src: &[u8]) -> String {
+pub fn extract_function_signature(node: &tree_sitter::Node, src: &[u8]) -> String {
     if let Some(body) = node.child_by_field_name("body") {
         let sig_start = node.start_byte();
         let sig_end = body.start_byte();
@@ -278,7 +278,7 @@ pub(crate) fn extract_function_signature(node: &tree_sitter::Node, src: &[u8]) -
 }
 
 /// Extract all `use` declarations from the root node.
-pub(crate) fn extract_imports(root: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
+pub fn extract_imports(root: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
     let mut imports = Vec::new();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
@@ -291,7 +291,7 @@ pub(crate) fn extract_imports(root: &tree_sitter::Node, src: &[u8]) -> Vec<Strin
 }
 
 /// Extract function call names from a node's subtree.
-pub(crate) fn extract_calls(node: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
+pub fn extract_calls(node: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
     let mut calls = Vec::new();
     walk_for_calls(node, src, &mut calls);
     calls.sort();
@@ -305,7 +305,7 @@ pub(crate) fn extract_calls(node: &tree_sitter::Node, src: &[u8]) -> Vec<String>
 /// - `call_expression` (Rust, TypeScript, Go, C, C++)
 /// - `call` (Python)
 /// - `method_invocation` (Java)
-pub(crate) fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<String>) {
+pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<String>) {
     match node.kind() {
         "call_expression" => {
             if let Some(func) = node.child_by_field_name("function")
@@ -342,7 +342,7 @@ pub(crate) fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut V
 }
 
 /// Extract doc comments (`///` or `//!`) preceding a node.
-pub(crate) fn extract_doc_comment_before(
+pub fn extract_doc_comment_before(
     root: &tree_sitter::Node,
     target: &tree_sitter::Node,
     src: &[u8],
@@ -380,7 +380,7 @@ pub(crate) fn extract_doc_comment_before(
 /// Recursively collect all `type_identifier` node texts from a subtree.
 ///
 /// Returns deduplicated, sorted type names referenced in the node.
-pub(crate) fn extract_type_refs(node: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
+pub fn extract_type_refs(node: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
     let mut refs = Vec::new();
     walk_for_type_ids(node, src, &mut refs);
     refs.sort();
@@ -404,7 +404,7 @@ fn walk_for_type_ids(node: &tree_sitter::Node, src: &[u8], refs: &mut Vec<String
 ///
 /// For each parameter, extracts the `pattern` (name) and `type` (type text).
 /// Skips `self` parameters.
-pub(crate) fn extract_param_types(
+pub fn extract_param_types(
     node: &tree_sitter::Node,
     src: &[u8],
 ) -> Vec<(String, String)> {
@@ -438,7 +438,7 @@ pub(crate) fn extract_param_types(
 }
 
 /// Extract the return type string from a function's `return_type` field.
-pub(crate) fn extract_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub fn extract_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
     let ret = node.child_by_field_name("return_type")?;
 
     // return_type is `-> Type`; get the type child (skip `->` token)
@@ -459,7 +459,7 @@ pub(crate) fn extract_return_type(node: &tree_sitter::Node, src: &[u8]) -> Optio
 ///
 /// Navigates the declarator chain (function_declarator, pointer_declarator)
 /// to find the identifier.
-pub(crate) fn extract_c_func_name(node: &tree_sitter::Node, src: &[u8]) -> String {
+pub fn extract_c_func_name(node: &tree_sitter::Node, src: &[u8]) -> String {
     if let Some(declarator) = node.child_by_field_name("declarator") {
         return find_func_name_in_declarator(&declarator, src);
     }
@@ -487,7 +487,7 @@ fn find_func_name_in_declarator(node: &tree_sitter::Node, src: &[u8]) -> String 
 
 /// Extract block-style doc comments (/** ... */) preceding a node.
 /// Used by TypeScript, Java, C, C++.
-pub(crate) fn extract_block_doc_comment_before(
+pub fn extract_block_doc_comment_before(
     root: &tree_sitter::Node,
     target: &tree_sitter::Node,
     src: &[u8],
@@ -530,7 +530,7 @@ pub(crate) fn extract_block_doc_comment_before(
 }
 
 /// Extract Go-style doc comments (// lines preceding a node).
-pub(crate) fn extract_go_doc_comment_before(
+pub fn extract_go_doc_comment_before(
     root: &tree_sitter::Node,
     target: &tree_sitter::Node,
     src: &[u8],
@@ -563,7 +563,7 @@ pub(crate) fn extract_go_doc_comment_before(
 }
 
 /// Extract Python docstring from the first statement in a function/class body.
-pub(crate) fn extract_python_docstring(
+pub fn extract_python_docstring(
     node: &tree_sitter::Node,
     src: &[u8],
 ) -> Option<String> {
@@ -597,7 +597,7 @@ pub(crate) fn extract_python_docstring(
 }
 
 /// Extract imports generically by node kind name(s).
-pub(crate) fn extract_imports_by_kind(
+pub fn extract_imports_by_kind(
     root: &tree_sitter::Node,
     src: &[u8],
     import_kinds: &[&str],
@@ -615,7 +615,7 @@ pub(crate) fn extract_imports_by_kind(
 }
 
 /// Extract visibility from Java-style modifiers (public/private/protected).
-pub(crate) fn extract_java_visibility(node: &tree_sitter::Node, src: &[u8]) -> String {
+pub fn extract_java_visibility(node: &tree_sitter::Node, src: &[u8]) -> String {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "modifiers" {
@@ -634,7 +634,7 @@ pub(crate) fn extract_java_visibility(node: &tree_sitter::Node, src: &[u8]) -> S
 }
 
 /// Check if a Go name is exported (starts with uppercase).
-pub(crate) fn extract_go_visibility(name: &str) -> String {
+pub fn extract_go_visibility(name: &str) -> String {
     if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
         "pub".to_owned()
     } else {
@@ -643,7 +643,7 @@ pub(crate) fn extract_go_visibility(name: &str) -> String {
 }
 
 /// Extract return type from a TypeScript type annotation.
-pub(crate) fn extract_ts_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub fn extract_ts_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("return_type")
         .and_then(|n| {
             let mut cursor = n.walk();
@@ -659,92 +659,23 @@ pub(crate) fn extract_ts_return_type(node: &tree_sitter::Node, src: &[u8]) -> Op
 }
 
 /// Extract return type from Python type annotation ("-> Type").
-pub(crate) fn extract_python_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub fn extract_python_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("return_type")
         .and_then(|n| n.utf8_text(src).ok())
         .map(|s| s.to_owned())
 }
 
 /// Extract Go function return type(s).
-pub(crate) fn extract_go_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub fn extract_go_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("result")
         .and_then(|n| n.utf8_text(src).ok())
         .map(|s| s.to_owned())
 }
 
-/// Extract individual methods from impl/trait body as separate chunks.
-pub(crate) fn extract_body_methods(
-    config: &CodeChunkConfig,
-    parent_node: &tree_sitter::Node,
-    src: &[u8],
-    imports: &[String],
-    parent_name: &str,
-    chunks: &mut Vec<CodeChunk>,
-) {
-    let Some(body) = parent_node.child_by_field_name("body") else {
-        return;
-    };
-
-    let mut cursor = body.walk();
-    for child in body.children(&mut cursor) {
-        if child.kind() != "function_item" {
-            continue;
-        }
-
-        let text = match child.utf8_text(src) {
-            Ok(t) => t.to_owned(),
-            Err(_) => continue,
-        };
-
-        let line_count = text.lines().count();
-        if line_count < config.min_lines {
-            continue;
-        }
-
-        let method_name = extract_name(&child, src);
-        let full_name = if parent_name.is_empty() {
-            method_name
-        } else {
-            format!("{parent_name}::{method_name}")
-        };
-
-        let visibility = extract_visibility(&child, src);
-        let signature = extract_function_signature(&child, src);
-        let calls = if config.extract_calls {
-            extract_calls(&child, src)
-        } else {
-            Vec::new()
-        };
-        let doc = extract_doc_comment_before(&body, &child, src);
-        let type_refs = extract_type_refs(&child, src);
-        let param_types = extract_param_types(&child, src);
-        let return_type = extract_return_type(&child, src);
-
-        chunks.push(CodeChunk {
-            text,
-            kind: CodeNodeKind::Function,
-            name: full_name,
-            signature: Some(signature),
-            doc_comment: doc,
-            visibility,
-            start_line: child.start_position().row,
-            end_line: child.end_position().row,
-            start_byte: child.start_byte(),
-            end_byte: child.end_byte(),
-            chunk_index: chunks.len(),
-            imports: imports.to_vec(),
-            calls,
-            type_refs,
-            param_types,
-            return_type, ast_hash: 0, body_hash: 0,
-        });
-    }
-}
-
 /// Build a `CodeChunk` for a simple named type declaration (struct/enum).
 ///
 /// Shared by C and C++ chunkers for `struct_specifier` and `enum_specifier`.
-pub(crate) fn simple_type_chunk(
+pub fn simple_type_chunk(
     node: &tree_sitter::Node,
     src: &[u8],
     kind: CodeNodeKind,
@@ -786,4 +717,417 @@ pub(crate) fn simple_type_chunk(
         ast_hash: 0,
         body_hash: 0,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Language-agnostic chunk builders (shared by all chunkers)
+// ---------------------------------------------------------------------------
+
+/// Language-specific extraction callbacks.
+///
+/// Each chunker defines a `const` instance mapping tree-sitter node kinds
+/// to `CodeNodeKind` and providing extraction functions for name, visibility,
+/// params, return type, and doc comments.
+pub struct LangExtractors {
+    /// `(tree-sitter node kind, CodeNodeKind)` pairs for top-level nodes.
+    pub kind_map: &'static [(&'static str, CodeNodeKind)],
+    /// Extract symbol name from a node.
+    pub extract_name_fn: fn(&tree_sitter::Node, &[u8]) -> String,
+    /// Extract visibility string (e.g. `"pub"`, `"export"`, `""`).
+    pub extract_vis_fn: fn(&tree_sitter::Node, &[u8]) -> String,
+    /// Extract parameter name-type pairs.
+    pub extract_params_fn: fn(&tree_sitter::Node, &[u8]) -> Vec<(String, String)>,
+    /// Extract return type.
+    pub extract_return_fn: fn(&tree_sitter::Node, &[u8]) -> Option<String>,
+    /// Extract doc comment given (parent, child, src).
+    pub extract_doc_fn: fn(&tree_sitter::Node, &tree_sitter::Node, &[u8]) -> Option<String>,
+    /// Node kinds considered methods inside a class/impl body.
+    pub method_kinds: &'static [&'static str],
+}
+
+/// Build a `CodeChunk` for a function/type node using language-specific extractors.
+pub fn build_chunk(
+    config: &CodeChunkConfig,
+    lang: &LangExtractors,
+    node: &tree_sitter::Node,
+    src: &[u8],
+    imports: &[String],
+    index: usize,
+) -> Option<CodeChunk> {
+    let kind = lang
+        .kind_map
+        .iter()
+        .find(|(k, _)| *k == node.kind())
+        .map(|(_, v)| *v)?;
+
+    let text = node.utf8_text(src).ok()?.to_owned();
+    if text.lines().count() < config.min_lines {
+        return None;
+    }
+
+    let name = (lang.extract_name_fn)(node, src);
+    let visibility = (lang.extract_vis_fn)(node, src);
+
+    let is_func = kind == CodeNodeKind::Function;
+    let signature = if is_func {
+        Some(extract_function_signature(node, src))
+    } else {
+        None
+    };
+    let calls = if config.extract_calls && is_func {
+        extract_calls(node, src)
+    } else {
+        Vec::new()
+    };
+    let type_refs = extract_type_refs(node, src);
+    let param_types = (lang.extract_params_fn)(node, src);
+    let return_type = (lang.extract_return_fn)(node, src);
+
+    Some(CodeChunk {
+        text,
+        kind,
+        name,
+        signature,
+        doc_comment: None, // filled by caller
+        visibility,
+        start_line: node.start_position().row,
+        end_line: node.end_position().row,
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+        chunk_index: index,
+        imports: imports.to_vec(),
+        calls,
+        type_refs,
+        param_types,
+        return_type,
+        ast_hash: 0,
+        body_hash: 0,
+    })
+}
+
+/// Extract methods from a class/impl body using language-specific extractors.
+pub fn extract_methods(
+    config: &CodeChunkConfig,
+    lang: &LangExtractors,
+    parent_node: &tree_sitter::Node,
+    src: &[u8],
+    imports: &[String],
+    parent_name: &str,
+    chunks: &mut Vec<CodeChunk>,
+) {
+    let Some(body) = parent_node.child_by_field_name("body") else {
+        return;
+    };
+
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if !lang.method_kinds.contains(&child.kind()) {
+            continue;
+        }
+
+        let text = match child.utf8_text(src) {
+            Ok(t) => t.to_owned(),
+            Err(_) => continue,
+        };
+
+        if text.lines().count() < config.min_lines {
+            continue;
+        }
+
+        let method_name = (lang.extract_name_fn)(&child, src);
+        let full_name = if parent_name.is_empty() {
+            method_name
+        } else {
+            format!("{parent_name}::{method_name}")
+        };
+
+        let visibility = (lang.extract_vis_fn)(&child, src);
+        let signature = extract_function_signature(&child, src);
+        let calls = if config.extract_calls {
+            extract_calls(&child, src)
+        } else {
+            Vec::new()
+        };
+        let doc = (lang.extract_doc_fn)(&body, &child, src);
+        let type_refs = extract_type_refs(&child, src);
+        let param_types = (lang.extract_params_fn)(&child, src);
+        let return_type = (lang.extract_return_fn)(&child, src);
+
+        chunks.push(CodeChunk {
+            text,
+            kind: CodeNodeKind::Function,
+            name: full_name,
+            signature: Some(signature),
+            doc_comment: doc,
+            visibility,
+            start_line: child.start_position().row,
+            end_line: child.end_position().row,
+            start_byte: child.start_byte(),
+            end_byte: child.end_byte(),
+            chunk_index: chunks.len(),
+            imports: imports.to_vec(),
+            calls,
+            type_refs,
+            param_types,
+            return_type,
+            ast_hash: 0,
+            body_hash: 0,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C/C++ shared helpers (moved from c_lang.rs / cpp.rs)
+// ---------------------------------------------------------------------------
+
+/// Extract visibility from C storage class specifier (`static`).
+pub fn extract_c_visibility(node: &tree_sitter::Node, src: &[u8]) -> String {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "storage_class_specifier"
+            && let Ok(text) = child.utf8_text(src)
+            && text == "static"
+        {
+            return "static".to_owned();
+        }
+    }
+    String::new()
+}
+
+/// Extract C/C++ parameter name-type pairs from a function_definition node.
+pub fn extract_c_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
+    let Some(declarator) = node.child_by_field_name("declarator") else {
+        return Vec::new();
+    };
+    let func_decl = if declarator.kind() == "function_declarator" {
+        declarator
+    } else {
+        let mut cursor = declarator.walk();
+        match declarator
+            .children(&mut cursor)
+            .find(|c| c.kind() == "function_declarator")
+        {
+            Some(fd) => fd,
+            None => return Vec::new(),
+        }
+    };
+
+    let Some(params) = func_decl.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut cursor = params.walk();
+
+    for child in params.children(&mut cursor) {
+        if child.kind() != "parameter_declaration" {
+            continue;
+        }
+
+        let ty = child
+            .child_by_field_name("type")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or_default();
+        let name = child
+            .child_by_field_name("declarator")
+            .and_then(|n| {
+                if n.kind() == "identifier" {
+                    n.utf8_text(src).ok()
+                } else {
+                    let mut c = n.walk();
+                    n.children(&mut c)
+                        .find(|ch| ch.kind() == "identifier")
+                        .and_then(|ch| ch.utf8_text(src).ok())
+                }
+            })
+            .unwrap_or_default();
+
+        if !name.is_empty() && !ty.is_empty() {
+            result.push((name.to_owned(), ty.to_owned()));
+        }
+    }
+
+    result
+}
+
+/// Extract return type from C/C++ function_definition (child field "type").
+pub fn extract_c_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    node.child_by_field_name("type")
+        .and_then(|n| n.utf8_text(src).ok())
+        .map(|s| s.to_owned())
+}
+
+/// No visibility (returns empty string). Used for languages without visibility modifiers.
+pub fn no_visibility(_node: &tree_sitter::Node, _src: &[u8]) -> String {
+    String::new()
+}
+
+/// Go visibility wrapper for `LangExtractors` fn pointer (extracts name first).
+pub fn extract_go_visibility_from_node(node: &tree_sitter::Node, src: &[u8]) -> String {
+    let name = extract_name(node, src);
+    extract_go_visibility(&name)
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript param extraction (moved from typescript.rs)
+// ---------------------------------------------------------------------------
+
+/// Extract TypeScript parameter name-type pairs.
+pub fn extract_ts_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
+    let Some(params) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut cursor = params.walk();
+
+    for child in params.children(&mut cursor) {
+        if child.kind() != "required_parameter" && child.kind() != "optional_parameter" {
+            continue;
+        }
+
+        let name = child
+            .child_by_field_name("pattern")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or_default();
+        let ty = child
+            .child_by_field_name("type")
+            .and_then(|n| {
+                let mut c = n.walk();
+                for inner in n.children(&mut c) {
+                    if inner.kind() != ":" {
+                        return inner.utf8_text(src).ok();
+                    }
+                }
+                n.utf8_text(src).ok()
+            })
+            .unwrap_or_default();
+
+        if !name.is_empty() && !ty.is_empty() {
+            result.push((name.to_owned(), ty.to_owned()));
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Java param extraction (moved from java.rs)
+// ---------------------------------------------------------------------------
+
+/// Extract Java parameter name-type pairs.
+pub fn extract_java_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
+    let Some(params) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut cursor = params.walk();
+
+    for child in params.children(&mut cursor) {
+        if child.kind() != "formal_parameter" && child.kind() != "spread_parameter" {
+            continue;
+        }
+
+        let ty = child
+            .child_by_field_name("type")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or_default();
+        let name = child
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or_default();
+
+        if !name.is_empty() && !ty.is_empty() {
+            result.push((name.to_owned(), ty.to_owned()));
+        }
+    }
+
+    result
+}
+
+/// Extract Java return type from a method's "type" field.
+pub fn extract_java_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    node.child_by_field_name("type")
+        .and_then(|n| n.utf8_text(src).ok())
+        .map(|s| s.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Go param extraction (moved from go_lang.rs)
+// ---------------------------------------------------------------------------
+
+/// Extract Go parameter name-type pairs.
+pub fn extract_go_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
+    let Some(params) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut cursor = params.walk();
+
+    for child in params.children(&mut cursor) {
+        if child.kind() != "parameter_declaration" {
+            continue;
+        }
+
+        let ty = child
+            .child_by_field_name("type")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or_default();
+
+        let mut name_cursor = child.walk();
+        for name_child in child.children(&mut name_cursor) {
+            if name_child.kind() == "identifier"
+                && let Ok(name) = name_child.utf8_text(src)
+                && !name.is_empty()
+                && !ty.is_empty()
+            {
+                result.push((name.to_owned(), ty.to_owned()));
+            }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Python param extraction (moved from python.rs)
+// ---------------------------------------------------------------------------
+
+/// Extract Python parameter name-type pairs (skips bare self/cls).
+pub fn extract_py_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
+    let Some(params) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut cursor = params.walk();
+
+    for child in params.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            continue; // Skip bare identifiers like self/cls
+        }
+
+        if child.kind() == "typed_parameter" || child.kind() == "typed_default_parameter" {
+            let name = child
+                .child_by_field_name("name")
+                .or_else(|| {
+                    let mut c = child.walk();
+                    child.children(&mut c).find(|n| n.kind() == "identifier")
+                })
+                .and_then(|n| n.utf8_text(src).ok())
+                .unwrap_or_default();
+            let ty = child
+                .child_by_field_name("type")
+                .and_then(|n| n.utf8_text(src).ok())
+                .unwrap_or_default();
+
+            if !name.is_empty() && !ty.is_empty() && name != "self" && name != "cls" {
+                result.push((name.to_owned(), ty.to_owned()));
+            }
+        }
+    }
+
+    result
 }

@@ -1,6 +1,6 @@
 //! Tests for TypeScript code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, CodeNodeKind, TypeScriptCodeChunker};
+use crate::{CodeChunkConfig, CodeNodeKind, TypeScriptCodeChunker};
 use super::fixtures::SAMPLE_TS;
 
 

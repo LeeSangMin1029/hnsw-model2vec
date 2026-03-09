@@ -1,4 +1,4 @@
-//! Tree-sitter based code chunker for Rust source files.
+//! Tree-sitter based multi-language code chunker library.
 //!
 //! Extracts function/struct/impl/trait/enum definitions as semantic chunks
 //! with metadata (imports, calls, visibility) for vector database indexing.
@@ -7,7 +7,7 @@
 //! with the same `chunk()` -> `Vec<CodeChunk>` interface, using the
 //! appropriate tree-sitter grammar crate.
 
-pub(crate) mod extract;
+pub mod extract;
 mod rust;
 mod typescript;
 mod python;
@@ -377,4 +377,3 @@ fn fill_ast_hashes(ext: &str, source: &str, chunks: &mut [CodeChunk]) {
         chunk.body_hash = extract::body_hash(&chunk.text);
     }
 }
-

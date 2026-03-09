@@ -1,6 +1,6 @@
 //! Tests for C++ code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, CppCodeChunker};
+use crate::{CodeChunkConfig, CppCodeChunker};
 use super::fixtures::SAMPLE_CPP;
 
 #[test]
@@ -116,7 +116,7 @@ fn cpp_struct_kind_is_struct() {
     let chunker = CppCodeChunker::new(CodeChunkConfig::default());
     let chunks = chunker.chunk(SAMPLE_CPP);
     let s = find_chunk!(chunks, "EdgeWeight");
-    assert_eq!(s.kind, crate::chunk_code::CodeNodeKind::Struct);
+    assert_eq!(s.kind, crate::CodeNodeKind::Struct);
 }
 
 #[test]
@@ -124,6 +124,6 @@ fn cpp_enum_class_kind_is_enum() {
     let chunker = CppCodeChunker::new(CodeChunkConfig::default());
     let chunks = chunker.chunk(SAMPLE_CPP);
     let e = find_chunk!(chunks, "NodeType");
-    assert_eq!(e.kind, crate::chunk_code::CodeNodeKind::Enum);
+    assert_eq!(e.kind, crate::CodeNodeKind::Enum);
 }
 

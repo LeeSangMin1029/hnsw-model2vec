@@ -1,6 +1,6 @@
 //! Unit tests for `chunk_code::extract` helper functions.
 
-use crate::chunk_code::extract;
+use crate::extract;
 
 // ---------------------------------------------------------------------------
 // Helpers

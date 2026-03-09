@@ -2,6 +2,19 @@ use super::{CodeChunk, CodeNodeKind, extract};
 
 super::define_chunker!(GoCodeChunker);
 
+const GO_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
+    kind_map: &[
+        ("function_declaration", CodeNodeKind::Function),
+        ("method_declaration", CodeNodeKind::Function),
+    ],
+    extract_name_fn: extract::extract_name,
+    extract_vis_fn: extract::extract_go_visibility_from_node,
+    extract_params_fn: extract::extract_go_params,
+    extract_return_fn: extract::extract_go_return_type,
+    extract_doc_fn: extract::extract_go_doc_comment_before,
+    method_kinds: &[],
+};
+
 impl GoCodeChunker {
     pub fn chunk(&self, source: &str) -> Vec<CodeChunk> {
         let mut parser = tree_sitter::Parser::new();
@@ -31,12 +44,15 @@ impl GoCodeChunker {
 
             match child.kind() {
                 "function_declaration" => {
-                    if let Some(mut chunk) = self.go_func_to_chunk(&child, src, &imports, chunks.len(), None) {
+                    if let Some(mut chunk) = extract::build_chunk(
+                        &self.config, &GO_EXTRACTORS, &child, src, &imports, chunks.len(),
+                    ) {
                         chunk.doc_comment = doc;
                         chunks.push(chunk);
                     }
                 }
                 "method_declaration" => {
+                    // Extract receiver type for qualified name (e.g., `Server::Start`)
                     let receiver_type = child.child_by_field_name("receiver")
                         .and_then(|r| {
                             let mut c = r.walk();
@@ -52,7 +68,14 @@ impl GoCodeChunker {
                             None
                         });
 
-                    if let Some(mut chunk) = self.go_func_to_chunk(&child, src, &imports, chunks.len(), receiver_type.as_deref()) {
+                    if let Some(mut chunk) = extract::build_chunk(
+                        &self.config, &GO_EXTRACTORS, &child, src, &imports, chunks.len(),
+                    ) {
+                        // Override name to include receiver type
+                        if let Some(recv) = &receiver_type {
+                            let raw_name = extract::extract_name(&child, src);
+                            chunk.name = format!("{recv}::{raw_name}");
+                        }
                         chunk.doc_comment = doc;
                         chunks.push(chunk);
                     }
@@ -65,93 +88,6 @@ impl GoCodeChunker {
         }
 
         chunks
-    }
-
-    fn go_func_to_chunk(
-        &self,
-        node: &tree_sitter::Node,
-        src: &[u8],
-        imports: &[String],
-        index: usize,
-        receiver_type: Option<&str>,
-    ) -> Option<CodeChunk> {
-        let text = node.utf8_text(src).ok()?.to_owned();
-        let line_count = text.lines().count();
-        if line_count < self.config.min_lines {
-            return None;
-        }
-
-        let raw_name = extract::extract_name(node, src);
-        let name = if let Some(recv) = receiver_type {
-            format!("{recv}::{raw_name}")
-        } else {
-            raw_name.clone()
-        };
-
-        let base_name = if receiver_type.is_some() { &raw_name } else { &name };
-        let visibility = extract::extract_go_visibility(base_name);
-        let signature = extract::extract_function_signature(node, src);
-        let calls = if self.config.extract_calls {
-            extract::extract_calls(node, src)
-        } else {
-            Vec::new()
-        };
-
-        let type_refs = extract::extract_type_refs(node, src);
-        let param_types = self.extract_go_params(node, src);
-        let return_type = extract::extract_go_return_type(node, src);
-
-        Some(CodeChunk {
-            text,
-            kind: CodeNodeKind::Function,
-            name,
-            signature: Some(signature),
-            doc_comment: None,
-            visibility,
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            chunk_index: index,
-            imports: imports.to_vec(),
-            calls,
-            type_refs,
-            param_types,
-            return_type, ast_hash: 0, body_hash: 0,
-        })
-    }
-
-    fn extract_go_params(&self, node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
-        let Some(params) = node.child_by_field_name("parameters") else {
-            return Vec::new();
-        };
-
-        let mut result = Vec::new();
-        let mut cursor = params.walk();
-
-        for child in params.children(&mut cursor) {
-            if child.kind() != "parameter_declaration" {
-                continue;
-            }
-
-            let ty = child
-                .child_by_field_name("type")
-                .and_then(|n| n.utf8_text(src).ok())
-                .unwrap_or_default();
-
-            let mut name_cursor = child.walk();
-            for name_child in child.children(&mut name_cursor) {
-                if name_child.kind() == "identifier" {
-                    if let Ok(name) = name_child.utf8_text(src) {
-                        if !name.is_empty() && !ty.is_empty() {
-                            result.push((name.to_owned(), ty.to_owned()));
-                        }
-                    }
-                }
-            }
-        }
-
-        result
     }
 
     fn extract_go_type_decl(

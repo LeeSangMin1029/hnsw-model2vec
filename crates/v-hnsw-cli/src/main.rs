@@ -4,7 +4,7 @@
 //! Can run as both a daemon server and a direct CLI.
 
 pub mod chunk;
-pub mod chunk_code;
+pub use v_hnsw_code as chunk_code;
 mod cli;
 mod commands;
 pub mod error;

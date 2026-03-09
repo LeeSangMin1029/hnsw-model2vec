@@ -3246,6 +3246,21 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "ureq",
+ "v-hnsw-code",
+ "v-hnsw-core",
+ "v-hnsw-embed",
+ "v-hnsw-graph",
+ "v-hnsw-search",
+ "v-hnsw-storage",
+ "walkdir",
+]
+
+[[package]]
+name = "v-hnsw-code"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-cpp",
@@ -3254,13 +3269,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
- "ureq",
  "v-hnsw-core",
- "v-hnsw-embed",
- "v-hnsw-graph",
- "v-hnsw-search",
- "v-hnsw-storage",
- "walkdir",
 ]
 
 [[package]]

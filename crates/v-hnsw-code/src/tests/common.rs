@@ -1,6 +1,6 @@
 //! Cross-language validation, dispatcher, and extension registry tests.
 
-use crate::chunk_code::{
+use crate::{
     CodeChunkConfig, CodeChunk, is_supported_code_file, lang_for_extension,
     chunk_for_language,
     TypeScriptCodeChunker, PythonCodeChunker, GoCodeChunker, JavaCodeChunker,
@@ -253,7 +253,7 @@ fn h_extension_maps_to_c() {
 
 #[test]
 fn code_node_kind_as_str_exhaustive() {
-    use crate::chunk_code::CodeNodeKind;
+    use crate::CodeNodeKind;
     let kinds = [
         (CodeNodeKind::Function, "function"),
         (CodeNodeKind::Struct, "struct"),
@@ -275,7 +275,7 @@ fn code_node_kind_as_str_exhaustive() {
 
 #[test]
 fn embed_text_no_visibility_no_extra_space() {
-    use crate::chunk_code::{CodeChunk, CodeNodeKind};
+    use crate::{CodeChunk, CodeNodeKind};
     let chunk = CodeChunk {
         text: "fn foo() {}".to_owned(),
         kind: CodeNodeKind::Function,
@@ -304,7 +304,7 @@ fn embed_text_no_visibility_no_extra_space() {
 
 #[test]
 fn embed_text_with_visibility_prefix() {
-    use crate::chunk_code::{CodeChunk, CodeNodeKind};
+    use crate::{CodeChunk, CodeNodeKind};
     let chunk = CodeChunk {
         text: "pub fn bar() {}".to_owned(),
         kind: CodeNodeKind::Function,
@@ -332,7 +332,7 @@ fn embed_text_with_visibility_prefix() {
 
 #[test]
 fn custom_fields_empty_collections_omitted() {
-    use crate::chunk_code::{CodeChunk, CodeNodeKind};
+    use crate::{CodeChunk, CodeNodeKind};
     let chunk = CodeChunk {
         text: "fn foo() {}".to_owned(),
         kind: CodeNodeKind::Function,

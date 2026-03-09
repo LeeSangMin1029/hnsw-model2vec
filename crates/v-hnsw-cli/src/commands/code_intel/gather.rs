@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::graph::CallGraph;
-use super::{cached_json, relative_path, OutputFormat, format_lines_opt, format_lines_str_opt, HasIdx, bfs_generic, BfsDirection};
+use super::{cached_json, OutputFormat, HasIdx, bfs_generic, BfsDirection, BfsEntryExt, build_bfs_json, print_bfs_grouped};
 use super::context::load_or_build_graph;
 
 /// Unified BFS entry with direction and score.
@@ -26,6 +26,27 @@ pub(crate) struct GatherEntry {
 
 impl HasIdx for GatherEntry {
     fn idx(&self) -> u32 { self.idx }
+}
+
+impl BfsEntryExt for GatherEntry {
+    fn depth(&self) -> u32 { self.depth }
+
+    fn is_test(&self, graph: &super::graph::CallGraph) -> bool {
+        graph.is_test[self.idx as usize]
+    }
+
+    fn extra_json_fields(&self) -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            ("sc", serde_json::Value::String(format!("{:.2}", self.score))),
+            ("dir", serde_json::Value::String(self.direction.label().to_owned())),
+        ]
+    }
+
+    fn schema_suffix() -> &'static str { "sc=score,dir=direction" }
+
+    fn extra_text_suffix(&self) -> String {
+        format!("  ({}, score={:.2})", self.direction.label(), self.score)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -118,7 +139,7 @@ pub fn run_gather(
     entries.truncate(k);
 
     println!("Gather for \"{symbol}\" (depth={depth}, top {k}):\n");
-    print_gathered(&graph, &entries);
+    print_bfs_grouped(&graph, &entries);
 
     if detail {
         super::print_detail_annotations(&db, &graph, &entries);
@@ -136,64 +157,7 @@ fn compute_gather_json(db: &Path, symbol: &str, depth: u32, k: usize, include_te
     let mut entries = merge_entries(forward, reverse);
     entries.truncate(k);
 
-    let json = build_json(&graph, &entries);
+    let json = build_bfs_json(&graph, &entries);
     Ok(serde_json::to_string(&json)?)
-}
-
-// ── Output helpers ───────────────────────────────────────────────────────
-
-fn print_gathered(graph: &CallGraph, entries: &[GatherEntry]) {
-    let mut by_depth: BTreeMap<u32, Vec<&GatherEntry>> = BTreeMap::new();
-    for e in entries {
-        by_depth.entry(e.depth).or_default().push(e);
-    }
-
-    for (depth, items) in &by_depth {
-        let label = match *depth {
-            0 => "target".to_owned(),
-            1 => "depth 1 (direct)".to_owned(),
-            d => format!("depth {d}"),
-        };
-        println!("  [{label}]");
-        for e in items {
-            let i = e.idx as usize;
-            let file = relative_path(&graph.files[i]);
-            let name = &graph.names[i];
-            let kind = &graph.kinds[i];
-            let lines = format_lines_opt(graph.lines[i]);
-            let dir_tag = e.direction.label();
-            let test_marker = if graph.is_test[i] { " [test]" } else { "" };
-            println!("    {file}{lines}  [{kind}] {name}{test_marker}  ({dir_tag}, score={:.2})", e.score);
-        }
-        println!();
-    }
-}
-
-pub(crate) fn build_json(graph: &CallGraph, entries: &[GatherEntry]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "_s".to_owned(),
-        serde_json::Value::String("f=file,l=lines,k=kind,n=name,d=depth,sc=score,dir=direction,t=test".to_owned()),
-    );
-
-    let items: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            let i = e.idx as usize;
-            serde_json::json!({
-                "f": relative_path(&graph.files[i]),
-                "l": format_lines_str_opt(graph.lines[i]),
-                "k": &graph.kinds[i],
-                "n": &graph.names[i],
-                "d": e.depth,
-                "sc": format!("{:.2}", e.score),
-                "dir": e.direction.label(),
-                "t": graph.is_test[i],
-            })
-        })
-        .collect();
-
-    map.insert("results".to_owned(), serde_json::Value::Array(items));
-    serde_json::Value::Object(map)
 }
 

@@ -1,6 +1,6 @@
 //! Tests for C code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, CodeNodeKind, CCodeChunker};
+use crate::{CodeChunkConfig, CodeNodeKind, CCodeChunker};
 use super::fixtures::SAMPLE_C;
 
 #[test]

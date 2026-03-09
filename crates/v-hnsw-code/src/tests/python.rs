@@ -1,6 +1,6 @@
 //! Tests for Python code chunker.
 
-use crate::chunk_code::{CodeChunkConfig, CodeNodeKind, PythonCodeChunker};
+use crate::{CodeChunkConfig, CodeNodeKind, PythonCodeChunker};
 use super::fixtures::SAMPLE_PY;
 
 

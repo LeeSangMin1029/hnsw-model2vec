@@ -109,6 +109,9 @@ fn run_minhash(
         })
         .collect();
 
+    // Filter overlapping ranges in the same file (parent/child chunks)
+    pairs.retain(|p| !chunks_overlap(pstore, p.id_a, p.id_b));
+
     pairs.sort_unstable_by(|a, b| {
         b.similarity
             .partial_cmp(&a.similarity)
@@ -167,6 +170,31 @@ fn run_hash_groups(
         }
     }
 
+    // Remove overlapping chunks within each group (keep the larger span)
+    for ids in hash_groups.values_mut() {
+        if ids.len() > 1 {
+            let mut i = 0;
+            while i < ids.len() {
+                let mut j = i + 1;
+                while j < ids.len() {
+                    if chunks_overlap(pstore, ids[i], ids[j]) {
+                        // Keep the one with more lines, drop the other
+                        if chunk_lines(pstore, ids[i]) >= chunk_lines(pstore, ids[j]) {
+                            ids.swap_remove(j);
+                        } else {
+                            ids.swap_remove(i);
+                            j = i + 1; // restart inner loop for new ids[i]
+                            continue;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+
     let mut clone_groups: Vec<(u64, Vec<u64>)> = hash_groups
         .into_iter()
         .filter(|(_, ids)| ids.len() > 1)
@@ -203,17 +231,60 @@ fn print_groups_text(groups: &[(u64, Vec<u64>)], pstore: &impl PayloadStore, db:
         return;
     }
     println!("{} clone groups found:\n", groups.len());
-    for (i, (hash, ids)) in groups.iter().enumerate() {
-        println!(
-            "  Group {} ({} clones, hash={hash:016x}):",
-            i + 1,
-            ids.len()
-        );
-        for id in ids {
-            println!("    - {}", label(pstore, *id));
+
+    // Collect all labels and file paths
+    let all_labels: Vec<Vec<(usize, u64, ChunkLabel)>> = groups
+        .iter()
+        .enumerate()
+        .map(|(gi, (hash, ids))| {
+            ids.iter()
+                .map(|&id| (gi + 1, *hash, parse_label(pstore, id)))
+                .collect()
+        })
+        .collect();
+
+    // Gather all file paths for common-prefix stripping
+    let mut all_files: Vec<String> = all_labels
+        .iter()
+        .flat_map(|g| g.iter().map(|(_, _, cl)| cl.file.clone()))
+        .collect();
+    strip_common_prefix(&mut all_files);
+
+    // Re-assemble with stripped paths, grouped by file
+    let mut by_file: Vec<(String, Vec<(usize, u64, String)>)> = Vec::new();
+    let mut file_index: HashMap<String, usize> = HashMap::new();
+    let mut fi = 0;
+
+    for group in &all_labels {
+        for (group_num, hash, cl) in group {
+            let key = if all_files[fi].is_empty() {
+                "(unknown)".to_owned()
+            } else {
+                all_files[fi].clone()
+            };
+            fi += 1;
+            let idx = if let Some(&i) = file_index.get(&key) {
+                i
+            } else {
+                let i = by_file.len();
+                file_index.insert(key.clone(), i);
+                by_file.push((key, Vec::new()));
+                i
+            };
+            by_file[idx].1.push((*group_num, *hash, cl.name.clone()));
+        }
+    }
+
+    by_file.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    for (file, entries) in &by_file {
+        println!("  {} ({} clones)", file, entries.len());
+        for (group_num, hash, name) in entries {
+            println!("    G{group_num} [{hash:016x}]  {name}");
         }
         println!();
     }
+
     let db_name = db.file_name().and_then(|n| n.to_str()).unwrap_or("db");
     eprintln!("Tip: v-hnsw gather {db_name} <symbol> --depth 1  to inspect.");
 }
@@ -297,6 +368,9 @@ fn run_embedding(
         })
         .collect();
 
+    // Filter overlapping ranges in the same file (parent/child chunks)
+    pairs.retain(|p| !chunks_overlap(pstore, p.id_a, p.id_b));
+
     pairs.sort_unstable_by(|a, b| {
         b.similarity
             .partial_cmp(&a.similarity)
@@ -319,17 +393,70 @@ fn print_pairs_text(pairs: &[DupePair], pstore: &impl PayloadStore, db: &Path) {
         return;
     }
     println!("{} duplicate pairs found:\n", pairs.len());
+
+    // Collect all labels
+    let labels: Vec<(ChunkLabel, ChunkLabel)> = pairs
+        .iter()
+        .map(|p| (parse_label(pstore, p.id_a), parse_label(pstore, p.id_b)))
+        .collect();
+
+    // Gather all file paths for common-prefix stripping
+    let mut all_files: Vec<String> = labels
+        .iter()
+        .flat_map(|(a, b)| [a.file.clone(), b.file.clone()])
+        .collect();
+    strip_common_prefix(&mut all_files);
+
+    // Re-pair stripped paths (2 per pair: file_a, file_b)
+    let stripped: Vec<(&str, &str)> = all_files
+        .chunks_exact(2)
+        .map(|c| (c[0].as_str(), c[1].as_str()))
+        .collect();
+
+    // Group by file path of side A
+    let mut by_file: Vec<(String, Vec<(f32, String, String, String)>)> = Vec::new();
+    let mut file_index: HashMap<String, usize> = HashMap::new();
+
     for (i, p) in pairs.iter().enumerate() {
-        println!(
-            "  {: >3}. [{:.2}]  {} ↔ {}",
-            i + 1,
+        let (file_a, file_b) = stripped[i];
+        let key = if file_a.is_empty() {
+            "(unknown)".to_owned()
+        } else {
+            file_a.to_owned()
+        };
+        let idx = if let Some(&j) = file_index.get(&key) {
+            j
+        } else {
+            let j = by_file.len();
+            file_index.insert(key.clone(), j);
+            by_file.push((key, Vec::new()));
+            j
+        };
+        by_file[idx].1.push((
             p.similarity,
-            label(pstore, p.id_a),
-            label(pstore, p.id_b),
-        );
+            labels[i].0.name.clone(),
+            labels[i].1.name.clone(),
+            file_b.to_owned(),
+        ));
     }
+
+    // Sort groups by number of pairs descending
+    by_file.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+    for (file, entries) in &by_file {
+        println!("  {} ({} pairs)", file, entries.len());
+        for (sim, name_a, name_b, file_b) in entries {
+            if file_b.is_empty() {
+                println!("    [{sim:.2}]  {name_a} ↔ {name_b}");
+            } else {
+                println!("    [{sim:.2}]  {name_a} ↔ {name_b}  ({file_b})");
+            }
+        }
+        println!();
+    }
+
     let db_name = db.file_name().and_then(|n| n.to_str()).unwrap_or("db");
-    eprintln!("\nTip: v-hnsw gather {db_name} <symbol> --depth 1  to inspect.");
+    eprintln!("Tip: v-hnsw gather {db_name} <symbol> --depth 1  to inspect.");
 }
 
 fn print_pairs_json(pairs: &[DupePair], pstore: &impl PayloadStore) {
@@ -375,6 +502,32 @@ fn is_test_chunk(pstore: &impl PayloadStore, id: u64) -> bool {
     false
 }
 
+/// Check if two chunks overlap in the same file (parent/child relationship).
+fn chunks_overlap(pstore: &impl PayloadStore, id_a: u64, id_b: u64) -> bool {
+    let (Some(pa), Some(pb)) = (
+        pstore.get_payload(id_a).ok().flatten(),
+        pstore.get_payload(id_b).ok().flatten(),
+    ) else {
+        return false;
+    };
+    // Different files → no overlap
+    if pa.source != pb.source {
+        return false;
+    }
+    let (Some(PayloadValue::Integer(sa)), Some(PayloadValue::Integer(ea))) =
+        (pa.custom.get("start_line"), pa.custom.get("end_line"))
+    else {
+        return false;
+    };
+    let (Some(PayloadValue::Integer(sb)), Some(PayloadValue::Integer(eb))) =
+        (pb.custom.get("start_line"), pb.custom.get("end_line"))
+    else {
+        return false;
+    };
+    // Overlapping ranges: NOT (ea < sb || eb < sa)
+    *sa <= *eb && *sb <= *ea
+}
+
 /// Get the number of lines in a chunk from its custom fields.
 fn chunk_lines(pstore: &impl PayloadStore, id: u64) -> usize {
     let Some(payload) = pstore.get_payload(id).ok().flatten() else {
@@ -393,9 +546,64 @@ fn chunk_lines(pstore: &impl PayloadStore, id: u64) -> usize {
     lines
 }
 
-fn label(pstore: &impl PayloadStore, id: u64) -> String {
+/// Find the longest common directory prefix among file paths, then strip it.
+fn strip_common_prefix(paths: &mut [String]) {
+    let non_empty: Vec<&str> = paths.iter().filter(|p| !p.is_empty()).map(String::as_str).collect();
+    if non_empty.len() < 2 {
+        return;
+    }
+    // Normalize separators to '/'
+    for p in paths.iter_mut() {
+        *p = p.replace('\\', "/");
+    }
+    // Find common prefix up to last shared '/'
+    let first = paths.iter().find(|p| !p.is_empty()).cloned().unwrap_or_default();
+    let mut prefix_len = first.len();
+    for p in paths.iter().filter(|p| !p.is_empty()) {
+        prefix_len = prefix_len.min(
+            first.bytes()
+                .zip(p.bytes())
+                .take_while(|(a, b)| a == b)
+                .count(),
+        );
+    }
+    // Trim to last '/' boundary
+    if let Some(pos) = first[..prefix_len].rfind('/') {
+        prefix_len = pos + 1;
+    } else {
+        prefix_len = 0;
+    }
+    if prefix_len > 0 {
+        for p in paths.iter_mut() {
+            if p.len() >= prefix_len {
+                *p = p[prefix_len..].to_owned();
+            }
+        }
+    }
+}
+
+/// Parsed label with separated name and file path.
+struct ChunkLabel {
+    name: String,
+    file: String,
+}
+
+impl ChunkLabel {
+    fn display(&self) -> String {
+        if self.file.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}  ({})", self.name, self.file)
+        }
+    }
+}
+
+fn parse_label(pstore: &impl PayloadStore, id: u64) -> ChunkLabel {
     let Some(text) = pstore.get_text(id).ok().flatten() else {
-        return format!("id:{id}");
+        return ChunkLabel {
+            name: format!("id:{id}"),
+            file: String::new(),
+        };
     };
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
@@ -403,15 +611,17 @@ fn label(pstore: &impl PayloadStore, id: u64) -> String {
         .next()
         .unwrap_or("")
         .strip_prefix("File: ")
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_owned();
     let name = first
         .strip_prefix("[function] ")
         .or_else(|| first.strip_prefix("[impl] "))
         .or_else(|| first.strip_prefix("[struct] "))
-        .unwrap_or(first);
-    if file.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name}  ({file})")
-    }
+        .unwrap_or(first)
+        .to_owned();
+    ChunkLabel { name, file }
+}
+
+fn label(pstore: &impl PayloadStore, id: u64) -> String {
+    parse_label(pstore, id).display()
 }
