@@ -26,25 +26,17 @@ const RUST_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
 impl RustCodeChunker {
     /// Parse Rust source and extract semantic code chunks.
     pub fn chunk(&self, source: &str) -> Vec<CodeChunk> {
-        let mut parser = tree_sitter::Parser::new();
-        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        if parser.set_language(&language).is_err() {
-            return Vec::new();
-        }
-
-        let Some(tree) = parser.parse(source, None) else {
+        let Some(parsed) = extract::parse_source(
+            tree_sitter_rust::LANGUAGE.into(),
+            source,
+            self.config.extract_imports,
+            &["use_declaration"],
+        ) else {
             return Vec::new();
         };
-
-        let root = tree.root_node();
+        let root = parsed.tree.root_node();
         let src = source.as_bytes();
-
-        // File-level imports
-        let imports = if self.config.extract_imports {
-            extract::extract_imports(&root, src)
-        } else {
-            Vec::new()
-        };
+        let imports = parsed.imports;
 
         let mut chunks = Vec::new();
         let mut cursor = root.walk();

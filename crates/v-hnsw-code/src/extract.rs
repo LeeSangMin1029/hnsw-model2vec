@@ -8,6 +8,43 @@ use std::hash::{Hash, Hasher};
 use super::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 
 // ---------------------------------------------------------------------------
+// Common parse helper
+// ---------------------------------------------------------------------------
+
+/// Result of parsing source code with tree-sitter.
+pub struct ParsedSource {
+    /// The parsed syntax tree.
+    pub tree: tree_sitter::Tree,
+    /// File-level import statements (empty when import extraction is disabled).
+    pub imports: Vec<String>,
+}
+
+/// Parse source code with the given tree-sitter language and extract imports.
+///
+/// Returns `None` if the language cannot be set or parsing fails, allowing
+/// callers to return an empty `Vec` early.
+pub fn parse_source(
+    language: tree_sitter::Language,
+    source: &str,
+    extract_imports: bool,
+    import_kinds: &[&str],
+) -> Option<ParsedSource> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&language).is_err() {
+        return None;
+    }
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    let src = source.as_bytes();
+    let imports = if extract_imports {
+        extract_imports_by_kind(&root, src, import_kinds)
+    } else {
+        Vec::new()
+    };
+    Some(ParsedSource { tree, imports })
+}
+
+// ---------------------------------------------------------------------------
 // AST structural hash — for code clone detection
 // ---------------------------------------------------------------------------
 

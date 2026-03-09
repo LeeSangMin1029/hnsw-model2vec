@@ -14,24 +14,17 @@ const CPP_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
 
 impl CppCodeChunker {
     pub fn chunk(&self, source: &str) -> Vec<CodeChunk> {
-        let mut parser = tree_sitter::Parser::new();
-        let language: tree_sitter::Language = tree_sitter_cpp::LANGUAGE.into();
-        if parser.set_language(&language).is_err() {
-            return Vec::new();
-        }
-
-        let Some(tree) = parser.parse(source, None) else {
+        let Some(parsed) = extract::parse_source(
+            tree_sitter_cpp::LANGUAGE.into(),
+            source,
+            self.config.extract_imports,
+            &["preproc_include"],
+        ) else {
             return Vec::new();
         };
-
-        let root = tree.root_node();
+        let root = parsed.tree.root_node();
         let src = source.as_bytes();
-
-        let imports = if self.config.extract_imports {
-            extract::extract_imports_by_kind(&root, src, &["preproc_include"])
-        } else {
-            Vec::new()
-        };
+        let imports = parsed.imports;
 
         let mut chunks = Vec::new();
         let mut cursor = root.walk();
