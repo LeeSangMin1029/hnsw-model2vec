@@ -93,27 +93,12 @@ impl JavaCodeChunker {
         index: usize,
         kind: CodeNodeKind,
     ) -> Option<CodeChunk> {
-        let text = node.utf8_text(src).ok()?.to_owned();
-        let name = extract::extract_name(node, src);
-        let visibility = extract::extract_java_visibility(node, src);
-
-        Some(CodeChunk {
-            text,
-            kind,
-            name,
-            signature: None,
-            doc_comment: None,
-            visibility,
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            chunk_index: index,
-            imports: imports.to_vec(),
-            calls: Vec::new(),
-            type_refs: extract::extract_type_refs(node, src),
-            param_types: Vec::new(),
-            return_type: None, ast_hash: 0, body_hash: 0,
-        })
+        let mut chunk = extract::simple_type_chunk(
+            node, src, kind, None, imports, index, 0,
+        )?;
+        chunk.visibility = extract::extract_java_visibility(node, src);
+        // All Java type decls need type_refs (simple_type_chunk only extracts for Struct)
+        chunk.type_refs = extract::extract_type_refs(node, src);
+        Some(chunk)
     }
 }

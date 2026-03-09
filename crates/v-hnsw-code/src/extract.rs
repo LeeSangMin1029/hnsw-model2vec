@@ -279,15 +279,7 @@ pub fn extract_function_signature(node: &tree_sitter::Node, src: &[u8]) -> Strin
 
 /// Extract all `use` declarations from the root node.
 pub fn extract_imports(root: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
-    let mut imports = Vec::new();
-    let mut cursor = root.walk();
-    for child in root.children(&mut cursor) {
-        if child.kind() == "use_declaration"
-            && let Ok(text) = child.utf8_text(src) {
-                imports.push(text.to_owned());
-            }
-    }
-    imports
+    extract_imports_by_kind(root, src, &["use_declaration"])
 }
 
 /// Extract function call names from a node's subtree.
@@ -416,13 +408,16 @@ fn walk_for_type_ids(node: &tree_sitter::Node, src: &[u8], refs: &mut Vec<String
     }
 }
 
-/// Extract parameter name-type pairs from a function's `parameters` field.
+/// Generic helper: extract parameter name-type pairs from a node's `parameters` field.
 ///
-/// For each parameter, extracts the `pattern` (name) and `type` (type text).
-/// Skips `self` parameters.
-pub fn extract_param_types(
+/// For each child whose kind is in `param_kinds`, calls `extractor` to produce
+/// zero or more `(name, type)` pairs. This avoids duplicating the
+/// "get parameters → filter by kind → collect" boilerplate across languages.
+fn extract_params_generic(
     node: &tree_sitter::Node,
     src: &[u8],
+    param_kinds: &[&str],
+    extractor: impl Fn(&tree_sitter::Node, &[u8]) -> Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     let Some(params) = node.child_by_field_name("parameters") else {
         return Vec::new();
@@ -432,25 +427,51 @@ pub fn extract_param_types(
     let mut cursor = params.walk();
 
     for child in params.children(&mut cursor) {
-        if child.kind() != "parameter" {
+        if !param_kinds.contains(&child.kind()) {
             continue;
         }
-
-        let name = child
-            .child_by_field_name("pattern")
-            .and_then(|n| n.utf8_text(src).ok())
-            .unwrap_or_default();
-        let ty = child
-            .child_by_field_name("type")
-            .and_then(|n| n.utf8_text(src).ok())
-            .unwrap_or_default();
-
-        if !name.is_empty() && !ty.is_empty() {
-            result.push((name.to_owned(), ty.to_owned()));
-        }
+        result.extend(extractor(&child, src));
     }
 
     result
+}
+
+/// Helper: extract a single `(name, type)` pair via field names on a parameter node.
+///
+/// Returns a one-element vec on success, empty vec otherwise.
+fn field_name_type_pair(
+    child: &tree_sitter::Node,
+    src: &[u8],
+    name_field: &str,
+    type_field: &str,
+) -> Vec<(String, String)> {
+    let name = child
+        .child_by_field_name(name_field)
+        .and_then(|n| n.utf8_text(src).ok())
+        .unwrap_or_default();
+    let ty = child
+        .child_by_field_name(type_field)
+        .and_then(|n| n.utf8_text(src).ok())
+        .unwrap_or_default();
+
+    if !name.is_empty() && !ty.is_empty() {
+        vec![(name.to_owned(), ty.to_owned())]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Extract parameter name-type pairs from a function's `parameters` field.
+///
+/// For each parameter, extracts the `pattern` (name) and `type` (type text).
+/// Skips `self` parameters.
+pub fn extract_param_types(
+    node: &tree_sitter::Node,
+    src: &[u8],
+) -> Vec<(String, String)> {
+    extract_params_generic(node, src, &["parameter"], |child, s| {
+        field_name_type_pair(child, s, "pattern", "type")
+    })
 }
 
 /// Extract the return type string from a function's `return_type` field.
@@ -971,41 +992,36 @@ pub fn extract_go_visibility_from_node(node: &tree_sitter::Node, src: &[u8]) -> 
 
 /// Extract TypeScript parameter name-type pairs.
 pub fn extract_ts_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
-    let Some(params) = node.child_by_field_name("parameters") else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::new();
-    let mut cursor = params.walk();
-
-    for child in params.children(&mut cursor) {
-        if child.kind() != "required_parameter" && child.kind() != "optional_parameter" {
-            continue;
-        }
-
-        let name = child
-            .child_by_field_name("pattern")
-            .and_then(|n| n.utf8_text(src).ok())
-            .unwrap_or_default();
-        let ty = child
-            .child_by_field_name("type")
-            .and_then(|n| {
-                let mut c = n.walk();
-                for inner in n.children(&mut c) {
-                    if inner.kind() != ":" {
-                        return inner.utf8_text(src).ok();
+    extract_params_generic(
+        node,
+        src,
+        &["required_parameter", "optional_parameter"],
+        |child, s| {
+            let name = child
+                .child_by_field_name("pattern")
+                .and_then(|n| n.utf8_text(s).ok())
+                .unwrap_or_default();
+            // TS type annotation is `type: ": Type"` — skip the `:` token
+            let ty = child
+                .child_by_field_name("type")
+                .and_then(|n| {
+                    let mut c = n.walk();
+                    for inner in n.children(&mut c) {
+                        if inner.kind() != ":" {
+                            return inner.utf8_text(s).ok();
+                        }
                     }
-                }
-                n.utf8_text(src).ok()
-            })
-            .unwrap_or_default();
+                    n.utf8_text(s).ok()
+                })
+                .unwrap_or_default();
 
-        if !name.is_empty() && !ty.is_empty() {
-            result.push((name.to_owned(), ty.to_owned()));
-        }
-    }
-
-    result
+            if !name.is_empty() && !ty.is_empty() {
+                vec![(name.to_owned(), ty.to_owned())]
+            } else {
+                Vec::new()
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,33 +1030,12 @@ pub fn extract_ts_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, S
 
 /// Extract Java parameter name-type pairs.
 pub fn extract_java_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
-    let Some(params) = node.child_by_field_name("parameters") else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::new();
-    let mut cursor = params.walk();
-
-    for child in params.children(&mut cursor) {
-        if child.kind() != "formal_parameter" && child.kind() != "spread_parameter" {
-            continue;
-        }
-
-        let ty = child
-            .child_by_field_name("type")
-            .and_then(|n| n.utf8_text(src).ok())
-            .unwrap_or_default();
-        let name = child
-            .child_by_field_name("name")
-            .and_then(|n| n.utf8_text(src).ok())
-            .unwrap_or_default();
-
-        if !name.is_empty() && !ty.is_empty() {
-            result.push((name.to_owned(), ty.to_owned()));
-        }
-    }
-
-    result
+    extract_params_generic(
+        node,
+        src,
+        &["formal_parameter", "spread_parameter"],
+        |child, s| field_name_type_pair(child, s, "name", "type"),
+    )
 }
 
 /// Extract Java return type from a method's "type" field.
@@ -1054,36 +1049,26 @@ pub fn extract_java_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<
 
 /// Extract Go parameter name-type pairs.
 pub fn extract_go_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
-    let Some(params) = node.child_by_field_name("parameters") else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::new();
-    let mut cursor = params.walk();
-
-    for child in params.children(&mut cursor) {
-        if child.kind() != "parameter_declaration" {
-            continue;
-        }
-
+    extract_params_generic(node, src, &["parameter_declaration"], |child, s| {
         let ty = child
             .child_by_field_name("type")
-            .and_then(|n| n.utf8_text(src).ok())
+            .and_then(|n| n.utf8_text(s).ok())
             .unwrap_or_default();
 
+        // Go allows multiple names per parameter_declaration (e.g. `a, b int`)
+        let mut pairs = Vec::new();
         let mut name_cursor = child.walk();
         for name_child in child.children(&mut name_cursor) {
             if name_child.kind() == "identifier"
-                && let Ok(name) = name_child.utf8_text(src)
+                && let Ok(name) = name_child.utf8_text(s)
                 && !name.is_empty()
                 && !ty.is_empty()
             {
-                result.push((name.to_owned(), ty.to_owned()));
+                pairs.push((name.to_owned(), ty.to_owned()));
             }
         }
-    }
-
-    result
+        pairs
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,37 +1077,29 @@ pub fn extract_go_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, S
 
 /// Extract Python parameter name-type pairs (skips bare self/cls).
 pub fn extract_py_params(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
-    let Some(params) = node.child_by_field_name("parameters") else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::new();
-    let mut cursor = params.walk();
-
-    for child in params.children(&mut cursor) {
-        if child.kind() == "identifier" {
-            continue; // Skip bare identifiers like self/cls
-        }
-
-        if child.kind() == "typed_parameter" || child.kind() == "typed_default_parameter" {
+    extract_params_generic(
+        node,
+        src,
+        &["typed_parameter", "typed_default_parameter"],
+        |child, s| {
             let name = child
                 .child_by_field_name("name")
                 .or_else(|| {
                     let mut c = child.walk();
                     child.children(&mut c).find(|n| n.kind() == "identifier")
                 })
-                .and_then(|n| n.utf8_text(src).ok())
+                .and_then(|n| n.utf8_text(s).ok())
                 .unwrap_or_default();
             let ty = child
                 .child_by_field_name("type")
-                .and_then(|n| n.utf8_text(src).ok())
+                .and_then(|n| n.utf8_text(s).ok())
                 .unwrap_or_default();
 
             if !name.is_empty() && !ty.is_empty() && name != "self" && name != "cls" {
-                result.push((name.to_owned(), ty.to_owned()));
+                vec![(name.to_owned(), ty.to_owned())]
+            } else {
+                Vec::new()
             }
-        }
-    }
-
-    result
+        },
+    )
 }

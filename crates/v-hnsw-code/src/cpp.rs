@@ -86,29 +86,11 @@ impl CppCodeChunker {
         imports: &[String],
         index: usize,
     ) -> Option<CodeChunk> {
-        let text = node.utf8_text(src).ok()?.to_owned();
-        let name = extract::extract_name(node, src);
-        if name.is_empty() {
-            return None;
-        }
-
-        Some(CodeChunk {
-            text,
-            kind: CodeNodeKind::Class,
-            name,
-            signature: None,
-            doc_comment: None,
-            visibility: String::new(),
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            chunk_index: index,
-            imports: imports.to_vec(),
-            calls: Vec::new(),
-            type_refs: extract::extract_type_refs(node, src),
-            param_types: Vec::new(),
-            return_type: None, ast_hash: 0, body_hash: 0,
-        })
+        let mut chunk = extract::simple_type_chunk(
+            node, src, CodeNodeKind::Class, None, imports, index, 0,
+        )?;
+        // Class kind always needs type_refs (simple_type_chunk only extracts for Struct)
+        chunk.type_refs = extract::extract_type_refs(node, src);
+        Some(chunk)
     }
 }
