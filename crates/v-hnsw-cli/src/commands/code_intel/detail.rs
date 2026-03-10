@@ -7,7 +7,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-use super::reason::{
+use v_hnsw_intel::reason::{
     self, HistoryItem, ReasonEntry,
 };
 

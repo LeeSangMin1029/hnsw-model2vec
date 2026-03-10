@@ -6,6 +6,7 @@ members = [
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
     "crates/v-hnsw-code",
+    "crates/v-hnsw-intel",
     "crates/v-hnsw-cli",
 ]
 resolver = "2"
@@ -25,6 +26,7 @@ v-hnsw-storage = { path = "crates/v-hnsw-storage" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
 v-hnsw-code = { path = "crates/v-hnsw-code" }
+v-hnsw-intel = { path = "crates/v-hnsw-intel" }
 
 # Error handling
 thiserror = "2"

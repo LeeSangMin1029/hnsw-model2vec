@@ -90,9 +90,8 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
 }
 
 /// Normalize Windows backslashes and strip leading `.\` for display.
-pub(crate) fn normalize_path(p: &str) -> String {
+pub fn normalize_path(p: &str) -> String {
     let s = p.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
     s.to_owned()
 }
-

@@ -1,6 +1,4 @@
-use super::{CodeChunk, CodeNodeKind, extract};
-
-super::define_chunker!(RustCodeChunker);
+use super::{CodeNodeKind, extract};
 
 const RUST_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
     kind_map: &[
@@ -21,46 +19,9 @@ const RUST_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
     extract_return_fn: extract::extract_return_type,
     extract_doc_fn: extract::extract_doc_comment_before,
     method_kinds: &["function_item"],
+    type_chunk_kinds: &[],
+    method_parent_kinds: &["impl_item", "trait_item"],
+    wrapper_kind: None,
 };
 
-impl RustCodeChunker {
-    /// Parse Rust source and extract semantic code chunks.
-    pub fn chunk(&self, source: &str) -> Vec<CodeChunk> {
-        let Some(parsed) = extract::parse_source(
-            tree_sitter_rust::LANGUAGE.into(),
-            source,
-            self.config.extract_imports,
-            &["use_declaration"],
-        ) else {
-            return Vec::new();
-        };
-        let root = parsed.tree.root_node();
-        let src = source.as_bytes();
-        let imports = parsed.imports;
-
-        let mut chunks = Vec::new();
-        let mut cursor = root.walk();
-
-        for child in root.children(&mut cursor) {
-            // Extract doc comments preceding this node
-            let doc = extract::extract_doc_comment_before(&root, &child, src);
-
-            if let Some(mut chunk) = extract::build_chunk(
-                &self.config, &RUST_EXTRACTORS, &child, src, &imports, chunks.len(),
-            ) {
-                chunk.doc_comment = doc;
-                chunks.push(chunk);
-            }
-
-            // For impl/trait blocks, also extract individual methods
-            if child.kind() == "impl_item" || child.kind() == "trait_item" {
-                let parent_name = extract::extract_name(&child, src);
-                extract::extract_methods(
-                    &self.config, &RUST_EXTRACTORS, &child, src, &imports, &parent_name, &mut chunks,
-                );
-            }
-        }
-
-        chunks
-    }
-}
+super::define_chunker!(RustCodeChunker, tree_sitter_rust::LANGUAGE, &["use_declaration"], &RUST_EXTRACTORS);

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, VectorIndex, VectorStore};
-use v_hnsw_graph::{DotProductDistance, HnswConfig, HnswGraph, L2Distance, NormalizedCosineDistance};
+use v_hnsw_graph::{DotProductDistance, HnswGraph, L2Distance, NormalizedCosineDistance};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -13,10 +13,7 @@ use crate::is_interrupted;
 
 /// Run the bench command.
 pub fn run(path: PathBuf, queries: usize, k: usize) -> Result<()> {
-    // Check database exists
-    if !path.exists() {
-        anyhow::bail!("Database not found at {}", path.display());
-    }
+    super::common::require_db(&path)?;
 
     // Load config
     let config = DbConfig::load(&path)?;
@@ -68,12 +65,7 @@ fn bench_with_metric<D: DistanceMetric + Clone>(
     }
 
     // Create HNSW config
-    let hnsw_config = HnswConfig::builder()
-        .dim(config.dim)
-        .m(config.m)
-        .ef_construction(config.ef_construction)
-        .build()
-        .with_context(|| "failed to create HNSW config")?;
+    let hnsw_config = config.to_hnsw_config()?;
 
     // Build HNSW graph from storage
     println!("Loading {} vectors into HNSW graph...", doc_count);

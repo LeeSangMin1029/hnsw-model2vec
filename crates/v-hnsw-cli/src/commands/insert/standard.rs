@@ -14,9 +14,7 @@ use crate::is_interrupted;
 
 /// Run insert with pre-computed vectors.
 pub fn run_standard(path: PathBuf, input: PathBuf, vector_column: &str) -> Result<()> {
-    if !path.exists() {
-        anyhow::bail!("Database not found at {}", path.display());
-    }
+    crate::commands::common::require_db(&path)?;
 
     let config = DbConfig::load(&path)?;
 

@@ -292,7 +292,7 @@ fn embed_text_no_visibility_no_extra_space() {
         calls: vec![],
         type_refs: vec![],
         param_types: vec![],
-        return_type: None, ast_hash: 0, body_hash: 0,
+        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
     };
     let embed = chunk.to_embed_text("test.rs", &[]);
     // "[function] foo" — no double space before name
@@ -321,7 +321,7 @@ fn embed_text_with_visibility_prefix() {
         calls: vec![],
         type_refs: vec![],
         param_types: vec![],
-        return_type: None, ast_hash: 0, body_hash: 0,
+        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
     };
     let embed = chunk.to_embed_text("test.rs", &[]);
     assert!(
@@ -349,7 +349,7 @@ fn custom_fields_empty_collections_omitted() {
         calls: vec![],
         type_refs: vec![],
         param_types: vec![],
-        return_type: None, ast_hash: 0, body_hash: 0,
+        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
     };
     let custom = chunk.to_custom_fields(&[]);
     assert!(!custom.contains_key("calls"), "empty calls should not be in custom fields");
@@ -359,4 +359,69 @@ fn custom_fields_empty_collections_omitted() {
     assert!(!custom.contains_key("signature"), "None signature should not be in custom fields");
     assert!(!custom.contains_key("doc"), "None doc should not be in custom fields");
     assert!(!custom.contains_key("return_type"), "None return_type should not be in custom fields");
+}
+
+#[test]
+fn sub_blocks_populated_for_function_with_control_flow() {
+    let code = r#"
+fn process(x: i32) -> bool {
+    if x > 0 {
+        let y = x * 2;
+        println!("{}", y);
+        return true;
+    }
+    for i in 0..x {
+        println!("{}", i);
+        if i > 5 {
+            break;
+        }
+    }
+    false
+}
+"#;
+    let chunks = chunk_for_language("rs", code).unwrap();
+    assert_eq!(chunks.len(), 1, "should extract one function");
+    let sub = &chunks[0].sub_blocks;
+    assert!(
+        sub.len() >= 2,
+        "function with if+for should have at least 2 sub-blocks, got {}",
+        sub.len()
+    );
+    // All sub-blocks should have non-zero AST hashes
+    for sb in sub {
+        assert_ne!(sb.ast_hash, 0, "sub-block AST hash should not be zero");
+    }
+}
+
+#[test]
+fn sub_blocks_empty_for_simple_function() {
+    let code = "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+    let chunks = chunk_for_language("rs", code).unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert!(
+        chunks[0].sub_blocks.is_empty(),
+        "simple function without control flow should have no sub-blocks"
+    );
+}
+
+#[test]
+fn sub_block_hashes_stored_in_custom_fields() {
+    let code = r#"
+fn example(x: i32) {
+    if x > 0 {
+        let y = x * 2;
+        println!("{}", y);
+    }
+}
+"#;
+    let chunks = chunk_for_language("rs", code).unwrap();
+    assert_eq!(chunks.len(), 1);
+    let chunk = &chunks[0];
+    assert!(!chunk.sub_blocks.is_empty(), "should have sub-blocks");
+
+    let custom = chunk.to_custom_fields(&[]);
+    assert!(
+        custom.contains_key("sub_block_hashes"),
+        "custom fields should contain sub_block_hashes"
+    );
 }

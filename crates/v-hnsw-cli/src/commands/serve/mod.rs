@@ -252,36 +252,60 @@ fn spawn_background(db_path: Option<&Path>, port: u16, timeout_secs: u64) -> Res
     Ok(())
 }
 
+/// Send a JSON-RPC request to the running daemon and return the result.
+///
+/// Handles port lookup, TCP connect, timeout, request/response framing,
+/// and error extraction. Callers only need to supply method + params.
+pub fn daemon_rpc(
+    method: &str,
+    params: serde_json::Value,
+    read_timeout_secs: u64,
+) -> Result<serde_json::Value> {
+    let port = read_port_file()
+        .ok_or_else(|| anyhow::anyhow!("Daemon not running (no port file)"))?;
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .context("Failed to parse socket address")?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
+        .context("Failed to connect to daemon")?;
+
+    stream.set_read_timeout(Some(Duration::from_secs(read_timeout_secs)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    let request = serde_json::json!({"id": 0, "method": method, "params": params});
+    writeln!(stream, "{}", serde_json::to_string(&request)?)?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut response_line = String::new();
+    reader.read_line(&mut response_line)?;
+
+    let response: serde_json::Value = serde_json::from_str(&response_line)
+        .context("Failed to parse daemon response")?;
+
+    if let Some(err) = response.get("error") {
+        anyhow::bail!("Daemon {method} failed: {err}");
+    }
+
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Empty response from daemon"))
+}
+
 /// Notify running daemon to reload indexes for a specific database.
 pub fn notify_daemon_reload(db_path: &Path) -> Result<()> {
     let canonical = db_path
         .canonicalize()
         .with_context(|| format!("Database not found: {}", db_path.display()))?;
 
-    let port = read_port_file()
-        .ok_or_else(|| anyhow::anyhow!("Daemon not running (no port file)"))?;
-
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
-        .parse()
-        .context("Failed to parse socket address")?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-        .context("Failed to connect to daemon")?;
-
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-
     let db_str = canonical.to_str().unwrap_or("");
-    let request = serde_json::json!({"id": 0, "method": "reload", "params": {"db": db_str}});
-    writeln!(stream, "{}", serde_json::to_string(&request)?)?;
-    stream.flush()?;
+    let result = daemon_rpc("reload", serde_json::json!({"db": db_str}), 30)?;
 
-    let mut reader = BufReader::new(&stream);
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-
-    if response.contains("reloaded") {
+    if result.get("status").and_then(|s| s.as_str()) == Some("reloaded") {
         Ok(())
     } else {
-        anyhow::bail!("Daemon reload failed: {}", response.trim())
+        anyhow::bail!("Daemon reload failed: {result}")
     }
 }

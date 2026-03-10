@@ -13,6 +13,9 @@ const GO_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
     extract_return_fn: extract::extract_go_return_type,
     extract_doc_fn: extract::extract_go_doc_comment_before,
     method_kinds: &[],
+    type_chunk_kinds: &[],
+    method_parent_kinds: &[],
+    wrapper_kind: None,
 };
 
 impl GoCodeChunker {
@@ -25,56 +28,30 @@ impl GoCodeChunker {
         ) else {
             return Vec::new();
         };
+
+        let mut chunks = extract::chunk_standard(&self.config, &GO_EXTRACTORS, &parsed, source);
+
         let root = parsed.tree.root_node();
         let src = source.as_bytes();
-        let imports = parsed.imports;
-
-        let mut chunks = Vec::new();
         let mut cursor = root.walk();
 
         for child in root.children(&mut cursor) {
-            let doc = extract::extract_go_doc_comment_before(&root, &child, src);
-
             match child.kind() {
-                "function_declaration" => {
-                    if let Some(mut chunk) = extract::build_chunk(
-                        &self.config, &GO_EXTRACTORS, &child, src, &imports, chunks.len(),
-                    ) {
-                        chunk.doc_comment = doc;
-                        chunks.push(chunk);
-                    }
-                }
+                // Fix method names to include receiver type (e.g. `RequestData::String`)
                 "method_declaration" => {
-                    // Extract receiver type for qualified name (e.g., `Server::Start`)
-                    let receiver_type = child.child_by_field_name("receiver")
-                        .and_then(|r| {
-                            let mut c = r.walk();
-                            for param in r.children(&mut c) {
-                                if param.kind() == "parameter_declaration" {
-                                    return param.child_by_field_name("type")
-                                        .and_then(|t| {
-                                            let text = t.utf8_text(src).ok()?;
-                                            Some(text.trim_start_matches('*').to_owned())
-                                        });
-                                }
-                            }
-                            None
-                        });
-
-                    if let Some(mut chunk) = extract::build_chunk(
-                        &self.config, &GO_EXTRACTORS, &child, src, &imports, chunks.len(),
-                    ) {
-                        // Override name to include receiver type
-                        if let Some(recv) = &receiver_type {
-                            let raw_name = extract::extract_name(&child, src);
-                            chunk.name = format!("{recv}::{raw_name}");
+                    let receiver_type = extract_go_receiver_type(&child, src);
+                    if let Some(recv) = receiver_type {
+                        let raw_name = extract::extract_name(&child, src);
+                        let full_name = format!("{recv}::{raw_name}");
+                        if let Some(chunk) = chunks.iter_mut().find(|c| c.start_byte == child.start_byte()) {
+                            chunk.name = full_name;
                         }
-                        chunk.doc_comment = doc;
-                        chunks.push(chunk);
                     }
                 }
+                // Handle type declarations (struct, interface, type alias)
                 "type_declaration" => {
-                    self.extract_go_type_decl(&child, src, &imports, &mut chunks, doc);
+                    let doc = extract::extract_go_doc_comment_before(&root, &child, src);
+                    self.extract_go_type_decl(&child, src, &parsed.imports, &mut chunks, doc);
                 }
                 _ => {}
             }
@@ -129,10 +106,26 @@ impl GoCodeChunker {
                 chunk_index: chunks.len(),
                 imports: imports.to_vec(),
                 calls: Vec::new(),
-                type_refs: extract::extract_type_refs(&child, src),
+                type_refs: extract::collect_sorted_unique(&child, src, extract::walk_for_type_ids),
                 param_types: Vec::new(),
-                return_type: None, ast_hash: 0, body_hash: 0,
+                return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: Vec::new(),
             });
         }
     }
+}
+
+/// Extract the receiver type from a Go method declaration.
+fn extract_go_receiver_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let receiver = node.child_by_field_name("receiver")?;
+    let mut cursor = receiver.walk();
+    for param in receiver.children(&mut cursor) {
+        if param.kind() == "parameter_declaration" {
+            return param.child_by_field_name("type")
+                .and_then(|t| {
+                    let text = t.utf8_text(src).ok()?;
+                    Some(text.trim_start_matches('*').to_owned())
+                });
+        }
+    }
+    None
 }

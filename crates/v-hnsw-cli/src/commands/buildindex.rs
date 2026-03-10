@@ -14,9 +14,7 @@ use v_hnsw_storage::StorageEngine;
 use super::create::DbConfig;
 
 pub fn run(path: PathBuf) -> Result<()> {
-    if !path.exists() {
-        anyhow::bail!("Database not found at {}", path.display());
-    }
+    super::common::require_db(&path)?;
 
     let config = DbConfig::load(&path)?;
     let engine = StorageEngine::open_exclusive(&path)
@@ -28,12 +26,7 @@ pub fn run(path: PathBuf) -> Result<()> {
     let hnsw_path = path.join("hnsw.bin");
     let bm25_path = path.join("bm25.bin");
 
-    let hnsw_config = HnswConfig::builder()
-        .dim(config.dim)
-        .m(config.m)
-        .ef_construction(config.ef_construction)
-        .build()
-        .with_context(|| "failed to create HNSW config")?;
+    let hnsw_config = config.to_hnsw_config()?;
 
     let vector_store = engine.vector_store();
 

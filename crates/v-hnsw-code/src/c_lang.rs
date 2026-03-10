@@ -10,6 +10,12 @@ const C_EXTRACTORS: extract::LangExtractors = extract::LangExtractors {
     extract_return_fn: extract::extract_c_return_type,
     extract_doc_fn: extract::extract_block_doc_comment_before,
     method_kinds: &[],
+    type_chunk_kinds: &[
+        ("struct_specifier", CodeNodeKind::Struct),
+        ("enum_specifier", CodeNodeKind::Enum),
+    ],
+    method_parent_kinds: &[],
+    wrapper_kind: None,
 };
 
 impl CCodeChunker {
@@ -22,46 +28,20 @@ impl CCodeChunker {
         ) else {
             return Vec::new();
         };
+
+        let mut chunks = extract::chunk_standard(&self.config, &C_EXTRACTORS, &parsed, source);
+
+        // Handle C typedefs (not covered by standard kind_map/type_chunk_kinds)
         let root = parsed.tree.root_node();
         let src = source.as_bytes();
-        let imports = parsed.imports;
-
-        let mut chunks = Vec::new();
         let mut cursor = root.walk();
-
         for child in root.children(&mut cursor) {
-            let doc = extract::extract_block_doc_comment_before(&root, &child, src);
-
-            match child.kind() {
-                "function_definition" => {
-                    if let Some(mut chunk) = extract::build_chunk(
-                        &self.config, &C_EXTRACTORS, &child, src, &imports, chunks.len(),
-                    ) {
-                        chunk.doc_comment = doc;
-                        chunks.push(chunk);
-                    }
+            if child.kind() == "type_definition" {
+                let doc = extract::extract_block_doc_comment_before(&root, &child, src);
+                if let Some(mut chunk) = self.c_typedef_to_chunk(&child, src, &parsed.imports, chunks.len()) {
+                    chunk.doc_comment = doc;
+                    chunks.push(chunk);
                 }
-                "struct_specifier" => {
-                    if let Some(chunk) = extract::simple_type_chunk(
-                        &child, src, CodeNodeKind::Struct, doc, &imports, chunks.len(), self.config.min_lines,
-                    ) {
-                        chunks.push(chunk);
-                    }
-                }
-                "enum_specifier" => {
-                    if let Some(chunk) = extract::simple_type_chunk(
-                        &child, src, CodeNodeKind::Enum, doc, &imports, chunks.len(), self.config.min_lines,
-                    ) {
-                        chunks.push(chunk);
-                    }
-                }
-                "type_definition" => {
-                    if let Some(mut chunk) = self.c_typedef_to_chunk(&child, src, &imports, chunks.len()) {
-                        chunk.doc_comment = doc;
-                        chunks.push(chunk);
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -117,9 +97,9 @@ impl CCodeChunker {
             chunk_index: index,
             imports: imports.to_vec(),
             calls: Vec::new(),
-            type_refs: extract::extract_type_refs(node, src),
+            type_refs: extract::collect_sorted_unique(node, src, extract::walk_for_type_ids),
             param_types: Vec::new(),
-            return_type: None, ast_hash: 0, body_hash: 0,
+            return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: Vec::new(),
         })
     }
 }

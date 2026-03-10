@@ -7,10 +7,7 @@
 
 mod direct;
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -52,22 +49,6 @@ fn is_elapsed_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
-/// JSON-RPC response for daemon communication.
-#[derive(Debug, Deserialize)]
-struct JsonRpcResponse {
-    #[allow(dead_code)]
-    id: u64,
-    result: Option<serde_json::Value>,
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonRpcError {
-    #[allow(dead_code)]
-    code: i32,
-    message: String,
-}
-
 /// Try to connect to the global daemon and search a specific database.
 fn try_daemon_search(
     db_path: &Path,
@@ -79,16 +60,6 @@ fn try_daemon_search(
         .canonicalize()
         .with_context(|| format!("Database not found: {}", db_path.display()))?;
 
-    let port = serve::read_port_file()
-        .ok_or_else(|| anyhow::anyhow!("Daemon not running (no port file)"))?;
-
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-        .context("Failed to connect to daemon")?;
-
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-
     let mut params = serde_json::json!({
         "db": canonical.to_str().unwrap_or(""),
         "query": query,
@@ -98,25 +69,7 @@ fn try_daemon_search(
         params["tags"] = serde_json::json!(tags);
     }
 
-    let request = serde_json::json!({"id": 1, "method": "search", "params": params});
-    writeln!(stream, "{}", serde_json::to_string(&request)?)?;
-    stream.flush()?;
-
-    let mut reader = BufReader::new(&stream);
-    let mut response_line = String::new();
-    reader.read_line(&mut response_line)?;
-
-    let response: JsonRpcResponse =
-        serde_json::from_str(&response_line).context("Failed to parse daemon response")?;
-
-    if let Some(err) = response.error {
-        anyhow::bail!("Daemon error: {}", err.message);
-    }
-
-    let result = response
-        .result
-        .ok_or_else(|| anyhow::anyhow!("Empty response from daemon"))?;
-
+    let result = serve::daemon_rpc("search", params, 30)?;
     serde_json::from_value(result).context("Failed to parse search results")
 }
 
@@ -164,7 +117,7 @@ pub(super) fn compact_output(mut output: FindOutput) -> FindOutput {
 }
 
 /// Print FindOutput as JSON with optional compaction and score filtering.
-fn print_output(output: FindOutput, full: bool, min_score: f32) -> Result<()> {
+pub(super) fn print_output(output: FindOutput, full: bool, min_score: f32) -> Result<()> {
     // Apply score filter BEFORE compaction (compact zeroes out scores)
     let mut output = output;
     if min_score > 0.0 {
@@ -194,9 +147,7 @@ fn looks_like_code_symbol(query: &str) -> bool {
 pub fn run(params: FindParams) -> Result<()> {
     let FindParams { db, query, k, tags, full, vector, ef, min_score } = params;
 
-    if !db.exists() {
-        anyhow::bail!("Database not found at {}", db.display());
-    }
+    super::common::require_db(&db)?;
 
     // Validate: at least one of query or vector is required
     if query.is_none() && vector.is_none() {
@@ -230,71 +181,7 @@ pub fn run(params: FindParams) -> Result<()> {
 ///
 /// Returns `true` if results were found and printed.
 fn try_code_intel(db: &Path, query: &str) -> Result<bool> {
-    let chunks = super::code_intel::load_chunks(db)?;
-    let query_lower = query.to_lowercase();
-
-    // Try def first
-    let defs: Vec<&super::code_intel::parse::CodeChunk> = chunks.iter().filter(|c| {
-        c.name.to_lowercase() == query_lower
-            || c.name.to_lowercase().ends_with(&format!("::{query_lower}"))
-    }).collect();
-
-    if !defs.is_empty() {
-        eprintln!("[code-intel] Found {} definition(s) for \"{}\"", defs.len(), query);
-        println!("Definition of \"{query}\":\n");
-        print_code_chunks(&defs);
-
-        // Also show callers
-        let callers: Vec<&super::code_intel::parse::CodeChunk> = chunks.iter().filter(|c| {
-            c.calls.iter().any(|call| {
-                let call_lower = call.to_lowercase();
-                call_lower == query_lower
-                    || call_lower.ends_with(&format!("::{query_lower}"))
-                    || call_lower.contains(&query_lower)
-            })
-        }).collect();
-        if !callers.is_empty() {
-            println!("\n{} caller(s):\n", callers.len());
-            print_code_chunks(&callers);
-        }
-        return Ok(true);
-    }
-
-    // Try symbol name search (partial match)
-    let symbols: Vec<&super::code_intel::parse::CodeChunk> = chunks.iter().filter(|c| {
-        c.name.to_lowercase().contains(&query_lower)
-    }).collect();
-
-    if !symbols.is_empty() {
-        eprintln!("[code-intel] Found {} symbol(s) matching \"{}\"", symbols.len(), query);
-        println!("Symbols matching \"{query}\":\n");
-        print_code_chunks(&symbols);
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-/// Print code chunks grouped by directory (compact format).
-fn print_code_chunks(chunks: &[&super::code_intel::parse::CodeChunk]) {
-    use std::collections::BTreeMap;
-    let mut groups: BTreeMap<&str, Vec<&super::code_intel::parse::CodeChunk>> = BTreeMap::new();
-    for c in chunks {
-        let dir = if let Some(idx) = c.file.rfind('/') { &c.file[..idx] } else { "." };
-        groups.entry(dir).or_default().push(c);
-    }
-    for (dir, items) in &groups {
-        println!("  {dir}/");
-        for c in items {
-            let filename = if let Some(idx) = c.file.rfind('/') { &c.file[idx + 1..] } else { &c.file };
-            let lines = c.lines.map(|(s, e)| format!(":{s}-{e}")).unwrap_or_default();
-            println!("    {filename}{lines}  [{kind}] {name}", kind = c.kind, name = c.name);
-            if let Some(ref sig) = c.signature {
-                println!("      {sig}");
-            }
-        }
-        println!();
-    }
+    super::code_intel::try_inline_lookup(db, query)
 }
 
 /// Parse a comma-separated vector string.

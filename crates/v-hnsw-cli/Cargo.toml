@@ -23,6 +23,7 @@ pulldown-cmark = "0.13"
 
 # Code chunking (tree-sitter AST parsing)
 v-hnsw-code.workspace = true
+v-hnsw-intel.workspace = true
 
 # CLI
 clap = { workspace = true, features = ["derive"] }

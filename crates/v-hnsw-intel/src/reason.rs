@@ -113,7 +113,6 @@ pub fn delete_reason(db: &Path, symbol: &str) -> Result<bool> {
 }
 
 /// List all reason entries in the database.
-#[allow(dead_code)]
 pub fn list_reasons(db: &Path) -> Result<Vec<ReasonEntry>> {
     let dir = reasons_dir(db);
     if !dir.exists() {

@@ -3251,6 +3251,7 @@ dependencies = [
  "v-hnsw-core",
  "v-hnsw-embed",
  "v-hnsw-graph",
+ "v-hnsw-intel",
  "v-hnsw-search",
  "v-hnsw-storage",
  "walkdir",
@@ -3302,6 +3303,22 @@ dependencies = [
  "rayon",
  "tracing",
  "v-hnsw-core",
+]
+
+[[package]]
+name = "v-hnsw-intel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "v-hnsw-code",
+ "v-hnsw-core",
+ "v-hnsw-graph",
+ "v-hnsw-storage",
 ]
 
 [[package]]

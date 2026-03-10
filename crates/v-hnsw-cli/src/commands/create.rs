@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use v_hnsw_graph::HnswConfig;
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use crate::cli::MetricType;
@@ -37,6 +38,16 @@ fn default_content_type() -> String {
 
 impl DbConfig {
     pub const CURRENT_VERSION: u32 = 1;
+
+    /// Build an `HnswConfig` from this database config.
+    pub fn to_hnsw_config(&self) -> Result<HnswConfig> {
+        HnswConfig::builder()
+            .dim(self.dim)
+            .m(self.m)
+            .ef_construction(self.ef_construction)
+            .build()
+            .with_context(|| "Failed to create HNSW config")
+    }
 
     /// Load config from database path.
     pub fn load(path: &Path) -> Result<Self> {

@@ -43,6 +43,31 @@ pub struct CollectionManager {
 }
 
 impl CollectionManager {
+    /// Returns error if the collection does not exist in the manifest.
+    fn require_exists(&self, name: &str) -> Result<()> {
+        if self.manifest.get_collection(name).is_none() {
+            return Err(VhnswError::Payload(format!(
+                "Collection '{name}' not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Returns error if the collection already exists in the manifest.
+    fn require_not_exists(&self, name: &str) -> Result<()> {
+        if self.manifest.get_collection(name).is_some() {
+            return Err(VhnswError::Payload(format!(
+                "Collection '{name}' already exists"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Path to the `collections/` subdirectory under root.
+    fn collections_dir(&self) -> PathBuf {
+        self.root.join("collections")
+    }
+
     /// Open or create a database at the given root directory.
     ///
     /// # Legacy Detection
@@ -105,7 +130,7 @@ impl CollectionManager {
             if src.exists() {
                 std::fs::rename(&src, &dst).map_err(|e| {
                     VhnswError::Storage(std::io::Error::other(
-                        format!("Failed to move legacy file {}: {}", file, e),
+                        format!("Failed to move legacy file {file}: {e}"),
                     ))
                 })?;
             }
@@ -117,7 +142,7 @@ impl CollectionManager {
         if legacy_wal.exists() {
             std::fs::rename(&legacy_wal, &new_wal).map_err(|e| {
                 VhnswError::Storage(std::io::Error::other(
-                    format!("Failed to move legacy WAL directory: {}", e),
+                    format!("Failed to move legacy WAL directory: {e}"),
                 ))
             })?;
         }
@@ -127,7 +152,7 @@ impl CollectionManager {
         // they will be read from the actual storage files when opened.
         let created_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| VhnswError::Payload(format!("System time error: {}", e)))?
+            .map_err(|e| VhnswError::Payload(format!("System time error: {e}")))?
             .as_secs();
 
         let info = CollectionInfo {
@@ -154,15 +179,10 @@ impl CollectionManager {
     /// - Manifest save fails
     pub fn create_collection(&mut self, name: &str, config: StorageConfig) -> Result<&Collection> {
         // Check if collection already exists
-        if self.manifest.get_collection(name).is_some() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{}' already exists",
-                name
-            )));
-        }
+        self.require_not_exists(name)?;
 
         // Create collection directory
-        let collections_dir = self.root.join("collections");
+        let collections_dir = self.collections_dir();
         std::fs::create_dir_all(&collections_dir)?;
 
         // Create collection
@@ -171,7 +191,7 @@ impl CollectionManager {
         // Add to manifest
         let created_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| VhnswError::Payload(format!("System time error: {}", e)))?
+            .map_err(|e| VhnswError::Payload(format!("System time error: {e}")))?
             .as_secs();
 
         let info = CollectionInfo {
@@ -190,7 +210,7 @@ impl CollectionManager {
 
         self.open_collections
             .get(name)
-            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
+            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{name}'")))
     }
 
     /// Get a reference to an existing collection (lazy-loaded).
@@ -198,7 +218,7 @@ impl CollectionManager {
         self.ensure_loaded(name)?;
         self.open_collections
             .get(name)
-            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
+            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{name}'")))
     }
 
     /// Get a mutable reference to an existing collection (lazy-loaded).
@@ -206,19 +226,14 @@ impl CollectionManager {
         self.ensure_loaded(name)?;
         self.open_collections
             .get_mut(name)
-            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{}'", name)))
+            .ok_or_else(|| VhnswError::Payload(format!("Failed to retrieve collection '{name}'")))
     }
 
     /// Check manifest and lazy-load collection if not already open.
     fn ensure_loaded(&mut self, name: &str) -> Result<()> {
-        if self.manifest.get_collection(name).is_none() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{}' not found",
-                name
-            )));
-        }
+        self.require_exists(name)?;
         if !self.open_collections.contains_key(name) {
-            let collections_dir = self.root.join("collections");
+            let collections_dir = self.collections_dir();
             let collection = Collection::open(&collections_dir, name)?;
             self.open_collections.insert(name.to_string(), collection);
         }
@@ -246,18 +261,13 @@ impl CollectionManager {
     /// - Manifest save fails
     pub fn delete_collection(&mut self, name: &str) -> Result<()> {
         // Check if collection exists
-        if self.manifest.get_collection(name).is_none() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{}' not found",
-                name
-            )));
-        }
+        self.require_exists(name)?;
 
         // Close collection if open
         self.open_collections.remove(name);
 
         // Delete directory
-        let collection_dir = self.root.join("collections").join(name);
+        let collection_dir = self.collections_dir().join(name);
         if collection_dir.exists() {
             std::fs::remove_dir_all(&collection_dir)?;
         }
@@ -282,26 +292,16 @@ impl CollectionManager {
     /// - Manifest save fails
     pub fn rename_collection(&mut self, old_name: &str, new_name: &str) -> Result<()> {
         // Validate old collection exists
-        if self.manifest.get_collection(old_name).is_none() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{}' not found",
-                old_name
-            )));
-        }
+        self.require_exists(old_name)?;
 
         // Validate new name doesn't exist
-        if self.manifest.get_collection(new_name).is_some() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{}' already exists",
-                new_name
-            )));
-        }
+        self.require_not_exists(new_name)?;
 
         // Close collection if open
         self.open_collections.remove(old_name);
 
         // Rename directory
-        let collections_dir = self.root.join("collections");
+        let collections_dir = self.collections_dir();
         let old_dir = collections_dir.join(old_name);
         let new_dir = collections_dir.join(new_name);
 
@@ -313,7 +313,7 @@ impl CollectionManager {
         let mut info = self
             .manifest
             .get_collection(old_name)
-            .ok_or_else(|| VhnswError::Payload(format!("Collection '{}' not found in manifest", old_name)))?
+            .ok_or_else(|| VhnswError::Payload(format!("Collection '{old_name}' not found in manifest")))?
             .clone();
         info.name = new_name.to_string();
 

@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::parse::CodeChunk;
+use crate::parse::CodeChunk;
 
 /// Cache format version — bump when struct layout changes.
 const CACHE_VERSION: u8 = 1;
@@ -195,13 +195,12 @@ impl CallGraph {
     }
 
     /// Whether the graph has no nodes.
-    #[expect(dead_code, reason = "required by clippy::len_without_is_empty")]
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────
 
 fn graph_cache_path(db: &Path) -> std::path::PathBuf {
     db.join("cache").join("graph.bin")

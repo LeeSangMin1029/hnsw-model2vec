@@ -22,25 +22,9 @@ pub fn process_markdown_folder(
     engine: &mut StorageEngine,
     exclude: &[String],
 ) -> Result<(u64, u64, Vec<u64>)> {
-    // Collect all markdown files recursively
-    let md_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                !common::should_skip_dir(e.file_name(), exclude)
-            } else {
-                true
-            }
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "md" || ext == "markdown")
-                .unwrap_or(false)
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+    let md_files = common::scan_files(input_path, exclude, |ext| {
+        ext == "md" || ext == "markdown"
+    });
 
     if md_files.is_empty() {
         anyhow::bail!("No markdown files found in {}", input_path.display());
@@ -58,12 +42,7 @@ pub fn process_markdown_files(
     model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64, Vec<u64>)> {
-    let chunker = MarkdownChunker::new(ChunkConfig {
-        target_size: 1000,
-        overlap: 200,
-        min_size: 100,
-        include_heading_context: true,
-    });
+    let chunker = MarkdownChunker::new(ChunkConfig::default());
 
     println!("Found {} markdown file(s)", md_files.len());
 
@@ -116,6 +95,19 @@ pub fn process_markdown_files(
 
     println!("Total chunks to process: {}", records.len());
 
+    finalize_ingest(db_path, records, model, engine, file_metadata_map)
+}
+
+/// Process records and update the file metadata index.
+///
+/// Shared tail logic for `process_markdown_files` and `process_code_files`.
+pub(crate) fn finalize_ingest(
+    db_path: &Path,
+    records: Vec<IngestRecord>,
+    model: &Model2VecModel,
+    engine: &mut StorageEngine,
+    file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
+) -> Result<(u64, u64, Vec<u64>)> {
     let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
 
     let mut file_index = file_index::load_file_index(db_path)?;
@@ -125,6 +117,128 @@ pub fn process_markdown_files(
     file_index::save_file_index(db_path, &file_index)?;
 
     Ok((inserted, errors, inserted_ids))
+}
+
+/// Chunk a single file (code or markdown) into [`IngestRecord`]s.
+///
+/// Returns `(records, chunk_ids)`. For code files without `called_by` data
+/// (e.g., incremental update), pass empty slice.
+///
+/// Returns `Err` only for I/O errors; parse failures return empty results.
+pub(crate) fn chunk_single_file(
+    file_path: &std::path::Path,
+    source: &str,
+    mtime: u64,
+    chunker: &crate::chunk::MarkdownChunker,
+) -> (Vec<IngestRecord>, Vec<u64>) {
+    let is_code = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(crate::chunk_code::is_supported_code_file)
+        .unwrap_or(false);
+
+    let mut records = Vec::new();
+    let mut chunk_ids = Vec::new();
+
+    if is_code {
+        let source_code = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {e}", file_path.display());
+                return (records, chunk_ids);
+            }
+        };
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let chunks = crate::chunk_code::chunk_for_language(ext, &source_code)
+            .unwrap_or_default();
+        let file_path_str = file_path.to_string_lossy().to_string();
+        let chunk_total = chunks.len();
+        let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
+
+        for chunk in &chunks {
+            let id = common::generate_id(source, chunk.chunk_index);
+            chunk_ids.push(id);
+            records.push(code_chunk_to_record(
+                chunk, source, &file_path_str, lang, mtime, chunk_total, &[],
+            ));
+        }
+    } else {
+        let (frontmatter, chunks) = match chunker.chunk_file(file_path) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Error processing {}: {e}", file_path.display());
+                return (records, chunk_ids);
+            }
+        };
+
+        let title = frontmatter.as_ref().and_then(|f| f.title.clone());
+        let tags = frontmatter
+            .as_ref()
+            .map(|f| f.tags.clone())
+            .unwrap_or_default();
+        let chunk_total = chunks.len();
+
+        for chunk in chunks {
+            let id = common::generate_id(source, chunk.chunk_index);
+            chunk_ids.push(id);
+            records.push(IngestRecord {
+                id,
+                text: chunk.text,
+                source: source.to_owned(),
+                title: title.clone(),
+                tags: tags.clone(),
+                chunk_index: chunk.chunk_index,
+                chunk_total,
+                source_modified_at: mtime,
+                custom: HashMap::new(),
+            });
+        }
+    }
+
+    (records, chunk_ids)
+}
+
+/// Convert a single code chunk to an [`IngestRecord`].
+///
+/// Shared by `process_code_files` (add) and `update::run_core`.
+/// Pass `called_by` slice for reverse-reference enrichment (empty slice if unavailable).
+pub(crate) fn code_chunk_to_record(
+    chunk: &crate::chunk_code::CodeChunk,
+    source: &str,
+    file_path_str: &str,
+    lang: &str,
+    mtime: u64,
+    chunk_total: usize,
+    called_by: &[String],
+) -> IngestRecord {
+    let id = common::generate_id(source, chunk.chunk_index);
+    let embed_text = chunk.to_embed_text(file_path_str, called_by);
+
+    let mut tags = vec![
+        format!("kind:{}", chunk.kind.as_str()),
+        format!("lang:{lang}"),
+    ];
+    if !chunk.visibility.is_empty() {
+        tags.push(format!("vis:{}", chunk.visibility));
+    }
+    for caller in called_by {
+        tags.push(format!("caller:{caller}"));
+    }
+
+    IngestRecord {
+        id,
+        text: embed_text,
+        source: source.to_owned(),
+        title: Some(chunk.name.clone()),
+        tags,
+        chunk_index: chunk.chunk_index,
+        chunk_total,
+        source_modified_at: mtime,
+        custom: chunk.to_custom_fields(called_by),
+    }
 }
 
 /// Intermediate data collected per code chunk before `called_by` resolution.
@@ -223,26 +337,7 @@ pub fn process_code_folder(
     engine: &mut StorageEngine,
     exclude: &[String],
 ) -> Result<(u64, u64, Vec<u64>)> {
-    // Collect all supported code files recursively
-    let code_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                !common::should_skip_dir(e.file_name(), exclude)
-            } else {
-                true
-            }
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(crate::chunk_code::is_supported_code_file)
-                .unwrap_or(false)
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+    let code_files = common::scan_files(input_path, exclude, crate::chunk_code::is_supported_code_file);
 
     if code_files.is_empty() {
         anyhow::bail!("No supported code files found in {}", input_path.display());
@@ -345,47 +440,20 @@ pub fn process_code_files(
         let called_by_refs = lookup_called_by(&reverse_index, &chunk.name);
         let called_by: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
 
-        let id = common::generate_id(&entry.source, chunk.chunk_index);
-        let embed_text = chunk.to_embed_text(&entry.file_path_str, &called_by);
-
-        // Build tags from code metadata
-        let mut tags = vec![
-            format!("kind:{}", chunk.kind.as_str()),
-            format!("lang:{}", entry.lang),
-        ];
-        if !chunk.visibility.is_empty() {
-            tags.push(format!("vis:{}", chunk.visibility));
-        }
-        // Add caller tags for tag-based filtering
-        for caller in &called_by {
-            tags.push(format!("caller:{caller}"));
-        }
-
-        records.push(IngestRecord {
-            id,
-            text: embed_text,
-            source: entry.source.clone(),
-            title: Some(chunk.name.clone()),
-            tags,
-            chunk_index: chunk.chunk_index,
+        records.push(code_chunk_to_record(
+            chunk,
+            &entry.source,
+            &entry.file_path_str,
+            entry.lang,
+            entry.mtime,
             chunk_total,
-            source_modified_at: entry.mtime,
-            custom: chunk.to_custom_fields(&called_by),
-        });
+            &called_by,
+        ));
     }
 
     println!("Total code chunks to process: {}", records.len());
 
-    let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
-
-    // Save file metadata index
-    let mut file_index = file_index::load_file_index(db_path)?;
-    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
-        file_index.update_file(path, mtime, size, chunk_ids);
-    }
-    file_index::save_file_index(db_path, &file_index)?;
-
-    Ok((inserted, errors, inserted_ids))
+    finalize_ingest(db_path, records, model, engine, file_metadata_map)
 }
 
 /// Process JSONL file: parse records, embed, insert.

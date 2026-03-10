@@ -338,6 +338,9 @@ pub enum Commands {
         /// Use AST structural hash (Type-1/2, ignores identifier names).
         #[arg(long)]
         ast: bool,
+        /// Unified pipeline: Filter (AST+MinHash+HNSW) → Verify (all signals).
+        #[arg(long)]
+        all: bool,
         /// Skip functions shorter than N lines.
         #[arg(long, default_value = "5")]
         min_lines: usize,

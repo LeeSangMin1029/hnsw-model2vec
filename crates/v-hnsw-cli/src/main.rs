@@ -107,21 +107,24 @@ fn run() -> anyhow::Result<()> {
             commands::code_intel::deps::run_deps(db, file, format, depth)
         }
         Commands::Impact { db, symbol, depth, format, include_tests, detail } => {
-            commands::code_intel::impact::run_impact(db, symbol, depth, format, include_tests, detail)
+            commands::code_intel::run_impact(db, symbol, depth, format, include_tests, detail)
         }
         Commands::Trace { db, from, to, format } => {
-            commands::code_intel::trace::run_trace(db, from, to, format)
+            commands::code_intel::run_trace(db, from, to, format)
         }
         Commands::Gather { db, symbol, depth, k, format, include_tests, detail } => {
-            commands::code_intel::gather::run_gather(db, symbol, depth, k, format, include_tests, detail)
+            commands::code_intel::run_gather(db, symbol, depth, k, format, include_tests, detail)
         }
         Commands::Detail { db, symbol, add, decision, why, constraint, rejected, failure, fix, delete } => {
             commands::code_intel::detail::run_detail(commands::code_intel::detail::DetailParams {
                 db, symbol, add, decision, why, constraint, rejected, failure, fix, delete,
             })
         }
-        Commands::Dupes { db, threshold, exclude_tests, k, json, embed, ast, min_lines } => {
-            commands::dupes::run(db, threshold, exclude_tests, k, json, embed, ast, min_lines)
+        Commands::Dupes { db, threshold, exclude_tests, k, json, embed, ast, all, min_lines } => {
+            commands::dupes::run(commands::dupes::DupesConfig {
+                db, threshold, exclude_tests, k, json,
+                embed_mode: embed, ast_mode: ast, all_mode: all, min_lines,
+            })
         }
         Commands::Stats { db, format } => commands::code_intel::run_stats(db, format),
         Commands::Serve {

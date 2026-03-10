@@ -9,10 +9,7 @@ use super::create::DbConfig;
 
 /// Run the info command.
 pub fn run(path: PathBuf) -> Result<()> {
-    // Check path exists
-    if !path.exists() {
-        anyhow::bail!("Database not found at {}", path.display());
-    }
+    super::common::require_db(&path)?;
 
     // Load config
     let config = DbConfig::load(&path)

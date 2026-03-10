@@ -24,10 +24,7 @@ struct ExportRecord {
 
 /// Run the export command.
 pub fn run(path: PathBuf, output: PathBuf) -> Result<()> {
-    // Check database exists
-    if !path.exists() {
-        anyhow::bail!("Database not found at {}", path.display());
-    }
+    super::common::require_db(&path)?;
 
     // Open storage
     let engine = StorageEngine::open(&path)

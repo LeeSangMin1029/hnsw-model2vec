@@ -214,7 +214,7 @@ fn extract_calls_finds_function_calls() {
     let (tree, bytes) = parse_rust(src);
     let root = tree.root_node();
     let func = find_first(&root, "function_item").expect("no function_item");
-    let calls = extract::extract_calls(&func, &bytes);
+    let calls = extract::collect_sorted_unique(&func, &bytes, extract::walk_for_calls);
     assert!(calls.contains(&"foo".to_owned()), "should find foo: {calls:?}");
     assert!(calls.contains(&"bar".to_owned()), "should find bar: {calls:?}");
     assert!(calls.contains(&"baz".to_owned()), "should find baz: {calls:?}");
@@ -230,7 +230,7 @@ fn extract_calls_deduplicates() {
     let (tree, bytes) = parse_rust(src);
     let root = tree.root_node();
     let func = find_first(&root, "function_item").expect("no function_item");
-    let calls = extract::extract_calls(&func, &bytes);
+    let calls = extract::collect_sorted_unique(&func, &bytes, extract::walk_for_calls);
     assert_eq!(calls.iter().filter(|c| *c == "foo").count(), 1, "should deduplicate");
 }
 
@@ -289,7 +289,7 @@ fn extract_type_refs_finds_types() {
     let (tree, bytes) = parse_rust(src);
     let root = tree.root_node();
     let func = find_first(&root, "function_item").expect("no function_item");
-    let refs = extract::extract_type_refs(&func, &bytes);
+    let refs = extract::collect_sorted_unique(&func, &bytes, extract::walk_for_type_ids);
     assert!(refs.contains(&"HashMap".to_owned()), "refs: {refs:?}");
     assert!(refs.contains(&"Vec".to_owned()), "refs: {refs:?}");
     assert!(refs.contains(&"Result".to_owned()), "refs: {refs:?}");
@@ -301,7 +301,7 @@ fn extract_type_refs_sorted_deduped() {
     let (tree, bytes) = parse_rust(src);
     let root = tree.root_node();
     let func = find_first(&root, "function_item").expect("no function_item");
-    let refs = extract::extract_type_refs(&func, &bytes);
+    let refs = extract::collect_sorted_unique(&func, &bytes, extract::walk_for_type_ids);
     assert_eq!(refs.iter().filter(|r| *r == "Vec").count(), 1, "should deduplicate");
     // Should be sorted
     let mut sorted = refs.clone();

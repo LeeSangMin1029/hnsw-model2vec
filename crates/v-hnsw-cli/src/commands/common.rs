@@ -1,22 +1,40 @@
 //! Shared utilities for CLI commands.
+//!
+//! Database infrastructure, model management, and progress bar.
+//! Domain-specific utilities are in dedicated modules:
+//! - [`super::file_utils`]: path normalization, hashing, file scanning
+//! - [`super::ingest`]: embedding pipeline, payload building, batch insert
+//! - [`super::search_result`]: search result formatting, language detection
 
-use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use lru::LruCache;
-use v_hnsw_core::{Payload, PayloadStore, PayloadValue, VectorIndex};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{NormalizedCosineDistance, HnswConfig, HnswGraph, HnswSnapshot};
-use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use super::create::DbConfig;
 use super::dict;
-use crate::is_interrupted;
+
+// ── Re-exports for backwards compatibility ──────────────────────────────
+
+pub use super::file_utils::{
+    content_hash, generate_id, get_file_mtime, normalize_source, scan_files, should_skip_dir,
+};
+// Used only by tests (via `use common::*`)
+#[cfg(test)]
+pub use super::file_utils::content_hash_bytes;
+pub use super::indexing::{build_indexes, update_indexes_incremental};
+pub use super::ingest::{
+    embed_and_insert, embed_sorted, make_payload, truncate_for_embed, IngestRecord,
+};
+pub use super::query_cache::QueryCache;
+pub use super::search_result::{build_results, fusion_alpha, SearchResultItem};
+// Used only by tests (via `use common::*`)
+#[cfg(test)]
+pub use super::search_result::has_korean;
+
+// ── Cache / path utilities ──────────────────────────────────────────────
 
 /// Platform-aware cache directory for v-hnsw.
 pub fn cache_dir() -> PathBuf {
@@ -45,6 +63,16 @@ pub fn cache_file(name: &str) -> PathBuf {
     dir.join(name)
 }
 
+/// Validate that a database directory exists; bail with a standard message if not.
+pub fn require_db(path: &Path) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!("Database not found at {}", path.display());
+    }
+    Ok(())
+}
+
+// ── Process management ──────────────────────────────────────────────────
+
 /// Spawn a detached background process with stdin/stdout/stderr suppressed.
 pub fn spawn_detached(args: &[&str]) -> Result<()> {
     let exe = std::env::current_exe()?;
@@ -63,6 +91,8 @@ pub fn spawn_detached(args: &[&str]) -> Result<()> {
     cmd.spawn().context("Failed to spawn detached process")?;
     Ok(())
 }
+
+// ── Model / Korean dict ─────────────────────────────────────────────────
 
 /// Ensure Korean dictionary is available and initialize the tokenizer.
 ///
@@ -90,6 +120,8 @@ pub fn create_model() -> Result<Model2VecModel> {
     Ok(model)
 }
 
+// ── Progress bar ────────────────────────────────────────────────────────
+
 /// Build progress bar with standard template.
 pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
     let pb = ProgressBar::new(total);
@@ -101,6 +133,8 @@ pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
     );
     Ok(pb)
 }
+
+// ── Database management ─────────────────────────────────────────────────
 
 /// Auto-create database if it doesn't exist, or open existing with exclusive lock.
 pub fn ensure_database(
@@ -158,514 +192,5 @@ pub fn ensure_database(
         println!();
 
         Ok(engine)
-    }
-}
-
-/// Build payload from source info.
-pub fn make_payload(
-    source: &str,
-    title: Option<&str>,
-    tags: &[String],
-    chunk_index: usize,
-    chunk_total: usize,
-    source_modified_at: u64,
-    extra_custom: &HashMap<String, PayloadValue>,
-) -> Payload {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut custom = extra_custom.clone();
-    if let Some(t) = title {
-        custom.insert("title".to_string(), PayloadValue::String(t.to_string()));
-    }
-
-    Payload {
-        source: source.to_string(),
-        tags: tags.to_vec(),
-        created_at: now,
-        source_modified_at,
-        chunk_index: chunk_index as u32,
-        chunk_total: chunk_total as u32,
-        custom,
-    }
-}
-
-/// Normalize a file path to a canonical forward-slash form.
-///
-/// Windows produces mixed separators (`C:/foo\bar\baz.md`) depending on
-/// how the path was constructed. This normalizes to forward slashes so
-/// that the same file always gets the same source string and ID.
-pub fn normalize_source(path: &Path) -> String {
-    // canonicalize resolves symlinks and produces \\?\ prefix on Windows
-    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let s = abs.to_string_lossy();
-    // Strip Windows \\?\ prefix, normalize separators
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-    s.replace('\\', "/")
-}
-
-/// Generate a stable ID from source path and chunk index.
-pub fn generate_id(source: &str, chunk_index: usize) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    chunk_index.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Compute a content hash (MD5 → u64) for a file's raw bytes.
-///
-/// Used for change detection: if mtime/size changed but content hash
-/// is identical, we skip expensive re-embedding.
-pub fn content_hash(path: &Path) -> Result<u64> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read file for hashing: {}", path.display()))?;
-    Ok(content_hash_bytes(&bytes))
-}
-
-/// Compute content hash from raw bytes (MD5 truncated to u64).
-pub fn content_hash_bytes(bytes: &[u8]) -> u64 {
-    let digest = md5::compute(bytes);
-    #[expect(clippy::unwrap_used, reason = "MD5 digest is always 16 bytes")]
-    u64::from_le_bytes(digest[..8].try_into().unwrap())
-}
-
-/// Embed texts with length-sorted batching to minimize padding waste.
-pub fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    if texts.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Sort indices by text length
-    let mut indices: Vec<usize> = (0..texts.len()).collect();
-    indices.sort_by_key(|&i| texts[i].len());
-
-    let sorted: Vec<&str> = indices.iter().map(|&i| texts[i].as_str()).collect();
-    let sorted_embs = model
-        .embed(&sorted)
-        .map_err(|e| anyhow::anyhow!("Embedding failed: {e}"))?;
-
-    // Restore original order (consume sorted_embs to avoid clone)
-    let mut embeddings = vec![Vec::new(); texts.len()];
-    for (emb, &orig_idx) in sorted_embs.into_iter().zip(indices.iter()) {
-        embeddings[orig_idx] = emb;
-    }
-    Ok(embeddings)
-}
-
-/// Build and save HNSW and BM25 indexes from storage data.
-pub fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> Result<()> {
-    if engine.is_empty() {
-        println!("No vectors to index, skipping index building.");
-        return Ok(());
-    }
-
-    tracing::info!("Building indexes");
-    println!();
-    println!("Building indexes...");
-
-    // Build HNSW graph
-    let hnsw_config = HnswConfig::builder()
-        .dim(config.dim)
-        .m(config.m)
-        .ef_construction(config.ef_construction)
-        .build()
-        .with_context(|| "Failed to create HNSW config")?;
-
-    let hnsw_path = path.join("hnsw.bin");
-    let vector_store = engine.vector_store();
-
-    println!(
-        "  Building HNSW graph (M={}, ef_construction={})...",
-        config.m, config.ef_construction
-    );
-
-    let pb = make_progress_bar(vector_store.id_map().keys().len() as u64)?;
-
-    let mut hnsw = HnswGraph::new(hnsw_config, NormalizedCosineDistance);
-    for id in vector_store.id_map().keys() {
-        if is_interrupted() {
-            pb.abandon_with_message("Interrupted during HNSW build");
-            return Ok(());
-        }
-        let _ = hnsw.build_insert(vector_store, *id);
-        pb.inc(1);
-    }
-
-    pb.finish_with_message("HNSW build complete");
-
-    hnsw.save(&hnsw_path)
-        .with_context(|| format!("Failed to save HNSW graph to {}", hnsw_path.display()))?;
-    println!("  HNSW graph saved: {}", hnsw_path.display());
-
-    // Build BM25 index
-    println!("  Building BM25 index...");
-    ensure_korean_dict()?;
-    let bm25_path = path.join("bm25.bin");
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
-    let payload_store = engine.payload_store();
-
-    let pb = make_progress_bar(vector_store.id_map().keys().len() as u64)?;
-
-    for id in vector_store.id_map().keys() {
-        if is_interrupted() {
-            pb.abandon_with_message("Interrupted during BM25 build");
-            return Ok(());
-        }
-        if let Ok(Some(text)) = payload_store.get_text(*id) {
-            bm25.add_document(*id, &text);
-        }
-        pb.inc(1);
-    }
-
-    pb.finish_with_message("BM25 build complete");
-
-    bm25.save(&bm25_path)
-        .with_context(|| format!("Failed to save BM25 index to {}", bm25_path.display()))?;
-    println!("  BM25 index saved: {}", bm25_path.display());
-
-    tracing::info!("Index building completed");
-    println!("Index building completed.");
-    Ok(())
-}
-
-/// Incrementally update HNSW and BM25 indexes for changed IDs only.
-///
-/// Falls back to full rebuild if index files don't exist yet.
-pub fn update_indexes_incremental(
-    path: &Path,
-    engine: &StorageEngine,
-    config: &DbConfig,
-    added_ids: &[u64],
-    removed_ids: &[u64],
-) -> Result<()> {
-    let hnsw_path = path.join("hnsw.bin");
-    let bm25_path = path.join("bm25.bin");
-
-    // Fallback to full rebuild if index files missing
-    if !hnsw_path.exists() || !bm25_path.exists() {
-        tracing::info!("Index files missing, falling back to full rebuild");
-        println!("Index files not found, performing full rebuild...");
-        return build_indexes(path, engine, config);
-    }
-
-    let total_changes = added_ids.len() + removed_ids.len();
-    tracing::info!(added = added_ids.len(), removed = removed_ids.len(), "Incremental index update");
-    println!("Updating indexes incrementally ({} additions, {} removals)...", added_ids.len(), removed_ids.len());
-
-    // --- HNSW incremental update ---
-    let mut hnsw: HnswGraph<NormalizedCosineDistance> = HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
-        .with_context(|| "Failed to load HNSW graph")?;
-
-    let vector_store = engine.vector_store();
-
-    for &id in removed_ids {
-        // soft-delete; ignore PointNotFound (already removed from storage)
-        let _ = hnsw.delete(id);
-    }
-
-    for &id in added_ids {
-        let _ = hnsw.build_insert(vector_store, id);
-    }
-
-    hnsw.save(&hnsw_path)
-        .with_context(|| "Failed to save HNSW graph")?;
-
-    let hnsw_snap_path = path.join("hnsw.snap");
-    HnswSnapshot::save(&hnsw, &hnsw_snap_path)
-        .with_context(|| "Failed to save HNSW snapshot")?;
-    println!("  HNSW graph updated ({total_changes} changes) + snapshot.");
-
-    // --- BM25 incremental update ---
-    // Only init Korean dict if there are BM25 changes
-    if total_changes > 0 {
-        ensure_korean_dict()?;
-    }
-
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load_mutable(&bm25_path)
-        .with_context(|| "Failed to load BM25 index")?;
-
-    let payload_store = engine.payload_store();
-
-    for &id in removed_ids {
-        bm25.remove_document(id);
-    }
-
-    for &id in added_ids {
-        if let Ok(Some(text)) = payload_store.get_text(id) {
-            bm25.add_document(id, &text);
-        }
-    }
-
-    bm25.save(&bm25_path)
-        .with_context(|| "Failed to save BM25 index")?;
-    bm25.save_snapshot(path)
-        .with_context(|| "Failed to save BM25 snapshot")?;
-    println!("  BM25 index updated ({total_changes} changes) + snapshot.");
-
-    tracing::info!("Incremental index update completed");
-    Ok(())
-}
-
-/// Search result common to both find and serve.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SearchResultItem {
-    #[serde(default, skip_serializing_if = "is_id_zero")]
-    pub id: u64,
-    #[serde(default, skip_serializing_if = "is_score_zero")]
-    pub score: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
-fn is_id_zero(v: &u64) -> bool {
-    *v == 0
-}
-
-fn is_score_zero(v: &f32) -> bool {
-    *v == 0.0
-}
-
-/// Build search result items from raw (id, score) pairs.
-pub fn build_results(
-    results: &[(u64, f32)],
-    payload_store: &dyn PayloadStore,
-) -> Vec<SearchResultItem> {
-    let max_score = results.first().map(|(_, s)| *s).unwrap_or(1.0);
-
-    results
-        .iter()
-        .map(|&(id, score)| {
-            let text = payload_store.get_text(id).ok().flatten();
-            let payload = payload_store.get_payload(id).ok().flatten();
-            let source = payload
-                .as_ref()
-                .map(|p| p.source.clone())
-                .filter(|s: &String| !s.is_empty());
-            let title = payload
-                .as_ref()
-                .and_then(|p| p.custom.get("title"))
-                .and_then(|v| match v {
-                    PayloadValue::String(s) => Some(s.clone()),
-                    _ => None,
-                });
-            let url = payload
-                .as_ref()
-                .and_then(|p| p.custom.get("url"))
-                .and_then(|v| match v {
-                    PayloadValue::String(s) => Some(s.clone()),
-                    _ => None,
-                });
-
-            SearchResultItem {
-                id,
-                score: if max_score > 0.0 {
-                    score / max_score
-                } else {
-                    0.0
-                },
-                text,
-                source,
-                title,
-                url,
-            }
-        })
-        .collect()
-}
-
-/// Check if query contains Korean (Hangul) characters.
-///
-/// Returns `true` if any character is in the Hangul Syllables or Jamo range.
-pub fn has_korean(text: &str) -> bool {
-    text.chars().any(|c| {
-        ('\u{AC00}'..='\u{D7AF}').contains(&c)  // Hangul Syllables
-            || ('\u{1100}'..='\u{11FF}').contains(&c) // Hangul Jamo
-            || ('\u{3130}'..='\u{318F}').contains(&c) // Hangul Compatibility Jamo
-    })
-}
-
-/// Fusion alpha for convex combination, adjusted by query language.
-///
-/// Returns alpha in [0, 1]: higher = more weight on dense (vector) search.
-pub fn fusion_alpha(query: &str) -> f32 {
-    if has_korean(query) {
-        0.4 // Korean: BM25 형태소 매칭이 더 중요
-    } else {
-        0.7 // English: 벡터 유사도 우선
-    }
-}
-
-/// Max character length for text sent to embedding model.
-const EMBED_MAX_CHARS: usize = 8000;
-
-/// Truncate text at a char boundary for embedding.
-///
-/// Returns a new string if truncation occurs, otherwise the original slice.
-pub fn truncate_for_embed(text: &str) -> &str {
-    if text.len() <= EMBED_MAX_CHARS {
-        return text;
-    }
-    let mut end = EMBED_MAX_CHARS;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
-/// A record for batch ingestion (shared by add and update commands).
-#[derive(Clone)]
-pub struct IngestRecord {
-    pub id: u64,
-    pub text: String,
-    pub source: String,
-    pub title: Option<String>,
-    pub tags: Vec<String>,
-    pub chunk_index: usize,
-    pub chunk_total: usize,
-    pub source_modified_at: u64,
-    /// Extra custom fields to merge into payload (e.g., ast_hash).
-    pub custom: HashMap<String, PayloadValue>,
-}
-
-/// Built-in directory names always skipped during file scanning.
-const BUILTIN_SKIP_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    ".git",
-    ".swarm",
-    "__pycache__",
-    ".venv",
-    "dist",
-    "vendor",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".claude",
-    "build",
-    "mutants.out",
-];
-
-/// Check if a directory entry should be skipped during walkdir scanning.
-///
-/// Skips built-in cache/build directories and any user-specified `--exclude` dirs.
-pub fn should_skip_dir(dir_name: &OsStr, exclude: &[String]) -> bool {
-    let name = dir_name.to_string_lossy();
-    if BUILTIN_SKIP_DIRS.iter().any(|s| *s == name.as_ref()) {
-        return true;
-    }
-    // Skip v-hnsw database directories (e.g., .v-hnsw-code.db, .v-hnsw-sessions.db)
-    if name.starts_with(".v-hnsw") {
-        return true;
-    }
-    exclude.iter().any(|e| e == name.as_ref())
-}
-
-/// Get the file modification time as seconds since UNIX epoch.
-pub fn get_file_mtime(path: &Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-}
-
-// ============================================================================
-// Query Embedding Cache
-// ============================================================================
-
-const QUERY_CACHE_MAX: usize = 1000;
-const QUERY_CACHE_FILE: &str = "query_cache.bin";
-
-/// LRU cache for query embeddings, with disk persistence.
-///
-/// Stores query text → embedding vector mappings to skip model inference
-/// on repeated queries. Persisted to disk so cache survives daemon restarts.
-pub struct QueryCache {
-    cache: LruCache<String, Vec<f32>>,
-    db_path: PathBuf,
-}
-
-/// On-disk format: Vec of (query, embedding) pairs in LRU order.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CacheEntry {
-    query: String,
-    embedding: Vec<f32>,
-}
-
-impl QueryCache {
-    /// Global cache (not tied to a specific DB).
-    pub fn global() -> Self {
-        Self::load(&cache_dir())
-    }
-
-    /// Load cache from disk, or create empty if not found.
-    pub fn load(db_path: &Path) -> Self {
-        let cap = NonZeroUsize::new(QUERY_CACHE_MAX)
-            .unwrap_or(NonZeroUsize::MIN);
-        let mut cache = LruCache::new(cap);
-
-        let cache_path = db_path.join(QUERY_CACHE_FILE);
-        if let Ok(data) = std::fs::read(&cache_path)
-            && let Ok((entries, _)) = bincode::serde::decode_from_slice::<Vec<CacheEntry>, _>(
-                &data,
-                bincode::config::standard(),
-            )
-        {
-            // Insert in reverse to preserve LRU order (most recent last)
-            for entry in entries.into_iter().rev() {
-                cache.put(entry.query, entry.embedding);
-            }
-            tracing::debug!(count = cache.len(), "Query cache loaded");
-        }
-
-        Self {
-            cache,
-            db_path: db_path.to_path_buf(),
-        }
-    }
-
-    /// Get cached embedding for a query (promotes to most-recently-used).
-    pub fn get(&mut self, query: &str) -> Option<&Vec<f32>> {
-        self.cache.get(query)
-    }
-
-    /// Insert a query→embedding mapping.
-    pub fn insert(&mut self, query: String, embedding: Vec<f32>) {
-        self.cache.put(query, embedding);
-    }
-
-    /// Number of cached entries.
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Save cache to disk.
-    pub fn save(&self) -> Result<()> {
-        let entries: Vec<CacheEntry> = self.cache.iter()
-            .map(|(q, e)| CacheEntry {
-                query: q.clone(),
-                embedding: e.clone(),
-            })
-            .collect();
-
-        let encoded = bincode::serde::encode_to_vec(&entries, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("Failed to encode query cache: {e}"))?;
-
-        let cache_path = self.db_path.join(QUERY_CACHE_FILE);
-        std::fs::write(&cache_path, encoded)
-            .with_context(|| format!("Failed to write query cache to {}", cache_path.display()))?;
-
-        tracing::debug!(count = self.len(), "Query cache saved");
-        Ok(())
     }
 }

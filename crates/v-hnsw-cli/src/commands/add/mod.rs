@@ -3,7 +3,7 @@
 //! Detects input type (folder with .md files, .jsonl) and processes accordingly.
 //! Auto-creates database, embeds text, builds indexes.
 
-mod ingest;
+pub(crate) mod ingest;
 mod pipeline;
 
 #[cfg(test)]

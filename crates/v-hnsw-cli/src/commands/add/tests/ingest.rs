@@ -18,7 +18,7 @@ fn make_entry(name: &str, calls: &[&str]) -> CodeChunkEntry {
             end_byte: 0,
             imports: vec![],
             param_types: vec![],
-            return_type: None, ast_hash: 0, body_hash: 0,
+            return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
         },
         source: "test.rs".to_string(),
         file_path_str: "test.rs".to_string(),

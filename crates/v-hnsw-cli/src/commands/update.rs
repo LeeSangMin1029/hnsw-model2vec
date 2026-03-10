@@ -3,7 +3,6 @@
 //! Compares modification times and file sizes against a stored file index
 //! to detect new, modified, and deleted files. Re-processes only changed files.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -12,7 +11,7 @@ use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
-use super::common::{self, IngestRecord};
+use super::common;
 use super::create::DbConfig;
 use super::file_index;
 use crate::is_interrupted;
@@ -99,30 +98,12 @@ pub(crate) fn run_core(
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
     // Scan input folder for all supported files (markdown + code)
-    let all_files: Vec<PathBuf> = walkdir::WalkDir::new(input_path)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                !common::should_skip_dir(e.file_name(), exclude)
-            } else {
-                true
-            }
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    ext == "md"
-                        || ext == "markdown"
-                        || crate::chunk_code::is_supported_code_file(ext)
-                        || is_supported_text_file(ext)
-                })
-                .unwrap_or(false)
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+    let all_files = common::scan_files(input_path, exclude, |ext| {
+        ext == "md"
+            || ext == "markdown"
+            || crate::chunk_code::is_supported_code_file(ext)
+            || is_supported_text_file(ext)
+    });
 
     if all_files.is_empty() {
         eprintln!("No supported files found in {}", input_path.display());
@@ -135,12 +116,7 @@ pub(crate) fn run_core(
     let mut seen_files = std::collections::HashSet::new();
     let mut changes = ChangeSet::default();
 
-    let chunker = MarkdownChunker::new(ChunkConfig {
-        target_size: 1000,
-        overlap: 200,
-        min_size: 100,
-        include_heading_context: true,
-    });
+    let chunker = MarkdownChunker::new(ChunkConfig::default());
 
     // First pass: detect changes (mtime/size → content hash two-stage)
     let mut pending_files: Vec<(PathBuf, String, u64, u64, u64)> = Vec::new();
@@ -224,94 +200,12 @@ pub(crate) fn run_core(
             stats.new += 1;
         }
 
-        let is_code = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(crate::chunk_code::is_supported_code_file)
-            .unwrap_or(false);
-
-        let mut records: Vec<IngestRecord> = Vec::new();
-        let mut chunk_ids = Vec::new();
-
-        if is_code {
-            // Code file: tree-sitter chunking
-            let source_code = match std::fs::read_to_string(file_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Error reading {}: {e}", file_path.display());
-                    continue;
-                }
-            };
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let chunks = crate::chunk_code::chunk_for_language(ext, &source_code)
-                .unwrap_or_default();
-            let file_path_str = file_path.to_string_lossy().to_string();
-            let chunk_total = chunks.len();
-            let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
-
-            for chunk in &chunks {
-                let id = common::generate_id(source, chunk.chunk_index);
-                chunk_ids.push(id);
-                let embed_text = chunk.to_embed_text(&file_path_str, &[]);
-                let mut tags = vec![
-                    format!("kind:{}", chunk.kind.as_str()),
-                    format!("lang:{lang}"),
-                ];
-                if !chunk.visibility.is_empty() {
-                    tags.push(format!("vis:{}", chunk.visibility));
-                }
-                records.push(IngestRecord {
-                    id,
-                    text: embed_text,
-                    source: source.clone(),
-                    title: Some(chunk.name.clone()),
-                    tags,
-                    chunk_index: chunk.chunk_index,
-                    chunk_total,
-                    source_modified_at: *mtime,
-                    custom: chunk.to_custom_fields(&[]),
-                });
-            }
-        } else {
-            // Markdown file: heading-aware chunking
-            let (frontmatter, chunks) = match chunker.chunk_file(file_path) {
-                Ok(result) => result,
-                Err(e) => {
-                    eprintln!("Error processing {}: {e}", file_path.display());
-                    continue;
-                }
-            };
-
-            let title = frontmatter.as_ref().and_then(|f| f.title.clone());
-            let tags = frontmatter
-                .as_ref()
-                .map(|f| f.tags.clone())
-                .unwrap_or_default();
-            let chunk_total = chunks.len();
-
-            for chunk in chunks {
-                let id = common::generate_id(source, chunk.chunk_index);
-                chunk_ids.push(id);
-                records.push(IngestRecord {
-                    id,
-                    text: chunk.text,
-                    source: source.clone(),
-                    title: title.clone(),
-                    tags: tags.clone(),
-                    chunk_index: chunk.chunk_index,
-                    chunk_total,
-                    source_modified_at: *mtime,
-                    custom: HashMap::new(),
-                });
-            }
-        }
+        let (records, chunk_ids) =
+            super::add::ingest::chunk_single_file(file_path, source, *mtime, &chunker);
 
         if !records.is_empty() {
             #[allow(clippy::unwrap_used)]
-            process_records(&records, model.unwrap(), &mut engine)?;
+            common::embed_and_insert(&records, model.unwrap(), &mut engine)?;
             changes.added.extend(chunk_ids.iter());
         }
 
@@ -390,12 +284,6 @@ fn print_stats(stats: &UpdateStats, start: Instant) {
 
 /// Try to delegate update to running daemon (avoids 1GB model reload).
 fn try_daemon_update(db_path: &Path, input_path: &Path, exclude: &[String]) -> Result<UpdateStats> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpStream;
-
-    let port = super::serve::read_port_file()
-        .ok_or_else(|| anyhow::anyhow!("Daemon not running"))?;
-
     let canonical_db = db_path
         .canonicalize()
         .with_context(|| format!("Database not found: {}", db_path.display()))?;
@@ -403,82 +291,19 @@ fn try_daemon_update(db_path: &Path, input_path: &Path, exclude: &[String]) -> R
         .canonicalize()
         .with_context(|| format!("Input not found: {}", input_path.display()))?;
 
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
-        .parse()
-        .context("Failed to parse socket address")?;
-    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
-        .context("Failed to connect to daemon")?;
-
-    // Update can take a long time — generous timeouts
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(300)))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
-
-    let request = serde_json::json!({
-        "id": 0,
-        "method": "update",
-        "params": {
-            "db": canonical_db.to_str().unwrap_or(""),
-            "input": canonical_input.to_str().unwrap_or(""),
-            "exclude": exclude
-        }
+    let params = serde_json::json!({
+        "db": canonical_db.to_str().unwrap_or(""),
+        "input": canonical_input.to_str().unwrap_or(""),
+        "exclude": exclude
     });
-    writeln!(stream, "{}", serde_json::to_string(&request)?)?;
-    stream.flush()?;
 
-    let mut reader = BufReader::new(&stream);
-    let mut response_line = String::new();
-    reader.read_line(&mut response_line)?;
+    // Update can take a long time — generous read timeout (300s)
+    let result = super::serve::daemon_rpc("update", params, 300)?;
 
-    let response: serde_json::Value = serde_json::from_str(&response_line)
-        .context("Failed to parse daemon response")?;
-
-    if let Some(err) = response.get("error") {
-        anyhow::bail!("Daemon update failed: {}", err);
-    }
-
-    let result = response.get("result")
-        .ok_or_else(|| anyhow::anyhow!("No result in daemon response"))?;
-
-    let stats: UpdateStats = serde_json::from_value(result.clone())
+    let stats: UpdateStats = serde_json::from_value(result)
         .context("Failed to parse update stats")?;
 
     println!("Update completed via daemon (no extra process).");
     Ok(stats)
 }
 
-/// Process a batch of records: embed and insert.
-fn process_records(
-    records: &[IngestRecord],
-    model: &Model2VecModel,
-    engine: &mut StorageEngine,
-) -> Result<()> {
-    let texts: Vec<String> = records
-        .iter()
-        .map(|r| common::truncate_for_embed(&r.text).to_string())
-        .collect();
-
-    let embeddings = common::embed_sorted(model, &texts).context("Embedding failed")?;
-
-    let items: Vec<(u64, &[f32], _, &str)> = records
-        .iter()
-        .zip(embeddings.iter())
-        .map(|(rec, emb)| {
-            let payload = common::make_payload(
-                &rec.source,
-                rec.title.as_deref(),
-                &rec.tags,
-                rec.chunk_index,
-                rec.chunk_total,
-                rec.source_modified_at,
-                &rec.custom,
-            );
-            (rec.id, emb.as_slice(), payload, rec.text.as_str())
-        })
-        .collect();
-
-    engine
-        .insert_batch(&items)
-        .context("Failed to insert batch")?;
-
-    Ok(())
-}

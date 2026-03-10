@@ -38,55 +38,34 @@ pub struct FilePayloadStore {
 }
 
 impl FilePayloadStore {
-    /// Create a new payload store with fresh files.
+    /// Create a new payload store with fresh (truncated) files.
     pub fn create(payload_path: impl AsRef<Path>, text_path: impl AsRef<Path>) -> Result<Self> {
-        let payload_path = payload_path.as_ref().to_path_buf();
-        let text_path = text_path.as_ref().to_path_buf();
-
-        let payload_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open(&payload_path)?;
-
-        let text_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open(&text_path)?;
-
-        Ok(Self {
-            payload_path,
-            text_path,
-            payload_file,
-            text_file,
-            payload_index: HashMap::new(),
-            text_index: HashMap::new(),
-            source_index: HashMap::new(),
-            tag_index: HashMap::new(),  // RoaringBitmap
-            pending_payloads: HashMap::new(),
-            pending_texts: HashMap::new(),
-            compressed_reader: None,
-        })
+        Self::open_impl(payload_path, text_path, true)
     }
 
     /// Open an existing payload store.
     pub fn open(payload_path: impl AsRef<Path>, text_path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_impl(payload_path, text_path, false)
+    }
+
+    fn open_impl(
+        payload_path: impl AsRef<Path>,
+        text_path: impl AsRef<Path>,
+        truncate: bool,
+    ) -> Result<Self> {
         let payload_path = payload_path.as_ref().to_path_buf();
         let text_path = text_path.as_ref().to_path_buf();
 
         let payload_file = OpenOptions::new()
             .create(true)
-            .truncate(false)
+            .truncate(truncate)
             .write(true)
             .read(true)
             .open(&payload_path)?;
 
         let text_file = OpenOptions::new()
             .create(true)
-            .truncate(false)
+            .truncate(truncate)
             .write(true)
             .read(true)
             .open(&text_path)?;
@@ -99,7 +78,7 @@ impl FilePayloadStore {
             payload_index: HashMap::new(),
             text_index: HashMap::new(),
             source_index: HashMap::new(),
-            tag_index: HashMap::new(),  // RoaringBitmap
+            tag_index: HashMap::new(),
             pending_payloads: HashMap::new(),
             pending_texts: HashMap::new(),
             compressed_reader: None,

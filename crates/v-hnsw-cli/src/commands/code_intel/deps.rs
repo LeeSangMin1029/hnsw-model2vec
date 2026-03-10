@@ -1,127 +1,23 @@
 //! `v-hnsw deps` — bidirectional file-level dependency graph.
 //!
-//! Analyses `calls` and `types` fields to build a complete dependency graph
-//! showing both outgoing (→ uses) and incoming (← used by) edges per file.
+//! CLI command handler for the deps subcommand. Analysis logic lives in
+//! `v_hnsw_intel::deps`.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use anyhow::Result;
 
-use super::parse::CodeChunk;
 use super::{cached_json, load_chunks, OutputFormat};
+pub use v_hnsw_intel::deps::{DepGraph, collect_transitive_files, merge_deps, crate_group, common_prefix_len};
+// Re-exported for tests only.
+#[cfg(test)]
+pub use v_hnsw_intel::deps::{DepSet, resolve_symbol};
+use v_hnsw_intel::parse::CodeChunk;
+
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Schema descriptor for deps JSON output.
 const DEPS_SCHEMA: &str = "o=outgoing(uses),i=incoming(used_by),n=name,v=via";
-
-/// A dependency edge: target file + relationship type.
-pub(crate) type DepSet = BTreeSet<(String, &'static str)>;
-
-/// Complete bidirectional graph for a single file.
-pub(crate) struct FileNode {
-    /// Files this file depends on (outgoing).
-    pub(crate) outgoing: DepSet,
-    /// Files that depend on this file (incoming).
-    pub(crate) incoming: DepSet,
-}
-
-/// Full bidirectional dependency graph.
-pub(crate) struct DepGraph {
-    pub(crate) nodes: BTreeMap<String, FileNode>,
-}
-
-impl DepGraph {
-    /// Build from code chunks.
-    pub(crate) fn build(chunks: &[CodeChunk]) -> Self {
-        // Build symbol → file index.
-        let mut sym_to_file: BTreeMap<String, String> = BTreeMap::new();
-        for c in chunks {
-            sym_to_file.insert(c.name.to_lowercase(), c.file.clone());
-            if let Some(short) = c.name.rsplit("::").next() {
-                sym_to_file
-                    .entry(short.to_lowercase())
-                    .or_insert_with(|| c.file.clone());
-            }
-        }
-
-        let mut nodes: BTreeMap<String, FileNode> = BTreeMap::new();
-
-        for c in chunks {
-            let src = &c.file;
-
-            // Ensure source file has an entry.
-            nodes.entry(src.clone()).or_insert_with(|| FileNode {
-                outgoing: DepSet::new(),
-                incoming: DepSet::new(),
-            });
-
-            // Resolve calls → outgoing edges.
-            for call in &c.calls {
-                if let Some(target) = resolve_symbol(call, &sym_to_file)
-                    && target != *src {
-                        nodes
-                            .entry(src.clone())
-                            .or_insert_with(|| FileNode {
-                                outgoing: DepSet::new(),
-                                incoming: DepSet::new(),
-                            })
-                            .outgoing
-                            .insert((target.clone(), "calls"));
-
-                        // Reverse edge: target ← src.
-                        nodes
-                            .entry(target)
-                            .or_insert_with(|| FileNode {
-                                outgoing: DepSet::new(),
-                                incoming: DepSet::new(),
-                            })
-                            .incoming
-                            .insert((src.clone(), "calls"));
-                    }
-            }
-
-            // Resolve types → outgoing edges.
-            for ty in &c.types {
-                if let Some(target) = resolve_symbol(ty, &sym_to_file)
-                    && target != *src {
-                        nodes
-                            .entry(src.clone())
-                            .or_insert_with(|| FileNode {
-                                outgoing: DepSet::new(),
-                                incoming: DepSet::new(),
-                            })
-                            .outgoing
-                            .insert((target.clone(), "types"));
-
-                        nodes
-                            .entry(target)
-                            .or_insert_with(|| FileNode {
-                                outgoing: DepSet::new(),
-                                incoming: DepSet::new(),
-                            })
-                            .incoming
-                            .insert((src.clone(), "types"));
-                    }
-            }
-        }
-
-        Self { nodes }
-    }
-
-    /// Find a file by suffix match.
-    pub(crate) fn match_file(&self, query: &str) -> Vec<&str> {
-        self.nodes
-            .keys()
-            .filter(|k| k.ends_with(query) || *k == query)
-            .map(String::as_str)
-            .collect()
-    }
-
-    /// Count total edges (outgoing only, to avoid double-counting).
-    pub(crate) fn total_edges(&self) -> usize {
-        self.nodes.values().map(|n| n.outgoing.len()).sum()
-    }
-}
 
 /// Run the `deps` subcommand.
 pub fn run_deps(
@@ -154,81 +50,24 @@ pub fn run_deps(
     Ok(())
 }
 
-/// Resolve a symbol name to its defining file.
-pub(crate) fn resolve_symbol(symbol: &str, index: &BTreeMap<String, String>) -> Option<String> {
-    let lower = symbol.to_lowercase();
-
-    if let Some(f) = index.get(&lower) {
-        return Some(f.clone());
-    }
-
-    let short = lower
-        .rsplit_once("::")
-        .map_or_else(|| lower.rsplit_once('.').map_or(lower.as_str(), |p| p.1), |p| p.1);
-
-    index.get(short).cloned()
-}
-
-/// Merge dep edges by file, joining via labels.
-pub(crate) fn merge_deps(deps: &DepSet) -> BTreeMap<&str, Vec<&str>> {
-    let mut merged: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (file, via) in deps {
-        merged.entry(file.as_str()).or_default().push(via);
-    }
-    merged
-}
-
 /// Print a single file node (both directions).
-fn print_node(file: &str, node: &FileNode) {
+fn print_node(file: &str, node: &v_hnsw_intel::deps::FileNode) {
     let out_count = node.outgoing.len();
     let in_count = node.incoming.len();
-    println!("{file}  (→{out_count} ←{in_count})");
+    println!("{file}  (\u{2192}{out_count} \u{2190}{in_count})");
 
     if !node.outgoing.is_empty() {
         for (dep, vias) in &merge_deps(&node.outgoing) {
             let via_str = vias.join(", ");
-            println!("  → {dep} (via {via_str})");
+            println!("  \u{2192} {dep} (via {via_str})");
         }
     }
     if !node.incoming.is_empty() {
         for (dep, vias) in &merge_deps(&node.incoming) {
             let via_str = vias.join(", ");
-            println!("  ← {dep} (via {via_str})");
+            println!("  \u{2190} {dep} (via {via_str})");
         }
     }
-}
-
-/// Collect transitive files reachable from `start` up to `depth` levels.
-/// Traverses BOTH directions.
-fn collect_transitive_files(graph: &DepGraph, start: &str, depth: usize) -> BTreeSet<String> {
-    let mut visited = BTreeSet::new();
-    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-
-    for file in graph.match_file(start) {
-        queue.push_back((file.to_owned(), 0));
-    }
-
-    while let Some((file, level)) = queue.pop_front() {
-        if visited.contains(&file) || level >= depth {
-            continue;
-        }
-        visited.insert(file.clone());
-
-        if let Some(node) = graph.nodes.get(&file) {
-            for (target, _) in &node.outgoing {
-                if !visited.contains(target) {
-                    queue.push_back((target.clone(), level + 1));
-                }
-            }
-            for (source, _) in &node.incoming {
-                if !visited.contains(source) {
-                    queue.push_back((source.clone(), level + 1));
-                }
-            }
-        }
-    }
-
-    visited
 }
 
 /// Print deps for a single file (bidirectional).
@@ -311,27 +150,13 @@ fn compute_deps_json(db: &Path, file: Option<&str>, depth: usize) -> Result<Stri
 
 // ── HTML visualization ──────────────────────────────────────────────────
 
-/// Extract crate name from path for color grouping.
-pub(crate) fn crate_group(path: &str) -> &str {
-    if let Some(start) = path.find("crates/") {
-        let rest = &path[start + 7..];
-        if let Some(end) = rest.find('/') {
-            return &path[start..start + 7 + end];
-        }
-    }
-    if let Some(start) = path.find("src/") {
-        return &path[..start + 3];
-    }
-    path
-}
-
 /// Build function-level call graph data for HTML visualization.
 ///
 /// Compact format: short keys (`n`=name, `f`=file, `k`=kind, `s`=sig,
 /// `l`=lines, `g`=group), common path prefix stripped, isolated nodes removed.
 /// Returns `(nodes_json, links_json, groups_json)`.
 fn build_func_graph_json(chunks: &[CodeChunk]) -> (String, String, String) {
-    // Build name → chunk-index map for call resolution.
+    // Build name -> chunk-index map for call resolution.
     let mut name_to_idx: BTreeMap<String, usize> = BTreeMap::new();
     let mut short_to_idx: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -376,7 +201,7 @@ fn build_func_graph_json(chunks: &[CodeChunk]) -> (String, String, String) {
         }
     }
 
-    // Build compact index: old chunk idx → new compact idx.
+    // Build compact index: old chunk idx -> new compact idx.
     let connected_vec: Vec<usize> = connected.into_iter().collect();
     let mut old_to_new: BTreeMap<usize, usize> = BTreeMap::new();
     for (new_idx, &old_idx) in connected_vec.iter().enumerate() {
@@ -439,28 +264,6 @@ fn build_func_graph_json(chunks: &[CodeChunk]) -> (String, String, String) {
         links_parts.join(","),
         groups_json.join(","),
     )
-}
-
-/// Find the length of the common path prefix among all file paths.
-pub(crate) fn common_prefix_len(paths: &[&str]) -> usize {
-    if paths.is_empty() {
-        return 0;
-    }
-    let first = paths[0].as_bytes();
-    let mut len = first.len();
-    for p in &paths[1..] {
-        let b = p.as_bytes();
-        len = len.min(b.len());
-        for i in 0..len {
-            if first[i] != b[i] {
-                len = i;
-                break;
-            }
-        }
-    }
-    // Snap back to last '/' boundary.
-    let first_str = &paths[0][..len];
-    first_str.rfind('/').map_or(0, |i| i + 1)
 }
 
 /// Generate function-level call graph HTML from raw chunks.
