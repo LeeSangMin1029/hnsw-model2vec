@@ -90,7 +90,7 @@ fn run() -> anyhow::Result<()> {
         Commands::BuildIndex { path } => commands::buildindex::run(path),
         Commands::Get { path, ids } => commands::get::run(path, ids),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
-        Commands::Update { db, input, exclude } => commands::update::run(db, input, &exclude),
+        Commands::Update { db, input, exclude } => commands::update::run(db, input.map(Into::into), &exclude),
         Commands::Find { db, query, k, tag, full, vector, ef, min_score } => {
             commands::find::run(commands::find::FindParams {
                 db, query, k, tags: tag, full, vector, ef, min_score,
@@ -115,9 +115,15 @@ fn run() -> anyhow::Result<()> {
         Commands::Gather { db, symbol, depth, k, format, include_tests, detail } => {
             commands::code_intel::run_gather(db, symbol, depth, k, format, include_tests, detail)
         }
-        Commands::Detail { db, symbol, add, decision, why, constraint, rejected, failure, fix, delete } => {
+        Commands::Detail {
+            db, symbol, add, decision, why, constraint, rejected, failure, fix,
+            root_cause, reject_reason, reject_condition, resolve, invalidate, all, delete,
+            file_path, line_range, relate,
+        } => {
             commands::code_intel::detail::run_detail(commands::code_intel::detail::DetailParams {
-                db, symbol, add, decision, why, constraint, rejected, failure, fix, delete,
+                db, symbol, add, decision, why, constraint, rejected, failure, fix,
+                root_cause, reject_reason, reject_condition, resolve, invalidate, show_all: all, delete,
+                file_path, line_range, relate,
             })
         }
         Commands::Dupes { db, threshold, exclude_tests, k, json, embed, ast, all, min_lines } => {

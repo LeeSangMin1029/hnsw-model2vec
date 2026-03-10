@@ -8,7 +8,6 @@
 
 mod commands;
 pub mod deps;
-pub(crate) mod deps_html;
 pub mod detail;
 mod json_api;
 
@@ -60,8 +59,6 @@ pub use v_hnsw_intel::trace;
 pub enum OutputFormat {
     Text,
     Json,
-    /// Standalone HTML with interactive D3.js force-directed graph.
-    Html,
 }
 
 // ── Shared utilities (used by commands.rs and json_api.rs) ───────────────

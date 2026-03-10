@@ -1,5 +1,5 @@
 use crate::commands::code_intel::reason::{
-    self, HistoryItem, ReasonEntry,
+    self, HistoryItem, ReasonEntry, RejectedAlternative,
 };
 
 fn make_entry(symbol: &str) -> ReasonEntry {
@@ -8,14 +8,24 @@ fn make_entry(symbol: &str) -> ReasonEntry {
         decision: Some("use BTreeMap".to_owned()),
         why: Some("ordered iteration needed".to_owned()),
         constraints: vec!["must be deterministic".to_owned()],
-        rejected: vec!["HashMap — non-deterministic".to_owned()],
+        rejected: vec![RejectedAlternative {
+            approach: "HashMap — non-deterministic".to_owned(),
+            reason: None,
+            condition: None,
+        }],
         history: vec![HistoryItem {
             action: "create".to_owned(),
             date: "2025-01-01".to_owned(),
             note: Some("initial decision".to_owned()),
             failure: None,
             fix: None,
+            root_cause: None,
+            resolved: false,
+            commit: None,
         }],
+        file_path: None,
+        line_range: None,
+        related_symbols: Vec::new(),
     }
 }
 
@@ -62,6 +72,9 @@ fn summary_empty_fallback() {
         constraints: vec![],
         rejected: vec![],
         history: vec![],
+        file_path: None,
+        line_range: None,
+        related_symbols: Vec::new(),
     };
     assert_eq!(reason::one_line_summary(&entry), "reason recorded");
 }

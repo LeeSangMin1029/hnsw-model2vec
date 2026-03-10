@@ -1,5 +1,4 @@
 mod deps;
-mod deps_html;
 mod detail;
 mod gather;
 mod graph;

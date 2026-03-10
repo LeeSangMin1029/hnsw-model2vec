@@ -124,8 +124,8 @@ pub enum Commands {
     Update {
         /// Path to the database directory.
         db: PathBuf,
-        /// Input folder to scan for changes.
-        input: PathBuf,
+        /// Input folder to scan for changes (defaults to the path used during `add`).
+        input: Option<PathBuf>,
         /// Directories to exclude from scanning (can be specified multiple times).
         #[arg(long)]
         exclude: Vec<String>,
@@ -311,9 +311,36 @@ pub enum Commands {
         /// Record a fix (usually paired with --failure).
         #[arg(long)]
         fix: Option<String>,
+        /// Root cause symbol for a failure (used with --failure).
+        #[arg(long)]
+        root_cause: Option<String>,
+        /// Reason for rejecting an alternative (used with --rejected).
+        #[arg(long)]
+        reject_reason: Option<String>,
+        /// Condition under which the rejection applies (used with --rejected).
+        #[arg(long)]
+        reject_condition: Option<String>,
+        /// Mark the last failure as resolved.
+        #[arg(long)]
+        resolve: bool,
+        /// Invalidate the last failure with a reason.
+        #[arg(long)]
+        invalidate: Option<String>,
+        /// Show all history including resolved failures (default: hide resolved).
+        #[arg(long)]
+        all: bool,
         /// Delete the reasoning entry.
         #[arg(long)]
         delete: bool,
+        /// Source file path for location tracking (rename resilience).
+        #[arg(long)]
+        file_path: Option<String>,
+        /// Line range "start:end" for location tracking.
+        #[arg(long)]
+        line_range: Option<String>,
+        /// Related symbol for cross-referencing.
+        #[arg(long)]
+        relate: Option<String>,
     },
     /// Find duplicate code (token Jaccard default, --ast structural, --embed semantic).
     #[command(visible_alias = "dup")]

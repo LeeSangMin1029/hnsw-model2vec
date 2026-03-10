@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::commands::code_intel::deps::{
-    common_prefix_len, crate_group, merge_deps, resolve_symbol, DepGraph, DepSet,
-};
+use crate::commands::code_intel::deps::{merge_deps, resolve_symbol, DepGraph, DepSet};
+use v_hnsw_intel::deps::{common_prefix_len, crate_group};
 use crate::commands::code_intel::parse::CodeChunk;
 
 fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> CodeChunk {
