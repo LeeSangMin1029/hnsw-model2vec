@@ -54,3 +54,7 @@ models/
 
 # AI tool configs
 .pi/
+
+# Node.js
+node_modules/
+package-lock.json
