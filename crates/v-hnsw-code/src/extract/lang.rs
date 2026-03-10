@@ -18,10 +18,10 @@ pub fn extract_c_func_name(node: &tree_sitter::Node, src: &[u8]) -> String {
 
 /// Recursively search a declarator chain for the function identifier.
 fn find_func_name_in_declarator(node: &tree_sitter::Node, src: &[u8]) -> String {
-    if node.kind() == "function_declarator" {
-        if let Some(decl) = node.child_by_field_name("declarator") {
-            return decl.utf8_text(src).unwrap_or_default().to_owned();
-        }
+    if node.kind() == "function_declarator"
+        && let Some(decl) = node.child_by_field_name("declarator")
+    {
+        return decl.utf8_text(src).unwrap_or_default().to_owned();
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -100,17 +100,17 @@ pub fn extract_python_docstring(
         if child.kind() == "expression_statement" {
             let mut inner_cursor = child.walk();
             for inner in child.children(&mut inner_cursor) {
-                if inner.kind() == "string" || inner.kind() == "concatenated_string" {
-                    if let Ok(text) = inner.utf8_text(src) {
-                        let stripped = text
-                            .trim_start_matches("\"\"\"")
-                            .trim_start_matches("'''")
-                            .trim_end_matches("\"\"\"")
-                            .trim_end_matches("'''")
-                            .trim();
-                        if !stripped.is_empty() {
-                            return Some(stripped.to_owned());
-                        }
+                if (inner.kind() == "string" || inner.kind() == "concatenated_string")
+                    && let Ok(text) = inner.utf8_text(src)
+                {
+                    let stripped = text
+                        .trim_start_matches("\"\"\"")
+                        .trim_start_matches("'''")
+                        .trim_end_matches("\"\"\"")
+                        .trim_end_matches("'''")
+                        .trim();
+                    if !stripped.is_empty() {
+                        return Some(stripped.to_owned());
                     }
                 }
             }
@@ -131,10 +131,10 @@ pub fn extract_imports_by_kind(
     let mut imports = Vec::new();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        if import_kinds.contains(&child.kind()) {
-            if let Ok(text) = child.utf8_text(src) {
-                imports.push(text.to_owned());
-            }
+        if import_kinds.contains(&child.kind())
+            && let Ok(text) = child.utf8_text(src)
+        {
+            imports.push(text.to_owned());
         }
     }
     imports

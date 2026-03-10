@@ -53,6 +53,9 @@ pub fn simple_type_chunk(
 // Language-agnostic chunk builders (shared by all chunkers)
 // ---------------------------------------------------------------------------
 
+/// Function pointer extracting parameter name-type pairs from a tree-sitter node.
+pub type ExtractParamsFn = fn(&tree_sitter::Node, &[u8]) -> Vec<(String, String)>;
+
 /// Language-specific extraction callbacks.
 ///
 /// Each chunker defines a `const` instance mapping tree-sitter node kinds
@@ -66,7 +69,7 @@ pub struct LangExtractors {
     /// Extract visibility string (e.g. `"pub"`, `"export"`, `""`).
     pub extract_vis_fn: fn(&tree_sitter::Node, &[u8]) -> String,
     /// Extract parameter name-type pairs.
-    pub extract_params_fn: fn(&tree_sitter::Node, &[u8]) -> Vec<(String, String)>,
+    pub extract_params_fn: ExtractParamsFn,
     /// Extract return type.
     pub extract_return_fn: fn(&tree_sitter::Node, &[u8]) -> Option<String>,
     /// Extract doc comment given (parent, child, src).
@@ -271,17 +274,17 @@ pub fn chunk_standard(
             chunks.push(chunk);
         }
         // 2. type_chunk_kinds → simple_type_chunk with lang-specific visibility/type_refs
-        else if let Some(&(_, kind)) = lang.type_chunk_kinds.iter().find(|(k, _)| *k == actual_node.kind()) {
-            if let Some(mut chunk) = simple_type_chunk(
+        else if let Some(&(_, kind)) = lang.type_chunk_kinds.iter().find(|(k, _)| *k == actual_node.kind())
+            && let Some(mut chunk) = simple_type_chunk(
                 &actual_node, src, kind, doc, imports, chunks.len(), 0,
-            ) {
-                chunk.visibility = (lang.extract_vis_fn)(&actual_node, src);
-                chunk.type_refs = collect_sorted_unique(&actual_node, src, walk_for_type_ids);
-                if !extra_vis.is_empty() {
-                    chunk.visibility = extra_vis.to_owned();
-                }
-                chunks.push(chunk);
+            )
+        {
+            chunk.visibility = (lang.extract_vis_fn)(&actual_node, src);
+            chunk.type_refs = collect_sorted_unique(&actual_node, src, walk_for_type_ids);
+            if !extra_vis.is_empty() {
+                chunk.visibility = extra_vis.to_owned();
             }
+            chunks.push(chunk);
         }
 
         // 3. method_parent_kinds → extract_methods
@@ -303,16 +306,16 @@ fn unwrap_wrapper<'a>(
     child: &tree_sitter::Node<'a>,
     _src: &[u8],
 ) -> (tree_sitter::Node<'a>, &'static str) {
-    if let Some((wrapper, vis)) = lang.wrapper_kind {
-        if child.kind() == wrapper {
-            let mut inner_cursor = child.walk();
-            let found = child.children(&mut inner_cursor).find(|inner| {
-                lang.kind_map.iter().any(|(k, _)| *k == inner.kind())
-                    || lang.type_chunk_kinds.iter().any(|(k, _)| *k == inner.kind())
-            });
-            if let Some(n) = found {
-                return (n, vis);
-            }
+    if let Some((wrapper, vis)) = lang.wrapper_kind
+        && child.kind() == wrapper
+    {
+        let mut inner_cursor = child.walk();
+        let found = child.children(&mut inner_cursor).find(|inner| {
+            lang.kind_map.iter().any(|(k, _)| *k == inner.kind())
+                || lang.type_chunk_kinds.iter().any(|(k, _)| *k == inner.kind())
+        });
+        if let Some(n) = found {
+            return (n, vis);
         }
     }
     (*child, "")

@@ -26,10 +26,11 @@ fn hash_node_recursive(node: &tree_sitter::Node, src: &[u8], h: &mut impl Hasher
     // For operators and keywords, include the actual text (e.g., "+", "return").
     // For identifiers and literals, hash only the *kind* (already done above)
     // so that renamed variables / different constants still match.
-    if !is_identifier_or_literal(kind) && node.child_count() == 0 {
-        if let Ok(text) = node.utf8_text(src) {
-            text.hash(h);
-        }
+    if !is_identifier_or_literal(kind)
+        && node.child_count() == 0
+        && let Ok(text) = node.utf8_text(src)
+    {
+        text.hash(h);
     }
 
     // Hash child count to distinguish `f(a)` from `f(a, b)`
@@ -285,7 +286,7 @@ pub fn minhash_to_hex(sig: &[u64]) -> String {
 
 /// Decode MinHash signature from hex string.
 pub fn minhash_from_hex(hex: &str) -> Option<Vec<u64>> {
-    if hex.len() % 16 != 0 {
+    if !hex.len().is_multiple_of(16) {
         return None;
     }
     let k = hex.len() / 16;
