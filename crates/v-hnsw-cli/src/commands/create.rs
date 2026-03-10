@@ -30,6 +30,9 @@ pub struct DbConfig {
     /// Content type: "code", "markdown", or "mixed".
     #[serde(default = "default_content_type")]
     pub content_type: String,
+    /// Original input path used during `add` (for `update` default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_path: Option<String>,
 }
 
 fn default_content_type() -> String {
@@ -127,6 +130,7 @@ pub fn run(
         korean,
         embed_model: None,  // Set later when inserting with --embed
         content_type: default_content_type(),
+        input_path: None,
     };
     db_config.save(&path)?;
 

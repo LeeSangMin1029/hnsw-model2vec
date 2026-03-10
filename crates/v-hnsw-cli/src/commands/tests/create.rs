@@ -15,6 +15,7 @@ fn db_config_roundtrip_serde() {
         korean: true,
         embed_model: Some("test-model".to_string()),
         content_type: "code".to_string(),
+        input_path: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -59,6 +60,7 @@ fn db_config_save_and_load_roundtrip() {
         korean: false,
         embed_model: None,
         content_type: "markdown".to_string(),
+        input_path: None,
     };
 
     config.save(tmp_dir.path()).unwrap();
@@ -90,6 +92,7 @@ fn db_config_embed_model_skip_serializing_if_none() {
         korean: false,
         embed_model: None,
         content_type: "mixed".to_string(),
+        input_path: None,
     };
 
     let json = serde_json::to_string(&config).unwrap();

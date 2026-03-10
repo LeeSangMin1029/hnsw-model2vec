@@ -14,6 +14,14 @@ use crate::commands::common;
 use crate::commands::file_index;
 use crate::is_interrupted;
 
+/// Result of an ingest operation.
+pub struct IngestResult {
+    pub inserted: u64,
+    pub errors: u64,
+    pub added_ids: Vec<u64>,
+    pub removed_ids: Vec<u64>,
+}
+
 /// Process markdown folder: chunk files, embed, insert.
 pub fn process_markdown_folder(
     db_path: &Path,
@@ -21,7 +29,7 @@ pub fn process_markdown_folder(
     model: &Model2VecModel,
     engine: &mut StorageEngine,
     exclude: &[String],
-) -> Result<(u64, u64, Vec<u64>)> {
+) -> Result<IngestResult> {
     let md_files = common::scan_files(input_path, exclude, |ext| {
         ext == "md" || ext == "markdown"
     });
@@ -41,7 +49,7 @@ pub fn process_markdown_files(
     md_files: &[PathBuf],
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64, Vec<u64>)> {
+) -> Result<IngestResult> {
     let chunker = MarkdownChunker::new(ChunkConfig::default());
 
     println!("Found {} markdown file(s)", md_files.len());
@@ -101,13 +109,36 @@ pub fn process_markdown_files(
 /// Process records and update the file metadata index.
 ///
 /// Shared tail logic for `process_markdown_files` and `process_code_files`.
+/// Returns `(inserted, errors, added_ids, removed_ids)`.
 pub(crate) fn finalize_ingest(
     db_path: &Path,
     records: Vec<IngestRecord>,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
     file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
-) -> Result<(u64, u64, Vec<u64>)> {
+) -> Result<IngestResult> {
+    // Remove stale chunks for files being re-added
+    let mut removed_ids = Vec::new();
+    let file_index = file_index::load_file_index(db_path)?;
+    for (path, (_, _, new_ids)) in &file_metadata_map {
+        if let Some(existing) = file_index.get_file(path) {
+            // Remove old IDs that are NOT in the new set (chunk_index shifted)
+            for &old_id in &existing.chunk_ids {
+                if !new_ids.contains(&old_id) {
+                    let _ = engine.remove(old_id);
+                    removed_ids.push(old_id);
+                }
+            }
+        }
+    }
+    if !removed_ids.is_empty() {
+        engine.checkpoint().ok();
+        eprintln!(
+            "Removed {} stale chunks from re-added files",
+            removed_ids.len()
+        );
+    }
+
     let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
 
     let mut file_index = file_index::load_file_index(db_path)?;
@@ -116,7 +147,12 @@ pub(crate) fn finalize_ingest(
     }
     file_index::save_file_index(db_path, &file_index)?;
 
-    Ok((inserted, errors, inserted_ids))
+    Ok(IngestResult {
+        inserted,
+        errors,
+        added_ids: inserted_ids,
+        removed_ids,
+    })
 }
 
 /// Chunk a single file (code or markdown) into [`IngestRecord`]s.
@@ -336,7 +372,7 @@ pub fn process_code_folder(
     model: &Model2VecModel,
     engine: &mut StorageEngine,
     exclude: &[String],
-) -> Result<(u64, u64, Vec<u64>)> {
+) -> Result<IngestResult> {
     let code_files = common::scan_files(input_path, exclude, crate::chunk_code::is_supported_code_file);
 
     if code_files.is_empty() {
@@ -354,7 +390,7 @@ pub fn process_code_files(
     code_files: &[PathBuf],
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64, Vec<u64>)> {
+) -> Result<IngestResult> {
     println!("Found {} code file(s)", code_files.len());
 
     // === Pass 1: Chunk all files, collect CodeChunk + metadata ===
@@ -462,7 +498,7 @@ pub fn process_jsonl(
     input_path: &Path,
     model: &Model2VecModel,
     engine: &mut StorageEngine,
-) -> Result<(u64, u64, Vec<u64>)> {
+) -> Result<IngestResult> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(input_path)
@@ -549,6 +585,12 @@ pub fn process_jsonl(
 
     println!("Total records to process: {}", records.len());
 
-    process_records(records, model, engine)
+    let (inserted, errors, added_ids) = process_records(records, model, engine)?;
+    Ok(IngestResult {
+        inserted,
+        errors,
+        added_ids,
+        removed_ids: Vec::new(),
+    })
 }
 

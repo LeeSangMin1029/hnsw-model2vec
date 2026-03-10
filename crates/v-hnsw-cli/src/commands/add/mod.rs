@@ -123,14 +123,19 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         InputType::MarkdownFolder | InputType::SingleMarkdown => "markdown",
         InputType::Jsonl => "mixed",
     };
-    if let Ok(mut config) = DbConfig::load(&db_path)
-        && (config.content_type.is_empty() || config.content_type == "mixed") {
+    if let Ok(mut config) = DbConfig::load(&db_path) {
+        if config.content_type.is_empty() || config.content_type == "mixed" {
             config.content_type = content_type.to_owned();
-            let _ = config.save(&db_path);
         }
+        // Store input_path for `update` default
+        if let Ok(canonical) = input_path.canonicalize() {
+            config.input_path = Some(canonical.to_string_lossy().into_owned());
+        }
+        let _ = config.save(&db_path);
+    }
 
     // Process based on input type
-    let (inserted, errors, added_ids) = match input_type {
+    let result = match input_type {
         InputType::MarkdownFolder => {
             ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine, exclude)?
         }
@@ -148,6 +153,9 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         }
     };
 
+    let inserted = result.inserted;
+    let errors = result.errors;
+
     if is_interrupted() {
         println!();
         println!("Operation interrupted. Partial data may have been inserted.");
@@ -161,7 +169,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 
     // Update indexes incrementally (falls back to full rebuild if no existing index)
     let config = DbConfig::load(&db_path)?;
-    common::update_indexes_incremental(&db_path, &engine, &config, &added_ids, &[])?;
+    common::update_indexes_incremental(&db_path, &engine, &config, &result.added_ids, &result.removed_ids)?;
 
     // Notify daemon to reload if running
     if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {

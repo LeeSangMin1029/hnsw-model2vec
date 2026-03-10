@@ -34,13 +34,28 @@ pub(crate) struct UpdateStats {
 }
 
 /// Run the update command - incremental indexing (CLI entry point).
-pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<()> {
+pub fn run(db_path: PathBuf, input_path: Option<PathBuf>, exclude: &[String]) -> Result<()> {
     if !db_path.exists() {
         anyhow::bail!(
             "Database not found at {}. Use 'add' command to create a new database.",
             db_path.display()
         );
     }
+
+    // Resolve input_path: explicit arg > config.input_path
+    let input_path = match input_path {
+        Some(p) => p,
+        None => {
+            let config = super::create::DbConfig::load(&db_path)?;
+            match config.input_path {
+                Some(ref p) => PathBuf::from(p),
+                None => anyhow::bail!(
+                    "No input path specified and none stored in config.\n\
+                     Usage: v-hnsw update <DB> <INPUT>"
+                ),
+            }
+        }
+    };
 
     if !input_path.is_dir() {
         anyhow::bail!(

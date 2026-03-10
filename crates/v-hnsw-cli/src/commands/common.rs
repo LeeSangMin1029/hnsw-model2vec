@@ -181,6 +181,7 @@ pub fn ensure_database(
             korean,
             embed_model: Some(model_name.to_string()),
             content_type: String::new(), // set by caller after creation
+            input_path: None,
         };
         db_config.save(path)?;
 
