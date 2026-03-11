@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use v_hnsw_core::PointId;
 
+use super::fieldnorm::FieldNormLut;
 use super::index::PostingList;
 use super::scorer::Bm25Params;
 
@@ -58,6 +59,8 @@ pub fn maxscore_search(
     params: &Bm25Params,
     doc_lengths: &HashMap<PointId, u32>,
     avg_doc_len: f32,
+    fieldnorm_lut: Option<&FieldNormLut>,
+    fieldnorm_codes: &HashMap<PointId, u8>,
 ) -> Vec<(PointId, f32)> {
     if terms.is_empty() || k == 0 {
         return Vec::new();
@@ -110,12 +113,22 @@ pub fn maxscore_search(
 
         // Score essential terms (high max_contribution — always evaluated)
         let mut score = 0.0f32;
-        let doc_len = doc_lengths.get(&doc_id).copied().unwrap_or(0);
+
+        // Inline scoring helper using LUT when available
+        let score_term = |idf: f32, tf: u32| -> f32 {
+            if let Some(lut) = fieldnorm_lut {
+                let code = fieldnorm_codes.get(&doc_id).copied().unwrap_or(0);
+                idf * lut.tf_norm(params.k1, tf, code)
+            } else {
+                let doc_len = doc_lengths.get(&doc_id).copied().unwrap_or(0);
+                idf * params.tf_norm(tf, doc_len, avg_doc_len)
+            }
+        };
 
         for cursor in cursors[essential_idx..].iter_mut() {
             if !cursor.is_exhausted() && cursor.current_doc_id() == doc_id {
                 let tf = cursor.postings[cursor.pos].tf;
-                score += cursor.idf * params.tf_norm(tf, doc_len, avg_doc_len);
+                score += score_term(cursor.idf, tf);
                 cursor.pos += 1;
             }
         }
@@ -132,7 +145,7 @@ pub fn maxscore_search(
             for cursor in cursors[..essential_idx].iter_mut() {
                 if !cursor.is_exhausted() && cursor.current_doc_id() == doc_id {
                     let tf = cursor.postings[cursor.pos].tf;
-                    score += cursor.idf * params.tf_norm(tf, doc_len, avg_doc_len);
+                    score += score_term(cursor.idf, tf);
                     cursor.pos += 1;
                 }
             }

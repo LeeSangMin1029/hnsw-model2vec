@@ -90,7 +90,7 @@ fn run() -> anyhow::Result<()> {
         Commands::BuildIndex { path } => commands::buildindex::run(path),
         Commands::Get { path, ids } => commands::get::run(path, ids),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
-        Commands::Update { db, input, exclude } => commands::update::run(db, input.map(Into::into), &exclude),
+        Commands::Update { db, input, exclude } => commands::update::run(db, input, &exclude),
         Commands::Find { db, query, k, tag, full, vector, ef, min_score } => {
             commands::find::run(commands::find::FindParams {
                 db, query, k, tags: tag, full, vector, ef, min_score,

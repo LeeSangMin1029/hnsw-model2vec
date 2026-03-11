@@ -151,6 +151,7 @@ impl Sq8Params {
                 "SQ8 params file too short".into(),
             ));
         }
+        #[expect(clippy::unwrap_used, reason = "fixed-size slice guaranteed by bounds check above")]
         let dim = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
         let expected = 4 + dim * 8;
         if data.len() < expected {
@@ -164,12 +165,14 @@ impl Sq8Params {
         let mut ranges = Vec::with_capacity(dim);
         for i in 0..dim {
             let offset = 4 + i * 4;
+            #[expect(clippy::unwrap_used, reason = "4-byte slice always converts to [u8; 4]")]
             mins.push(f32::from_le_bytes(
                 data[offset..offset + 4].try_into().unwrap(),
             ));
         }
         for i in 0..dim {
             let offset = 4 + dim * 4 + i * 4;
+            #[expect(clippy::unwrap_used, reason = "4-byte slice always converts to [u8; 4]")]
             ranges.push(f32::from_le_bytes(
                 data[offset..offset + 4].try_into().unwrap(),
             ));

@@ -85,6 +85,9 @@ impl Sq8VectorStore {
             ));
         }
 
+        // All try_into() calls below convert fixed-size slices to arrays,
+        // which cannot fail since HEADER_SIZE check above guarantees 64+ bytes.
+        #[expect(clippy::unwrap_used, reason = "fixed-size slices from bounds-checked mmap")]
         let magic = u64::from_le_bytes(mmap[0..8].try_into().unwrap());
         if magic != MAGIC {
             return Err(VhnswError::InvalidArgument(format!(
@@ -92,6 +95,7 @@ impl Sq8VectorStore {
             )));
         }
 
+        #[expect(clippy::unwrap_used, reason = "fixed-size slices from bounds-checked mmap")]
         let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
         if version != FORMAT_VERSION {
             return Err(VhnswError::InvalidArgument(format!(
@@ -99,8 +103,11 @@ impl Sq8VectorStore {
             )));
         }
 
+        #[expect(clippy::unwrap_used, reason = "fixed-size slices from bounds-checked mmap")]
         let dim = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
+        #[expect(clippy::unwrap_used, reason = "fixed-size slices from bounds-checked mmap")]
         let live_count = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
+        #[expect(clippy::unwrap_used, reason = "fixed-size slices from bounds-checked mmap")]
         let capacity = u64::from_le_bytes(mmap[24..32].try_into().unwrap()) as u32;
 
         Ok(Self {

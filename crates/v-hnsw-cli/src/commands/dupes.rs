@@ -451,7 +451,8 @@ fn print_groups_text(groups: &[(u64, Vec<u64>)], pstore: &impl PayloadStore, db:
         .collect();
     strip_common_prefix(&mut all_files);
 
-    let mut by_file: Vec<(String, Vec<(usize, u64, String)>)> = Vec::new();
+    type FileGroup = (String, Vec<(usize, u64, String)>);
+    let mut by_file: Vec<FileGroup> = Vec::new();
     let mut file_index: HashMap<String, usize> = HashMap::new();
     let mut fi = 0;
 

@@ -215,16 +215,14 @@ fn acquire_lock(lock_path: &Path) -> Result<LockGuard> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Check if the lock file is stale (older than 30 seconds)
-                if let Ok(metadata) = fs::metadata(lock_path) {
-                    if let Ok(modified) = metadata.modified() {
-                        if let Ok(age) = modified.elapsed() {
-                            if age > Duration::from_secs(30) {
-                                // Stale lock — remove and retry immediately
-                                let _ = fs::remove_file(lock_path);
-                                continue;
-                            }
-                        }
-                    }
+                if let Ok(metadata) = fs::metadata(lock_path)
+                    && let Ok(modified) = metadata.modified()
+                    && let Ok(age) = modified.elapsed()
+                    && age > Duration::from_secs(30)
+                {
+                    // Stale lock — remove and retry immediately
+                    let _ = fs::remove_file(lock_path);
+                    continue;
                 }
 
                 if attempt < MAX_RETRIES - 1 {
@@ -272,10 +270,10 @@ pub fn load_reason_with_fallback(
     if let (Some(fp), Some(ln)) = (file_path, line) {
         let key = location_key(fp, ln);
         let index = load_location_index(db)?;
-        if let Some(old_symbol) = index.get(&key) {
-            if let Some(entry) = load_reason(db, old_symbol)? {
-                return Ok(Some(entry));
-            }
+        if let Some(old_symbol) = index.get(&key)
+            && let Some(entry) = load_reason(db, old_symbol)?
+        {
+            return Ok(Some(entry));
         }
     }
     Ok(None)

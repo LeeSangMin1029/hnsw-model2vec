@@ -6,6 +6,7 @@ use crate::bm25::index::{Posting, PostingList};
 use crate::bm25::maxscore::maxscore_search;
 use crate::bm25::scorer::Bm25Params;
 
+
 fn make_pl(entries: &[(PointId, u32)]) -> PostingList {
     let mut pl = PostingList::new();
     for &(doc_id, tf) in entries {
@@ -32,7 +33,7 @@ fn test_maxscore_basic() {
         (&pl2, params.idf(2, 3)),
     ];
 
-    let results = maxscore_search(&terms, 2, &params, &doc_lengths, 11.0);
+    let results = maxscore_search(&terms, 2, &params, &doc_lengths, 11.0, None, &HashMap::new());
     assert!(!results.is_empty());
     assert!(results.len() <= 2);
     // Doc 3 should rank high (tf=3 in pl1, tf=1 in pl2, short doc)
@@ -58,7 +59,7 @@ fn test_maxscore_matches_brute_force() {
         (&pl3, params.idf(pl3.df(), total_docs)),
     ];
 
-    let maxscore_results = maxscore_search(&terms, 3, &params, &doc_lengths, avg_dl);
+    let maxscore_results = maxscore_search(&terms, 3, &params, &doc_lengths, avg_dl, None, &HashMap::new());
 
     // Brute-force scoring
     let mut brute_scores: HashMap<PointId, f32> = HashMap::new();
@@ -86,7 +87,7 @@ fn test_maxscore_empty() {
     let doc_lengths = HashMap::new();
     let params = Bm25Params::default();
     let terms: Vec<(&PostingList, f32)> = vec![];
-    let results = maxscore_search(&terms, 10, &params, &doc_lengths, 0.0);
+    let results = maxscore_search(&terms, 10, &params, &doc_lengths, 0.0, None, &HashMap::new());
     assert!(results.is_empty());
 }
 
@@ -97,7 +98,7 @@ fn test_maxscore_single_term() {
     let params = Bm25Params::default();
 
     let terms = vec![(&pl, params.idf(3, 10))];
-    let results = maxscore_search(&terms, 2, &params, &doc_lengths, 13.3);
+    let results = maxscore_search(&terms, 2, &params, &doc_lengths, 13.3, None, &HashMap::new());
     assert_eq!(results.len(), 2);
     // Doc 1 should rank highest (tf=3, avg doc length)
     assert_eq!(results[0].0, 1);
@@ -113,7 +114,7 @@ fn test_maxscore_k_zero() {
     let doc_lengths = make_doc_lengths(&[(1, 10)]);
     let params = Bm25Params::default();
     let terms = vec![(&pl, params.idf(1, 1))];
-    let results = maxscore_search(&terms, 0, &params, &doc_lengths, 10.0);
+    let results = maxscore_search(&terms, 0, &params, &doc_lengths, 10.0, None, &HashMap::new());
     assert!(results.is_empty());
 }
 
@@ -124,7 +125,7 @@ fn test_maxscore_all_empty_posting_lists() {
     let doc_lengths = HashMap::new();
     let params = Bm25Params::default();
     let terms = vec![(&pl1, 1.0), (&pl2, 1.0)];
-    let results = maxscore_search(&terms, 10, &params, &doc_lengths, 0.0);
+    let results = maxscore_search(&terms, 10, &params, &doc_lengths, 0.0, None, &HashMap::new());
     assert!(results.is_empty());
 }
 
@@ -134,7 +135,7 @@ fn test_maxscore_k_larger_than_docs() {
     let doc_lengths = make_doc_lengths(&[(1, 10), (2, 15)]);
     let params = Bm25Params::default();
     let terms = vec![(&pl, params.idf(2, 2))];
-    let results = maxscore_search(&terms, 100, &params, &doc_lengths, 12.5);
+    let results = maxscore_search(&terms, 100, &params, &doc_lengths, 12.5, None, &HashMap::new());
     assert_eq!(results.len(), 2);
 }
 
@@ -155,7 +156,7 @@ fn test_maxscore_no_overlap_between_terms() {
         (&pl3, params.idf(pl3.df(), total_docs)),
     ];
 
-    let results = maxscore_search(&terms, 5, &params, &doc_lengths, avg_dl);
+    let results = maxscore_search(&terms, 5, &params, &doc_lengths, avg_dl, None, &HashMap::new());
     // All 5 docs should appear since they each have at least one matching term
     assert_eq!(results.len(), 5);
 }
@@ -176,7 +177,7 @@ fn test_maxscore_all_terms_same_posting_list() {
         (&pl3, params.idf(2, 2)),
     ];
 
-    let maxscore_results = maxscore_search(&terms, 2, &params, &doc_lengths, avg_dl);
+    let maxscore_results = maxscore_search(&terms, 2, &params, &doc_lengths, avg_dl, None, &HashMap::new());
     assert_eq!(maxscore_results.len(), 2);
 
     // Verify against brute force
@@ -213,7 +214,7 @@ fn test_maxscore_results_sorted_descending() {
         (&pl3, params.idf(3, 5)),
     ];
 
-    let results = maxscore_search(&terms, 5, &params, &doc_lengths, 13.4);
+    let results = maxscore_search(&terms, 5, &params, &doc_lengths, 13.4, None, &HashMap::new());
     for w in results.windows(2) {
         assert!(w[0].1 >= w[1].1, "Results not sorted descending: {:?}", results);
     }
@@ -236,6 +237,6 @@ fn test_maxscore_missing_doc_length() {
     ];
 
     // Should not panic; missing doc_len defaults to 0
-    let results = maxscore_search(&terms, 5, &params, &doc_lengths, 10.0);
+    let results = maxscore_search(&terms, 5, &params, &doc_lengths, 10.0, None, &HashMap::new());
     assert!(!results.is_empty());
 }

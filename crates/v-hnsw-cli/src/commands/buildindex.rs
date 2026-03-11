@@ -128,6 +128,7 @@ fn build_bm25(
                 text_count += 1;
             }
     }
+    bm25.build_fieldnorm_cache();
     bm25.save(path).with_context(|| "failed to save BM25")?;
     bm25.save_snapshot(db_dir).with_context(|| "failed to save BM25 snapshot")?;
     println!("  BM25 built: {} documents (+ snapshot)", text_count);

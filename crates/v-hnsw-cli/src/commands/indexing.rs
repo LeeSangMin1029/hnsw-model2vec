@@ -79,6 +79,7 @@ pub fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> 
 
     pb.finish_with_message("BM25 build complete");
 
+    bm25.build_fieldnorm_cache();
     bm25.save(&bm25_path)
         .with_context(|| format!("Failed to save BM25 index to {}", bm25_path.display()))?;
     println!("  BM25 index saved: {}", bm25_path.display());
@@ -157,6 +158,7 @@ pub fn update_indexes_incremental(
         }
     }
 
+    bm25.build_fieldnorm_cache();
     bm25.save(&bm25_path)
         .with_context(|| "Failed to save BM25 index")?;
     bm25.save_snapshot(path)
@@ -257,11 +259,11 @@ fn update_sq8(
     let id_map = vector_store.id_map();
     let mut buf = vec![0u8; params.dim()];
     for &id in added_ids {
-        if let Some(&slot) = id_map.get(&id) {
-            if let Ok(vec) = vector_store.get(id) {
-                params.quantize_into(vec, &mut buf);
-                sq8_store.insert_at(id, slot, &buf)?;
-            }
+        if let Some(&slot) = id_map.get(&id)
+            && let Ok(vec) = vector_store.get(id)
+        {
+            params.quantize_into(vec, &mut buf);
+            sq8_store.insert_at(id, slot, &buf)?;
         }
     }
 

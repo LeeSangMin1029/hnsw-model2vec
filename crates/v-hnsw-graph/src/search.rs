@@ -224,9 +224,8 @@ pub fn search_two_stage<N: NodeGraph>(
     // Rescore all candidates with exact distance
     let mut rescored: Vec<(PointId, f32)> = Vec::with_capacity(approx_results.len());
     for (id, _approx_dist) in &approx_results {
-        match exact_dc.distance(query, *id) {
-            Ok(exact_dist) => rescored.push((*id, exact_dist)),
-            Err(_) => {} // skip if f32 vector missing
+        if let Ok(exact_dist) = exact_dc.distance(query, *id) {
+            rescored.push((*id, exact_dist));
         }
     }
 

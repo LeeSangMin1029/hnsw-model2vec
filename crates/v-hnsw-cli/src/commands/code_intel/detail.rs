@@ -158,10 +158,10 @@ fn run_delete(db: &std::path::Path, symbol: &str) -> Result<()> {
 /// Parse a line range string "start:end" into `(usize, usize)`.
 fn parse_line_range(s: &str) -> Option<(usize, usize)> {
     let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() == 2 {
-        if let (Ok(start), Ok(end)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
-            return Some((start, end));
-        }
+    if parts.len() == 2
+        && let (Ok(start), Ok(end)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>())
+    {
+        return Some((start, end));
     }
     None
 }
@@ -223,11 +223,11 @@ fn run_mutate(
             changes.push(format!("added related symbol: {rel}"));
 
             // Bidirectional: also update the related symbol's entry
-            if let Ok(Some(mut related_entry)) = reason::load_reason(db, rel) {
-                if !related_entry.related_symbols.contains(&symbol.to_owned()) {
-                    related_entry.related_symbols.push(symbol.to_owned());
-                    let _ = reason::save_reason(db, &related_entry);
-                }
+            if let Ok(Some(mut related_entry)) = reason::load_reason(db, rel)
+                && !related_entry.related_symbols.contains(&symbol.to_owned())
+            {
+                related_entry.related_symbols.push(symbol.to_owned());
+                let _ = reason::save_reason(db, &related_entry);
             }
         } else {
             changes.push(format!("related symbol already exists: {rel}"));

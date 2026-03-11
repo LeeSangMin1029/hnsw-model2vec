@@ -140,13 +140,13 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             ingest::process_markdown_folder(&db_path, &input_path, &model, &mut engine, exclude)?
         }
         InputType::SingleMarkdown => {
-            ingest::process_markdown_files(&db_path, &[input_path.clone()], &model, &mut engine)?
+            ingest::process_markdown_files(&db_path, std::slice::from_ref(&input_path), &model, &mut engine)?
         }
         InputType::CodeFolder => {
             ingest::process_code_folder(&db_path, &input_path, &model, &mut engine, exclude)?
         }
         InputType::SingleCode => {
-            ingest::process_code_files(&db_path, &[input_path.clone()], &model, &mut engine)?
+            ingest::process_code_files(&db_path, std::slice::from_ref(&input_path), &model, &mut engine)?
         }
         InputType::Jsonl => {
             ingest::process_jsonl(&db_path, &input_path, &model, &mut engine)?

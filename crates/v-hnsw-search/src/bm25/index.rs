@@ -108,6 +108,10 @@ pub struct Bm25Index<T: Tokenizer> {
     params: Bm25Params,
     /// Cached maximum document ID (for Vec accumulator sizing).
     max_doc_id: u64,
+    /// FieldNorm codes: doc_id → quantized length byte (lazy-built).
+    fieldnorm_codes: HashMap<PointId, u8>,
+    /// FieldNorm LUT: 256-entry cache for length normalization (lazy-built).
+    fieldnorm_lut: Option<super::fieldnorm::FieldNormLut>,
 }
 
 impl<T: Tokenizer> Bm25Index<T> {
@@ -121,6 +125,8 @@ impl<T: Tokenizer> Bm25Index<T> {
             total_docs: 0,
             params: Bm25Params::default(),
             max_doc_id: 0,
+            fieldnorm_codes: HashMap::new(),
+            fieldnorm_lut: None,
         }
     }
 
@@ -134,6 +140,8 @@ impl<T: Tokenizer> Bm25Index<T> {
             total_docs: 0,
             params: Bm25Params::new(k1, b),
             max_doc_id: 0,
+            fieldnorm_codes: HashMap::new(),
+            fieldnorm_lut: None,
         }
     }
 
@@ -201,11 +209,14 @@ impl<T: Tokenizer> Bm25Index<T> {
 
         // Update document metadata
         self.doc_lengths.insert(doc_id, doc_len);
+        self.fieldnorm_codes.insert(doc_id, super::fieldnorm::encode(doc_len));
         self.total_length += doc_len as u64;
         self.total_docs += 1;
         if doc_id > self.max_doc_id {
             self.max_doc_id = doc_id;
         }
+        // Invalidate LUT (avg_doc_len changed)
+        self.fieldnorm_lut = None;
     }
 
     /// Remove a document from the index.
@@ -220,10 +231,12 @@ impl<T: Tokenizer> Bm25Index<T> {
             Some(len) => len,
             None => return false,
         };
+        self.fieldnorm_codes.remove(&doc_id);
 
         // Update statistics
         self.total_length = self.total_length.saturating_sub(doc_len as u64);
         self.total_docs = self.total_docs.saturating_sub(1);
+        self.fieldnorm_lut = None;
 
         // Remove from all posting lists
         let mut empty_terms = Vec::new();
@@ -239,6 +252,22 @@ impl<T: Tokenizer> Bm25Index<T> {
         }
 
         true
+    }
+
+    /// Build the FieldNorm cache (codes + LUT) from current document lengths.
+    ///
+    /// Call after bulk document insertion and before searching. This is O(N)
+    /// for codes + O(256) for the LUT. Subsequent searches use the cached values.
+    pub fn build_fieldnorm_cache(&mut self) {
+        let avg = self.avg_doc_length();
+        self.fieldnorm_lut = Some(super::fieldnorm::FieldNormLut::build(self.params.b, avg));
+        if self.fieldnorm_codes.len() != self.doc_lengths.len() {
+            self.fieldnorm_codes = self
+                .doc_lengths
+                .iter()
+                .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
+                .collect();
+        }
     }
 
     /// Search for documents matching the query.
@@ -266,6 +295,8 @@ impl<T: Tokenizer> Bm25Index<T> {
                 &self.params,
                 &self.doc_lengths,
                 self.avg_doc_length(),
+                self.fieldnorm_lut.as_ref(),
+                &self.fieldnorm_codes,
             );
         }
 
@@ -307,12 +338,10 @@ impl<T: Tokenizer> Bm25Index<T> {
         let mut results = Vec::with_capacity(doc_ids.len());
 
         for &doc_id in doc_ids {
-            let doc_len = self.doc_lengths.get(&doc_id).copied().unwrap_or(0);
             let mut score = 0.0f32;
             for &(pl, idf) in &terms {
-                // Binary search in sorted posting list (O(log df) per term)
                 if let Ok(idx) = pl.postings.binary_search_by_key(&doc_id, |p| p.doc_id) {
-                    score += idf * self.params.tf_norm(pl.postings[idx].tf, doc_len, avg_doc_len);
+                    score += self.score_posting(doc_id, pl.postings[idx].tf, idf, avg_doc_len);
                 }
             }
             if score > 0.0 {
@@ -344,6 +373,18 @@ impl<T: Tokenizer> Bm25Index<T> {
     ///
     /// Chooses Vec (cache-friendly) or HashMap (sparse IDs) accumulator
     /// based on `max_doc_id`. All state is function-local (thread-safe).
+    /// Compute score for a single posting entry, using LUT if available.
+    #[inline]
+    fn score_posting(&self, doc_id: PointId, tf: u32, idf: f32, avg_doc_len: f32) -> f32 {
+        if let Some(ref lut) = self.fieldnorm_lut {
+            let code = self.fieldnorm_codes.get(&doc_id).copied().unwrap_or(0);
+            idf * lut.tf_norm(self.params.k1, tf, code)
+        } else {
+            let doc_len = self.doc_lengths.get(&doc_id).copied().unwrap_or(0);
+            idf * self.params.tf_norm(tf, doc_len, avg_doc_len)
+        }
+    }
+
     fn accumulate_and_rank(
         &self,
         terms: &[(&PostingList, f32)],
@@ -363,8 +404,7 @@ impl<T: Tokenizer> Bm25Index<T> {
                         if scores[id] == 0.0 {
                             touched.push(p.doc_id);
                         }
-                        let doc_len = self.doc_lengths.get(&p.doc_id).copied().unwrap_or(0);
-                        scores[id] += idf * self.params.tf_norm(p.tf, doc_len, avg_doc_len);
+                        scores[id] += self.score_posting(p.doc_id, p.tf, idf, avg_doc_len);
                     }
                 }
             }
@@ -374,9 +414,8 @@ impl<T: Tokenizer> Bm25Index<T> {
             let mut score_map: HashMap<PointId, f32> = HashMap::new();
             for &(pl, idf) in terms {
                 for p in &pl.postings {
-                    let doc_len = self.doc_lengths.get(&p.doc_id).copied().unwrap_or(0);
                     *score_map.entry(p.doc_id).or_insert(0.0) +=
-                        idf * self.params.tf_norm(p.tf, doc_len, avg_doc_len);
+                        self.score_posting(p.doc_id, p.tf, idf, avg_doc_len);
                 }
             }
             top_k_from_map(score_map, limit)
@@ -457,6 +496,13 @@ impl<T: Tokenizer> Bm25Index<T> {
         if let Some(dir) = path.as_ref().parent()
             && super::fst_storage::fst_exists(dir) {
                 let fst = super::fst_storage::load_fst::<T>(dir)?;
+                let fieldnorm_codes: HashMap<PointId, u8> = fst.doc_lengths
+                    .iter()
+                    .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
+                    .collect();
+                let avg = if fst.total_docs == 0 { 0.0 }
+                    else { fst.total_length as f32 / fst.total_docs as f32 };
+                let lut = super::fieldnorm::FieldNormLut::build(fst.params.b, avg);
                 return Ok(Self {
                     tokenizer: fst.tokenizer,
                     storage: TermStorage::Fst {
@@ -468,6 +514,8 @@ impl<T: Tokenizer> Bm25Index<T> {
                     total_docs: fst.total_docs,
                     params: fst.params,
                     max_doc_id: fst.max_doc_id,
+                    fieldnorm_codes,
+                    fieldnorm_lut: Some(lut),
                 });
             }
 
@@ -495,6 +543,14 @@ impl<T: Tokenizer> Bm25Index<T> {
         let doc_lengths: HashMap<PointId, u32> = data.doc_lengths.into_iter().collect();
         let max_doc_id = doc_lengths.keys().max().copied().unwrap_or(0);
 
+        let fieldnorm_codes: HashMap<PointId, u8> = doc_lengths
+            .iter()
+            .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
+            .collect();
+        let avg = if data.total_docs == 0 { 0.0 }
+            else { data.total_length as f32 / data.total_docs as f32 };
+        let lut = super::fieldnorm::FieldNormLut::build(data.params.b, avg);
+
         Ok(Self {
             tokenizer: data.tokenizer,
             storage: TermStorage::HashMap(data.postings.into_iter().collect()),
@@ -503,6 +559,8 @@ impl<T: Tokenizer> Bm25Index<T> {
             total_docs: data.total_docs,
             params: data.params,
             max_doc_id,
+            fieldnorm_codes,
+            fieldnorm_lut: Some(lut),
         })
     }
 }
