@@ -1,11 +1,10 @@
 //! `dupes` command — find duplicate code chunks.
 //!
-//! Four modes:
+//! Three modes:
 //! - **Token Jaccard** (default): MinHash fingerprint-based near-duplicate detection.
 //!   Compares actual code body tokens (unigrams + bigrams). Catches Type-1~3 clones.
 //! - **AST hash** (`--ast`): structural clones ignoring identifier names (Type-1/2).
-//! - **Embedding** (`--embed`): HNSW k-ANN cosine similarity (Type-3/4).
-//! - **All** (`--all`): unified Filter→Verify pipeline combining all three signals.
+//! - **All** (`--all`): unified Filter→Verify pipeline combining AST + MinHash signals.
 //!
 //! Detection algorithms live in [`v_hnsw_intel::clones`]; this module provides
 //! CLI argument handling and output formatting only.
@@ -44,7 +43,6 @@ struct UnifiedPairJson {
     b: String,
     score: f32,
     jaccard: f32,
-    cosine: f32,
     ast_match: bool,
     tag: String,
 }
@@ -88,7 +86,6 @@ pub struct DupesConfig {
     pub exclude_tests: bool,
     pub k: usize,
     pub json: bool,
-    pub embed_mode: bool,
     pub ast_mode: bool,
     pub all_mode: bool,
     pub min_lines: usize,
@@ -98,7 +95,7 @@ pub struct DupesConfig {
 pub fn run(cfg: DupesConfig) -> Result<()> {
     let DupesConfig {
         db, threshold, exclude_tests, k, json,
-        embed_mode, ast_mode, all_mode, min_lines,
+        ast_mode, all_mode, min_lines,
     } = cfg;
     let engine = StorageEngine::open(&db)
         .with_context(|| format!("failed to open database at {}", db.display()))?;
@@ -123,31 +120,17 @@ pub fn run(cfg: DupesConfig) -> Result<()> {
     }
 
     let stages = if all_mode {
-        RunStages { ast: true, minhash: true, embed: true }
-    } else if embed_mode {
-        RunStages { ast: false, minhash: false, embed: true }
+        RunStages { ast: true, minhash: true }
     } else {
-        RunStages { ast: false, minhash: true, embed: false }
+        RunStages { ast: false, minhash: true }
     };
 
-    let is_unified = [stages.ast, stages.minhash, stages.embed]
-        .iter()
-        .filter(|&&v| v)
-        .count()
-        > 1;
+    let is_unified = stages.ast && stages.minhash;
 
-    // Single-signal fast path
+    // Single-signal fast path (MinHash only)
     if !is_unified {
-        let pairs = if stages.minhash {
-            eprintln!("Comparing {n} chunks (Jaccard threshold={threshold:.2})...");
-            clones::find_minhash_pairs(pstore, &candidate_ids, threshold, k)
-        } else if stages.embed {
-            let search_k = (k * 3).max(20);
-            eprintln!("Comparing {n} vectors via HNSW (threshold={threshold:.2}, search_k={search_k})...");
-            clones::find_embed_pairs(&engine, pstore, &candidate_ids, threshold, k, &db)?
-        } else {
-            return Ok(());
-        };
+        eprintln!("Comparing {n} chunks (Jaccard threshold={threshold:.2})...");
+        let pairs = clones::find_minhash_pairs(pstore, &candidate_ids, threshold, k);
 
         return if json {
             print_pairs_json(&pairs, pstore);
@@ -162,7 +145,7 @@ pub fn run(cfg: DupesConfig) -> Result<()> {
     eprintln!("Unified pipeline: {n} chunks");
 
     let (unified_pairs, sub_clones) =
-        clones::run_unified_pipeline(&engine, pstore, &candidate_ids, threshold, k, &db, &stages)?;
+        clones::run_unified_pipeline(&engine, pstore, &candidate_ids, threshold, k, &stages)?;
 
     if unified_pairs.is_empty() {
         println!("No duplicates found.");
@@ -418,7 +401,6 @@ fn print_unified_json(pairs: &[UnifiedDupePair], pstore: &impl PayloadStore) {
             b: label(pstore, p.id_b),
             score: p.score,
             jaccard: p.jaccard,
-            cosine: p.cosine,
             ast_match: p.ast_match,
             tag: p.tag(),
         }).collect(),

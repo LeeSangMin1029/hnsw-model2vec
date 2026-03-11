@@ -348,7 +348,7 @@ pub enum Commands {
     Dupes {
         /// Path to the database directory.
         db: PathBuf,
-        /// Similarity threshold (Jaccard or cosine, 0.0-1.0).
+        /// Similarity threshold (Jaccard, 0.0-1.0).
         #[arg(long, default_value = "0.5")]
         threshold: f32,
         /// Exclude test functions from comparison.
@@ -360,13 +360,10 @@ pub enum Commands {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
-        /// Use embedding cosine similarity (slower, Type-3/4).
-        #[arg(long)]
-        embed: bool,
         /// Use AST structural hash (Type-1/2, ignores identifier names).
         #[arg(long)]
         ast: bool,
-        /// Unified pipeline: Filter (AST+MinHash+HNSW) → Verify (all signals).
+        /// Unified pipeline: Filter (AST+MinHash) → Verify (all signals).
         #[arg(long)]
         all: bool,
         /// Skip functions shorter than N lines.

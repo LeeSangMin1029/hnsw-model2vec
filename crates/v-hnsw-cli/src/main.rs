@@ -126,10 +126,10 @@ fn run() -> anyhow::Result<()> {
                 file_path, line_range, relate,
             })
         }
-        Commands::Dupes { db, threshold, exclude_tests, k, json, embed, ast, all, min_lines } => {
+        Commands::Dupes { db, threshold, exclude_tests, k, json, ast, all, min_lines } => {
             commands::dupes::run(commands::dupes::DupesConfig {
                 db, threshold, exclude_tests, k, json,
-                embed_mode: embed, ast_mode: ast, all_mode: all, min_lines,
+                ast_mode: ast, all_mode: all, min_lines,
             })
         }
         Commands::Stats { db, format } => commands::code_intel::run_stats(db, format),

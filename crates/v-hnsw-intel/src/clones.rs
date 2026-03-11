@@ -1,23 +1,19 @@
 //! Clone detection algorithms — finds duplicate code chunks in a database.
 //!
-//! Three detection signals:
+//! Two detection signals:
 //! - **AST hash**: structural clones ignoring identifier names (Type-1/2)
 //! - **MinHash Jaccard**: token-based near-duplicate detection (Type-1~3)
-//! - **HNSW embedding**: semantic similarity via vector ANN (Type-3/4)
 //!
 //! Two execution modes:
 //! - Single-signal fast path (one signal only, user threshold)
 //! - Unified pipeline (all signals: Filter → Verify, weighted scoring)
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rayon::prelude::*;
 use v_hnsw_code::extract;
-use v_hnsw_core::{PayloadStore, PayloadValue, VectorStore};
-use v_hnsw_graph::distance::dot_product;
-use v_hnsw_graph::{HnswGraph, NormalizedCosineDistance};
+use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_storage::StorageEngine;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -26,7 +22,6 @@ use v_hnsw_storage::StorageEngine;
 pub struct RunStages {
     pub ast: bool,
     pub minhash: bool,
-    pub embed: bool,
 }
 
 // ── Result types ─────────────────────────────────────────────────────────
@@ -44,12 +39,11 @@ pub struct UnifiedDupePair {
     pub id_b: u64,
     pub score: f32,
     pub jaccard: f32,
-    pub cosine: f32,
     pub ast_match: bool,
 }
 
 impl UnifiedDupePair {
-    /// Build a tag string like "AST", "Token", "Embed", "Token+Embed", etc.
+    /// Build a tag string like "AST", "Token", "AST+Token", etc.
     pub fn tag(&self) -> String {
         let mut parts = Vec::new();
         if self.ast_match {
@@ -57,9 +51,6 @@ impl UnifiedDupePair {
         }
         if self.jaccard >= 0.5 {
             parts.push("Token");
-        }
-        if self.cosine >= 0.5 {
-            parts.push("Embed");
         }
         if parts.is_empty() {
             parts.push("Weak");
@@ -160,58 +151,19 @@ pub fn find_minhash_pairs(
     pairs
 }
 
-// ── Single-signal: HNSW embedding ────────────────────────────────────────
-
-/// Find duplicate pairs by HNSW k-ANN cosine similarity.
-///
-/// Returns pairs above `threshold`, overlap-filtered, sorted desc, truncated to `k`.
-pub fn find_embed_pairs(
-    engine: &StorageEngine,
-    pstore: &impl PayloadStore,
-    candidate_ids: &[u64],
-    threshold: f32,
-    k: usize,
-    db: &Path,
-) -> Result<Vec<DupePair>> {
-    let hnsw_path = db.join("hnsw.bin");
-    if !hnsw_path.exists() {
-        anyhow::bail!(
-            "HNSW index not found at {}. Run 'v-hnsw add' to index.",
-            hnsw_path.display()
-        );
-    }
-
-    let search_k = (k * 3).max(20);
-    let raw_pairs = hnsw_similar_pairs(engine, candidate_ids, search_k, threshold, db)?;
-    let mut pairs: Vec<DupePair> = raw_pairs
-        .into_iter()
-        .map(|(id_a, id_b, similarity)| DupePair {
-            id_a,
-            id_b,
-            similarity,
-        })
-        .collect();
-
-    finalize_pairs(&mut pairs, pstore, k);
-    Ok(pairs)
-}
-
 // ── Unified multi-signal pipeline ────────────────────────────────────────
 
-/// Run the full unified pipeline: Filter (AST+MinHash+HNSW) → Verify → Score.
+/// Run the full unified pipeline: Filter (AST+MinHash) → Verify → Score.
 ///
 /// Returns `(unified_pairs, sub_block_clones)`.
 pub fn run_unified_pipeline(
-    engine: &StorageEngine,
+    _engine: &StorageEngine,
     pstore: &impl PayloadStore,
     candidate_ids: &[u64],
     threshold: f32,
     k: usize,
-    db: &Path,
     stages: &RunStages,
 ) -> Result<(Vec<UnifiedDupePair>, Vec<SubBlockClone>)> {
-    let vstore = engine.vector_store();
-
     // Stage 1: Filter (collect candidate pairs)
     let mut candidates: HashSet<(u64, u64)> = HashSet::new();
 
@@ -220,9 +172,6 @@ pub fn run_unified_pipeline(
     }
     if stages.minhash {
         stage1_minhash(pstore, candidate_ids, &mut candidates);
-    }
-    if stages.embed {
-        stage1_hnsw(engine, candidate_ids, &mut candidates, db)?;
     }
 
     eprintln!("Stage 1: {} candidate pairs", candidates.len());
@@ -260,20 +209,15 @@ pub fn run_unified_pipeline(
                 _ => 0.0,
             };
 
-            let cosine = match (vstore.get(id_a), vstore.get(id_b)) {
-                (Ok(va), Ok(vb)) => dot_product(va, vb),
-                _ => 0.0,
-            };
-
             let ast_match = match (ast_map.get(&id_a), ast_map.get(&id_b)) {
                 (Some(ha), Some(hb)) => ha == hb,
                 _ => false,
             };
 
             let score = if ast_match {
-                1.0_f32.max(jaccard.max(cosine))
+                1.0_f32.max(jaccard)
             } else {
-                jaccard.max(cosine)
+                jaccard
             };
 
             (score >= threshold).then_some(UnifiedDupePair {
@@ -281,7 +225,6 @@ pub fn run_unified_pipeline(
                 id_b,
                 score,
                 jaccard,
-                cosine,
                 ast_match,
             })
         })
@@ -298,59 +241,6 @@ pub fn run_unified_pipeline(
     let sub_clones = find_sub_block_clones(pstore, candidate_ids);
 
     Ok((pairs, sub_clones))
-}
-
-// ── HNSW neighbor search (shared) ────────────────────────────────────────
-
-/// Search HNSW neighbors and return deduplicated similar pairs above threshold.
-fn hnsw_similar_pairs(
-    engine: &StorageEngine,
-    candidate_ids: &[u64],
-    search_k: usize,
-    threshold: f32,
-    db: &Path,
-) -> Result<Vec<(u64, u64, f32)>> {
-    let hnsw_path = db.join("hnsw.bin");
-    let hnsw: HnswGraph<NormalizedCosineDistance> =
-        HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
-            .with_context(|| format!("failed to load HNSW index at {}", hnsw_path.display()))?;
-    let vstore = engine.vector_store();
-
-    let n = candidate_ids.len();
-    let search_k = search_k.min(n);
-    let ef = 200;
-
-    let candidate_set: HashSet<u64> = candidate_ids.iter().copied().collect();
-    let mut seen = HashSet::<(u64, u64)>::new();
-    let mut result = Vec::new();
-
-    for &id in candidate_ids {
-        let Ok(query_vec) = vstore.get(id) else {
-            continue;
-        };
-        let Ok(neighbors) = hnsw.search_ext(vstore, query_vec, search_k, ef) else {
-            continue;
-        };
-
-        for &(nid, _distance) in &neighbors {
-            if nid == id || !candidate_set.contains(&nid) {
-                continue;
-            }
-            let pair_key = if id < nid { (id, nid) } else { (nid, id) };
-            if !seen.insert(pair_key) {
-                continue;
-            }
-            let Ok(neighbor_vec) = vstore.get(nid) else {
-                continue;
-            };
-            let sim = dot_product(query_vec, neighbor_vec);
-            if sim >= threshold {
-                result.push((pair_key.0, pair_key.1, sim));
-            }
-        }
-    }
-
-    Ok(result)
 }
 
 // ── Pipeline stages ──────────────────────────────────────────────────────
@@ -413,31 +303,6 @@ fn stage1_minhash(
         minhash_pairs.len()
     );
     candidates.extend(minhash_pairs);
-}
-
-/// Stage 1c: HNSW k-ANN search with low threshold for broad candidate collection.
-fn stage1_hnsw(
-    engine: &StorageEngine,
-    candidate_ids: &[u64],
-    candidates: &mut HashSet<(u64, u64)>,
-    db: &Path,
-) -> Result<()> {
-    let hnsw_path = db.join("hnsw.bin");
-    if !hnsw_path.exists() {
-        eprintln!("  HNSW: index not found, skipping embedding stage");
-        return Ok(());
-    }
-
-    let raw_pairs = hnsw_similar_pairs(engine, candidate_ids, 20, 0.5, db)?;
-    let mut hnsw_pairs = 0usize;
-    for (id_a, id_b, _sim) in raw_pairs {
-        if candidates.insert((id_a, id_b)) {
-            hnsw_pairs += 1;
-        }
-    }
-
-    eprintln!("  HNSW: {hnsw_pairs} new candidate pairs (threshold=0.50)");
-    Ok(())
 }
 
 // ── Sub-block clone detection ────────────────────────────────────────────

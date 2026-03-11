@@ -3317,7 +3317,6 @@ dependencies = [
  "tempfile",
  "v-hnsw-code",
  "v-hnsw-core",
- "v-hnsw-graph",
  "v-hnsw-storage",
 ]
 

@@ -10,7 +10,6 @@ license.workspace = true
 # Internal crates
 v-hnsw-core.workspace = true
 v-hnsw-storage.workspace = true
-v-hnsw-graph.workspace = true
 v-hnsw-code.workspace = true
 
 # Error handling
