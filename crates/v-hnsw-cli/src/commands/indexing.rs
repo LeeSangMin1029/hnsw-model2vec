@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use v_hnsw_core::{PayloadStore, VectorIndex, VectorStore};
 use v_hnsw_graph::{HnswGraph, HnswSnapshot, NormalizedCosineDistance};
-use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
+use v_hnsw_search::{Bm25Index, CodeTokenizer, KoreanBm25Tokenizer, Tokenizer};
 use v_hnsw_storage::sq8::Sq8Params;
 use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
@@ -57,31 +57,18 @@ pub fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> 
     // Build SQ8 quantized vectors
     build_sq8(path, vector_store)?;
 
-    // Build BM25 index
-    println!("  Building BM25 index...");
-    ensure_korean_dict()?;
+    // Build BM25 index — tokenizer depends on content type
+    println!("  Building BM25 index (content_type={})...", config.content_type);
     let bm25_path = path.join("bm25.bin");
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
     let payload_store = engine.payload_store();
+    let ids: Vec<_> = vector_store.id_map().keys().copied().collect();
 
-    let pb = make_progress_bar(vector_store.id_map().keys().len() as u64)?;
-
-    for id in vector_store.id_map().keys() {
-        if is_interrupted() {
-            pb.abandon_with_message("Interrupted during BM25 build");
-            return Ok(());
-        }
-        if let Ok(Some(text)) = payload_store.get_text(*id) {
-            bm25.add_document(*id, &text);
-        }
-        pb.inc(1);
+    if config.content_type == "code" {
+        build_bm25(CodeTokenizer::new(), &bm25_path, payload_store, &ids)?;
+    } else {
+        ensure_korean_dict()?;
+        build_bm25(KoreanBm25Tokenizer::new(), &bm25_path, payload_store, &ids)?;
     }
-
-    pb.finish_with_message("BM25 build complete");
-
-    bm25.build_fieldnorm_cache();
-    bm25.save(&bm25_path)
-        .with_context(|| format!("Failed to save BM25 index to {}", bm25_path.display()))?;
     println!("  BM25 index saved: {}", bm25_path.display());
 
     tracing::info!("Index building completed");
@@ -139,30 +126,16 @@ pub fn update_indexes_incremental(
     update_sq8(path, vector_store, added_ids, removed_ids)?;
 
     // --- BM25 incremental update ---
-    if total_changes > 0 {
-        ensure_korean_dict()?;
-    }
-
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load_mutable(&bm25_path)
-        .with_context(|| "Failed to load BM25 index")?;
-
     let payload_store = engine.payload_store();
 
-    for &id in removed_ids {
-        bm25.remove_document(id);
-    }
-
-    for &id in added_ids {
-        if let Ok(Some(text)) = payload_store.get_text(id) {
-            bm25.add_document(id, &text);
+    if config.content_type == "code" {
+        update_bm25::<CodeTokenizer>(&bm25_path, path, payload_store, added_ids, removed_ids)?;
+    } else {
+        if total_changes > 0 {
+            ensure_korean_dict()?;
         }
+        update_bm25::<KoreanBm25Tokenizer>(&bm25_path, path, payload_store, added_ids, removed_ids)?;
     }
-
-    bm25.build_fieldnorm_cache();
-    bm25.save(&bm25_path)
-        .with_context(|| "Failed to save BM25 index")?;
-    bm25.save_snapshot(path)
-        .with_context(|| "Failed to save BM25 snapshot")?;
     println!("  BM25 index updated ({total_changes} changes) + snapshot.");
 
     tracing::info!("Incremental index update completed");
@@ -275,5 +248,62 @@ fn update_sq8(
         added_ids.len()
     );
 
+    Ok(())
+}
+
+/// Build BM25 index with the given tokenizer and save to disk.
+fn build_bm25<T: Tokenizer>(
+    tokenizer: T,
+    bm25_path: &Path,
+    payload_store: &dyn PayloadStore,
+    ids: &[u64],
+) -> Result<()> {
+    let mut bm25 = Bm25Index::new(tokenizer);
+    let pb = make_progress_bar(ids.len() as u64)?;
+
+    for &id in ids {
+        if is_interrupted() {
+            pb.abandon_with_message("Interrupted during BM25 build");
+            return Ok(());
+        }
+        if let Ok(Some(text)) = payload_store.get_text(id) {
+            bm25.add_document(id, &text);
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_with_message("BM25 build complete");
+    bm25.build_fieldnorm_cache();
+    bm25.save(bm25_path)
+        .with_context(|| format!("Failed to save BM25 index to {}", bm25_path.display()))?;
+    Ok(())
+}
+
+/// Incrementally update BM25 index: load, apply changes, save.
+fn update_bm25<T: Tokenizer>(
+    bm25_path: &Path,
+    db_dir: &Path,
+    payload_store: &dyn PayloadStore,
+    added_ids: &[u64],
+    removed_ids: &[u64],
+) -> Result<()> {
+    let mut bm25: Bm25Index<T> = Bm25Index::load_mutable(bm25_path)
+        .with_context(|| "Failed to load BM25 index")?;
+
+    for &id in removed_ids {
+        bm25.remove_document(id);
+    }
+
+    for &id in added_ids {
+        if let Ok(Some(text)) = payload_store.get_text(id) {
+            bm25.add_document(id, &text);
+        }
+    }
+
+    bm25.build_fieldnorm_cache();
+    bm25.save(bm25_path)
+        .with_context(|| "Failed to save BM25 index")?;
+    bm25.save_snapshot(db_dir)
+        .with_context(|| "Failed to save BM25 snapshot")?;
     Ok(())
 }

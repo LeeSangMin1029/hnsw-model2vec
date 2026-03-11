@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, PointId, VectorIndex, VectorStore};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::{DistanceComputer, HnswGraph, HnswSnapshot, NormalizedCosineDistance};
-use v_hnsw_search::{Bm25Index, Bm25Snapshot, ConvexFusion, KoreanBm25Tokenizer};
+use v_hnsw_search::{Bm25Index, Bm25Snapshot, CodeTokenizer, ConvexFusion, KoreanBm25Tokenizer};
 use v_hnsw_storage::sq8::Sq8Params;
 use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
@@ -93,23 +93,31 @@ impl DenseIndex {
     }
 }
 
-/// Sparse index: mmap snapshot or heap index.
+/// Sparse index: mmap snapshot or heap index, with content-type-aware tokenizer.
 enum SparseIndex {
-    Snapshot(Bm25Snapshot),
-    Heap(Bm25Index<KoreanBm25Tokenizer>),
+    /// mmap snapshot (shared by both document and code DBs — tokenizer passed at query time)
+    Snapshot(Bm25Snapshot, bool),
+    /// Heap-loaded document index (Korean tokenizer)
+    HeapDoc(Bm25Index<KoreanBm25Tokenizer>),
+    /// Heap-loaded code index (code tokenizer)
+    HeapCode(Bm25Index<CodeTokenizer>),
 }
 
 impl SparseIndex {
     fn search(&self, query: &str, limit: usize) -> Vec<(PointId, f32)> {
         match self {
-            Self::Snapshot(s) => s.search(&KoreanBm25Tokenizer::new(), query, limit),
-            Self::Heap(h) => h.search(query, limit),
+            Self::Snapshot(s, true) => s.search(&CodeTokenizer::new(), query, limit),
+            Self::Snapshot(s, false) => s.search(&KoreanBm25Tokenizer::new(), query, limit),
+            Self::HeapDoc(h) => h.search(query, limit),
+            Self::HeapCode(h) => h.search(query, limit),
         }
     }
     fn score_documents(&self, query: &str, doc_ids: &[PointId]) -> Vec<(PointId, f32)> {
         match self {
-            Self::Snapshot(s) => s.score_documents(&KoreanBm25Tokenizer::new(), query, doc_ids),
-            Self::Heap(h) => h.score_documents(query, doc_ids),
+            Self::Snapshot(s, true) => s.score_documents(&CodeTokenizer::new(), query, doc_ids),
+            Self::Snapshot(s, false) => s.score_documents(&KoreanBm25Tokenizer::new(), query, doc_ids),
+            Self::HeapDoc(h) => h.score_documents(query, doc_ids),
+            Self::HeapCode(h) => h.score_documents(query, doc_ids),
         }
     }
 }
@@ -337,10 +345,11 @@ impl DaemonState {
 
 /// Load all indexes + storage for a database.
 fn load_db(db_path: &Path) -> Result<DbIndexes> {
+    let config = DbConfig::load(db_path)?;
     let engine = StorageEngine::open(db_path)
         .with_context(|| format!("Failed to open storage: {}", db_path.display()))?;
     let dense = load_dense(db_path)?;
-    let sparse = load_sparse(db_path)?;
+    let sparse = load_sparse(db_path, &config.content_type)?;
     let sq8 = load_sq8(db_path, engine.vector_store());
     Ok(DbIndexes { dense, sparse, sq8, engine, last_used: Instant::now() })
 }
@@ -372,20 +381,27 @@ fn load_dense(db_path: &Path) -> Result<DenseIndex> {
 }
 
 /// Load sparse index: prefer the freshest source (snapshot vs heap).
-fn load_sparse(db_path: &Path) -> Result<SparseIndex> {
+fn load_sparse(db_path: &Path, content_type: &str) -> Result<SparseIndex> {
     let snap_path = db_path.join("bm25.snap");
     let bin_path = db_path.join("bm25.bin");
     let fst_path = db_path.join("bm25_terms.fst");
+    let is_code = content_type == "code";
 
     // Use snapshot only if it exists AND is not stale vs .bin
     if snap_path.exists() && fst_path.exists() && !is_newer(&bin_path, &snap_path) {
         let snap = Bm25Snapshot::open(db_path).context("Failed to open BM25 snapshot")?;
-        eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap)", snap.total_docs());
-        return Ok(SparseIndex::Snapshot(snap));
+        eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap, {})", snap.total_docs(), content_type);
+        return Ok(SparseIndex::Snapshot(snap, is_code));
     }
-    let bm25 = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
-    eprintln!("[daemon] BM25 heap loaded");
-    Ok(SparseIndex::Heap(bm25))
+    if is_code {
+        let bm25: Bm25Index<CodeTokenizer> = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
+        eprintln!("[daemon] BM25 heap loaded (code)");
+        Ok(SparseIndex::HeapCode(bm25))
+    } else {
+        let bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
+        eprintln!("[daemon] BM25 heap loaded (document)");
+        Ok(SparseIndex::HeapDoc(bm25))
+    }
 }
 
 /// Load SQ8 quantization data if available. Returns `None` on any error.

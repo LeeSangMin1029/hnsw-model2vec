@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, PayloadStore, PointId, VectorStore};
 use v_hnsw_graph::{DotProductDistance, HnswConfig, HnswGraph, HnswSnapshot, L2Distance, NormalizedCosineDistance};
-use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
+use v_hnsw_search::{Bm25Index, CodeTokenizer, KoreanBm25Tokenizer, Tokenizer};
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -37,7 +37,10 @@ pub fn run(path: PathBuf) -> Result<()> {
              config.metric, config.m, config.ef_construction);
 
     // Init Korean dict before parallel scope (required by BM25 thread)
-    super::common::ensure_korean_dict()?;
+    let is_code = config.content_type == "code";
+    if !is_code {
+        super::common::ensure_korean_dict()?;
+    }
 
     let payload_store = engine.payload_store();
 
@@ -55,7 +58,11 @@ pub fn run(path: PathBuf) -> Result<()> {
         });
 
         let bm25_handle = s.spawn(|| -> Result<()> {
-            build_bm25(payload_store, &ids, &bm25_path, &path)
+            if is_code {
+                build_bm25_typed(CodeTokenizer::new(), payload_store, &ids, &bm25_path, &path)
+            } else {
+                build_bm25_typed(KoreanBm25Tokenizer::new(), payload_store, &ids, &bm25_path, &path)
+            }
         });
 
         #[expect(clippy::expect_used, reason = "thread panics are unrecoverable")]
@@ -110,14 +117,15 @@ fn build_hnsw<D: DistanceMetric>(
     Ok(())
 }
 
-/// Build BM25 index from payload text.
-fn build_bm25(
+/// Build BM25 index from payload text with a specific tokenizer.
+fn build_bm25_typed<T: Tokenizer>(
+    tokenizer: T,
     payload_store: &dyn PayloadStore,
     ids: &[u64],
     path: &std::path::Path,
     db_dir: &std::path::Path,
 ) -> Result<()> {
-    let mut bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::new(KoreanBm25Tokenizer::new());
+    let mut bm25 = Bm25Index::new(tokenizer);
     let mut text_count = 0;
     for &id in ids {
         if let Ok(Some(text)) = payload_store.get_text(id)

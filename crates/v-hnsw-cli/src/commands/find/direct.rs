@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use v_hnsw_core::VectorIndex;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::{NormalizedCosineDistance, HnswGraph};
-use v_hnsw_search::{Bm25Index, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
+use v_hnsw_search::{Bm25Index, CodeTokenizer, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
 
 use crate::commands::common;
@@ -52,14 +52,12 @@ fn hybrid_search(
     k: usize,
     fetch_k: usize,
     ef: usize,
+    content_type: &str,
 ) -> Result<Vec<(u64, f32)>> {
     let bm25_path = db_path.join("bm25.bin");
     if !bm25_path.exists() {
         anyhow::bail!("BM25 index not found. Run 'v-hnsw add' first to index data.");
     }
-    common::ensure_korean_dict()?;
-    let bm25: Bm25Index<KoreanBm25Tokenizer> =
-        Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
 
     let alpha = common::fusion_alpha(query_text);
     let hybrid_config = HybridSearchConfig::builder()
@@ -68,11 +66,23 @@ fn hybrid_search(
         .sparse_limit(k * 2)
         .fusion_alpha(alpha)
         .build();
-    let searcher = SimpleHybridSearcher::new(hnsw, bm25, hybrid_config);
 
-    searcher
-        .search_ext(engine.vector_store(), query_vec, query_text, fetch_k)
-        .context("Hybrid search failed")
+    if content_type == "code" {
+        let bm25: Bm25Index<CodeTokenizer> =
+            Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
+        let searcher = SimpleHybridSearcher::new(hnsw, bm25, hybrid_config);
+        searcher
+            .search_ext(engine.vector_store(), query_vec, query_text, fetch_k)
+            .context("Hybrid search failed")
+    } else {
+        common::ensure_korean_dict()?;
+        let bm25: Bm25Index<KoreanBm25Tokenizer> =
+            Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
+        let searcher = SimpleHybridSearcher::new(hnsw, bm25, hybrid_config);
+        searcher
+            .search_ext(engine.vector_store(), query_vec, query_text, fetch_k)
+            .context("Hybrid search failed")
+    }
 }
 
 /// Apply tag filtering, build output, and print JSON.
@@ -183,7 +193,7 @@ pub fn run_raw_vector(
     let fetch_k = if tags.is_empty() { k } else { k * 10 };
 
     let mut results = if let Some(ref text) = query_text {
-        hybrid_search(ctx.hnsw, &ctx.engine, &db_path, &raw_vec, text, k, fetch_k, ef)?
+        hybrid_search(ctx.hnsw, &ctx.engine, &db_path, &raw_vec, text, k, fetch_k, ef, &config.content_type)?
     } else {
         ctx.hnsw
             .search_ext(ctx.engine.vector_store(), &raw_vec, fetch_k, ef)
@@ -263,7 +273,7 @@ pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, 
 
     let t3 = Instant::now();
     let mut results = hybrid_search(
-        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, k, fetch_k, 200,
+        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, k, fetch_k, 200, &config.content_type,
     )?;
     eprintln!("  BM25+Search: {:.0}ms", t3.elapsed().as_millis());
 
