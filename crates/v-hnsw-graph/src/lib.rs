@@ -18,7 +18,7 @@ mod store;
 pub use config::{HnswConfig, HnswConfigBuilder};
 pub use distance::{AutoDistance, CosineDistance, DotProductDistance, L2Distance, NormalizedCosineDistance};
 pub use graph::HnswGraph;
-pub use search::NodeGraph;
+pub use search::{DistanceComputer, NodeGraph};
 pub use snapshot::HnswSnapshot;
 pub use store::InMemoryVectorStore;
 

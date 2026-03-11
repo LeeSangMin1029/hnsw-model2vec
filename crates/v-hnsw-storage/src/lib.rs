@@ -11,6 +11,8 @@ mod fsst_text;
 mod manifest;
 mod mmap_store;
 mod payload_store;
+pub mod sq8;
+pub mod sq8_store;
 #[cfg(test)]
 mod tests;
 mod wal;

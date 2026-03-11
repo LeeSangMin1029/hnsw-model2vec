@@ -206,6 +206,21 @@ impl<D: DistanceMetric> HnswGraph<D> {
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         crate::search::search_ext(self, store, query, k, ef)
     }
+
+    /// Two-stage search: approximate distance for graph traversal, exact for rescore.
+    pub fn search_two_stage(
+        &self,
+        approx: &dyn crate::search::DistanceComputer,
+        exact: &dyn crate::search::DistanceComputer,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
+        crate::search::search_two_stage(
+            &self.nodes, approx, exact, &self.config,
+            self.entry_point, self.max_layer, query, k, ef,
+        )
+    }
 }
 
 // VectorIndex requires Send + Sync. HnswGraph is Send+Sync if D is.

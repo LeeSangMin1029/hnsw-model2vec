@@ -393,6 +393,141 @@ fn search_with_store_results_sorted() {
 }
 
 // ---------------------------------------------------------------------------
+// search_two_stage tests (DistanceComputer-based)
+// ---------------------------------------------------------------------------
+
+/// A simple DistanceComputer wrapping an InMemoryVectorStore + L2Distance.
+struct TestDc<'a> {
+    store: &'a InMemoryVectorStore,
+}
+
+impl crate::search::DistanceComputer for TestDc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let vec = self.store.get(id)?;
+        Ok(L2Distance.distance(query, vec))
+    }
+}
+
+/// A "noisy" DistanceComputer that adds small random noise to simulate quantized distance.
+struct NoisyDc<'a> {
+    store: &'a InMemoryVectorStore,
+    noise: f32,
+}
+
+impl crate::search::DistanceComputer for NoisyDc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let vec = self.store.get(id)?;
+        let exact = L2Distance.distance(query, vec);
+        // Deterministic noise based on id to simulate quantization error
+        let noise = self.noise * ((id % 7) as f32 / 7.0 - 0.5);
+        Ok((exact + noise).max(0.0))
+    }
+}
+
+#[test]
+fn two_stage_same_dc() {
+    // When approx == exact, should match search_with_store
+    let dim = 2;
+    let config = HnswConfig::builder().dim(dim).build().unwrap();
+    let (nodes, store) = make_test_graph(
+        dim,
+        &[
+            (1, vec![0.0, 0.0]),
+            (2, vec![1.0, 0.0]),
+            (3, vec![2.0, 0.0]),
+            (4, vec![3.0, 0.0]),
+        ],
+        &[
+            (1, 0, vec![2]),
+            (2, 0, vec![1, 3]),
+            (3, 0, vec![2, 4]),
+            (4, 0, vec![3]),
+        ],
+    );
+
+    let query = vec![0.8, 0.0]; // closest to node 2 at [1.0, 0.0]
+    let dc = TestDc { store: &store };
+
+    let results = crate::search::search_two_stage(
+        &nodes, &dc, &dc, &config, Some(1), 0, &query, 4, 50,
+    ).unwrap();
+
+    assert!(!results.is_empty());
+    // Results sorted by ascending distance
+    for i in 1..results.len() {
+        assert!(results[i].1 >= results[i - 1].1);
+    }
+    // Node 1 at [0.0, 0.0] dist=0.64, Node 2 at [1.0, 0.0] dist=0.04 → Node 2 closest
+    assert_eq!(results[0].0, 2);
+}
+
+#[test]
+fn two_stage_noisy_approx_rescores_correctly() {
+    // Noisy approx may reorder candidates, but exact rescore should fix ranking
+    let dim = 2;
+    let config = HnswConfig::builder().dim(dim).build().unwrap();
+    let (nodes, store) = make_test_graph(
+        dim,
+        &[
+            (1, vec![0.0, 0.0]),
+            (2, vec![1.0, 0.0]),
+            (3, vec![2.0, 0.0]),
+            (4, vec![3.0, 0.0]),
+        ],
+        &[
+            (1, 0, vec![2]),
+            (2, 0, vec![1, 3]),
+            (3, 0, vec![2, 4]),
+            (4, 0, vec![3]),
+        ],
+    );
+
+    let query = vec![0.8, 0.0];
+    let approx = NoisyDc { store: &store, noise: 0.1 };
+    let exact = TestDc { store: &store };
+
+    let results = crate::search::search_two_stage(
+        &nodes, &approx, &exact, &config, Some(1), 0, &query, 4, 50,
+    ).unwrap();
+
+    // After rescore, results should be sorted by exact distance
+    for i in 1..results.len() {
+        assert!(results[i].1 >= results[i - 1].1,
+            "rescored results not sorted: {:?}", results);
+    }
+    // Node 2 at [1.0, 0.0] is closest by exact distance (0.04)
+    assert_eq!(results[0].0, 2);
+}
+
+#[test]
+fn two_stage_no_entry_point() {
+    let dim = 2;
+    let config = HnswConfig::builder().dim(dim).build().unwrap();
+    let store = InMemoryVectorStore::new(dim);
+    let nodes: HashMap<PointId, Node> = HashMap::new();
+    let dc = TestDc { store: &store };
+
+    let results = crate::search::search_two_stage(
+        &nodes, &dc, &dc, &config, None, 0, &[0.0, 0.0], 5, 50,
+    ).unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn two_stage_dimension_mismatch() {
+    let dim = 4;
+    let config = HnswConfig::builder().dim(dim).build().unwrap();
+    let store = InMemoryVectorStore::new(dim);
+    let nodes: HashMap<PointId, Node> = HashMap::new();
+    let dc = TestDc { store: &store };
+
+    let result = crate::search::search_two_stage(
+        &nodes, &dc, &dc, &config, None, 0, &[1.0, 2.0], 5, 50,
+    );
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
 // Multi-layer search test
 // ---------------------------------------------------------------------------
 

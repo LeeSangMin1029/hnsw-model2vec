@@ -9,6 +9,8 @@ mod fsst_text;
 mod manifest;
 mod mmap_store;
 mod payload_store;
+mod sq8;
+mod sq8_store;
 mod wal;
 
 use std::collections::HashMap;

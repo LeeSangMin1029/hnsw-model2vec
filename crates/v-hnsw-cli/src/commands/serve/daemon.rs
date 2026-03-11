@@ -13,10 +13,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::{PointId, VectorIndex, VectorStore};
+use v_hnsw_core::{DistanceMetric, PointId, VectorIndex, VectorStore};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{HnswGraph, HnswSnapshot, NormalizedCosineDistance};
+use v_hnsw_graph::{DistanceComputer, HnswGraph, HnswSnapshot, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, Bm25Snapshot, ConvexFusion, KoreanBm25Tokenizer};
+use v_hnsw_storage::sq8::Sq8Params;
+use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
 use crate::commands::common::{self, QueryCache, SearchResultItem};
@@ -34,8 +36,56 @@ enum DenseIndex {
     Heap(HnswGraph<NormalizedCosineDistance>),
 }
 
+/// SQ8 quantization data for accelerated search.
+struct Sq8Data {
+    params: Sq8Params,
+    store: Sq8VectorStore,
+}
+
+/// f32 distance computer for exact rescore.
+struct F32Dc<'a> {
+    store: &'a dyn VectorStore,
+}
+
+impl DistanceComputer for F32Dc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let vec = self.store.get(id)?;
+        Ok(NormalizedCosineDistance.distance(query, vec))
+    }
+}
+
+/// SQ8 distance computer for approximate traversal.
+struct Sq8Dc<'a> {
+    params: &'a Sq8Params,
+    store: &'a Sq8VectorStore,
+}
+
+impl DistanceComputer for Sq8Dc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let codes = self.store.get(id)?;
+        Ok(self.params.asymmetric_distance(query, codes))
+    }
+}
+
 impl DenseIndex {
-    fn search(&self, store: &dyn VectorStore, query: &[f32], k: usize, ef: usize) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
+    fn search(
+        &self,
+        store: &dyn VectorStore,
+        sq8: Option<&Sq8Data>,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
+        // Use SQ8 two-stage search if available
+        if let Some(sq8) = sq8 {
+            let approx = Sq8Dc { params: &sq8.params, store: &sq8.store };
+            let exact = F32Dc { store };
+            return match self {
+                Self::Snapshot(s) => s.search_two_stage(&approx, &exact, query, k, ef),
+                Self::Heap(h) => h.search_two_stage(&approx, &exact, query, k, ef),
+            };
+        }
+        // Fallback to f32-only search
         match self {
             Self::Snapshot(s) => s.search_ext(&NormalizedCosineDistance, store, query, k, ef),
             Self::Heap(h) => h.search_ext(store, query, k, ef),
@@ -68,6 +118,7 @@ impl SparseIndex {
 struct DbIndexes {
     dense: DenseIndex,
     sparse: SparseIndex,
+    sq8: Option<Sq8Data>,
     engine: StorageEngine,
     last_used: Instant,
 }
@@ -80,7 +131,7 @@ impl DbIndexes {
         let sparse_limit = k * 2;
 
         let dense_results = self.dense
-            .search(store, embedding, dense_limit, 200)
+            .search(store, self.sq8.as_ref(), embedding, dense_limit, 200)
             .context("HNSW search failed")?;
         let sparse_results = self.sparse.search(query, sparse_limit);
 
@@ -290,7 +341,8 @@ fn load_db(db_path: &Path) -> Result<DbIndexes> {
         .with_context(|| format!("Failed to open storage: {}", db_path.display()))?;
     let dense = load_dense(db_path)?;
     let sparse = load_sparse(db_path)?;
-    Ok(DbIndexes { dense, sparse, engine, last_used: Instant::now() })
+    let sq8 = load_sq8(db_path, engine.vector_store());
+    Ok(DbIndexes { dense, sparse, sq8, engine, last_used: Instant::now() })
 }
 
 /// Check if `a` is newer than `b` by file modification time.
@@ -334,6 +386,28 @@ fn load_sparse(db_path: &Path) -> Result<SparseIndex> {
     let bm25 = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
     eprintln!("[daemon] BM25 heap loaded");
     Ok(SparseIndex::Heap(bm25))
+}
+
+/// Load SQ8 quantization data if available. Returns `None` on any error.
+fn load_sq8(db_path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Option<Sq8Data> {
+    let params_path = db_path.join("sq8_params.bin");
+    let store_path = db_path.join("sq8_vectors.bin");
+
+    if !params_path.exists() || !store_path.exists() {
+        return None;
+    }
+
+    let params = Sq8Params::load(&params_path).ok()?;
+    let mut store = Sq8VectorStore::open(&store_path).ok()?;
+    store.restore_id_map(vector_store.id_map());
+
+    eprintln!(
+        "[daemon] SQ8 loaded: {} vectors ({}x compression)",
+        store.len(),
+        if store.dim() > 0 { 4 } else { 1 },
+    );
+
+    Some(Sq8Data { params, store })
 }
 
 /// Canonicalize path with a context message.

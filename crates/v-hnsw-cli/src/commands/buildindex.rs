@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, PayloadStore, PointId, VectorStore};
 use v_hnsw_graph::{DotProductDistance, HnswConfig, HnswGraph, HnswSnapshot, L2Distance, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
+use v_hnsw_storage::sq8::Sq8Params;
+use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
@@ -70,6 +72,9 @@ pub fn run(path: PathBuf) -> Result<()> {
     println!("  HNSW saved: {} ({:.2} MB)", hnsw_path.display(), hnsw_size as f64 / 1_000_000.0);
     println!("  BM25 saved: {} ({:.2} MB)", bm25_path.display(), bm25_size as f64 / 1_000_000.0);
 
+    // Build SQ8 quantized vectors
+    build_sq8(&path, vector_store)?;
+
     // Compress texts with FSST
     println!("  Compressing texts with FSST...");
     let texts = payload_store.all_text_bytes()?;
@@ -126,5 +131,54 @@ fn build_bm25(
     bm25.save(path).with_context(|| "failed to save BM25")?;
     bm25.save_snapshot(db_dir).with_context(|| "failed to save BM25 snapshot")?;
     println!("  BM25 built: {} documents (+ snapshot)", text_count);
+    Ok(())
+}
+
+/// Build SQ8 quantized vectors from the f32 vector store.
+fn build_sq8(db_path: &std::path::Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Result<()> {
+    let id_map = vector_store.id_map();
+    if id_map.is_empty() {
+        return Ok(());
+    }
+
+    println!("  Building SQ8 quantized vectors...");
+
+    let dim = vector_store.dim();
+    let vectors: Vec<&[f32]> = id_map
+        .keys()
+        .filter_map(|&id| vector_store.get(id).ok())
+        .collect();
+
+    let params = Sq8Params::train(dim, &vectors)
+        .with_context(|| "Failed to train SQ8 parameters")?;
+
+    let params_path = db_path.join("sq8_params.bin");
+    params.save(&params_path).with_context(|| "Failed to save SQ8 params")?;
+
+    // Find max slot to determine capacity
+    let max_slot = id_map.values().copied().max().unwrap_or(0);
+    let store_path = db_path.join("sq8_vectors.bin");
+    let mut sq8_store = Sq8VectorStore::create(&store_path, dim, max_slot + 1)
+        .with_context(|| "Failed to create SQ8 vector store")?;
+
+    let mut buf = vec![0u8; dim];
+    for (&id, &slot) in id_map {
+        if let Ok(vec) = vector_store.get(id) {
+            params.quantize_into(vec, &mut buf);
+            sq8_store.insert_at(id, slot, &buf)?;
+        }
+    }
+
+    sq8_store.flush()?;
+
+    let f32_size = id_map.len() * dim * 4;
+    let sq8_size = id_map.len() * dim;
+    println!(
+        "  SQ8 saved: {:.1}x compression ({:.2}MB → {:.2}MB)",
+        f32_size as f64 / sq8_size as f64,
+        f32_size as f64 / 1_048_576.0,
+        sq8_size as f64 / 1_048_576.0,
+    );
+
     Ok(())
 }

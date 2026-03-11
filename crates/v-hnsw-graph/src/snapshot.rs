@@ -13,7 +13,7 @@ use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorStore, VhnswError, sto
 
 use crate::config::HnswConfig;
 use crate::graph::HnswGraph;
-use crate::search::{search_with_store, NodeGraph};
+use crate::search::{search_with_store, search_two_stage, DistanceComputer, NodeGraph};
 
 const MAGIC: u64 = 0x484E_5357_534E_4150; // "HNSWSNAP"
 const VERSION: u64 = 1;
@@ -164,6 +164,23 @@ impl HnswSnapshot {
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         search_with_store(
             self, store, distance, &self.config,
+            self.entry_point, self.max_layer, query, k, ef,
+        )
+    }
+
+    /// Two-stage search: approximate distance for traversal, exact for rescore.
+    ///
+    /// Use with SQ8: pass an SQ8 `DistanceComputer` as `approx` and f32 as `exact`.
+    pub fn search_two_stage(
+        &self,
+        approx: &dyn DistanceComputer,
+        exact: &dyn DistanceComputer,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
+        search_two_stage(
+            self, approx, exact, &self.config,
             self.entry_point, self.max_layer, query, k, ef,
         )
     }

@@ -32,4 +32,8 @@ pub enum VhnswError {
     /// WAL is corrupted or unreadable.
     #[error("wal error: {0}")]
     Wal(String),
+
+    /// Invalid argument or configuration.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }

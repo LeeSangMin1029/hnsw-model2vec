@@ -1,62 +1,33 @@
-//! Bench command - Run a benchmark.
+//! Bench command — recall + latency benchmark with brute-force ground truth.
+//!
+//! Compares: brute-force (exact) → HNSW f32 → HNSW SQ8 two-stage.
+//! Reports recall@k and QPS for each method at multiple ef values.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::{DistanceMetric, VectorIndex, VectorStore};
-use v_hnsw_graph::{DotProductDistance, HnswGraph, L2Distance, NormalizedCosineDistance};
+use v_hnsw_core::{DistanceMetric, PointId, VectorStore};
+use v_hnsw_graph::{
+    DistanceComputer, HnswGraph, HnswSnapshot, NormalizedCosineDistance,
+};
+use v_hnsw_storage::sq8::Sq8Params;
+use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
 use super::create::DbConfig;
-use crate::is_interrupted;
 
 /// Run the bench command.
 pub fn run(path: PathBuf, queries: usize, k: usize) -> Result<()> {
     super::common::require_db(&path)?;
-
-    // Load config
     let config = DbConfig::load(&path)?;
 
-    // Execute benchmark based on metric
-    match config.metric.as_str() {
-        "cosine" => bench_with_metric::<NormalizedCosineDistance>(
-            &path,
-            &config,
-            queries,
-            k,
-            NormalizedCosineDistance,
-        )?,
-        "l2" => bench_with_metric::<L2Distance>(
-            &path,
-            &config,
-            queries,
-            k,
-            L2Distance,
-        )?,
-        "dot" => bench_with_metric::<DotProductDistance>(
-            &path,
-            &config,
-            queries,
-            k,
-            DotProductDistance,
-        )?,
-        other => anyhow::bail!("Unknown metric: {other}"),
-    };
+    if config.metric.as_str() != "cosine" {
+        anyhow::bail!("bench currently only supports cosine metric (got: {})", config.metric);
+    }
 
-    Ok(())
-}
-
-/// Benchmark with a specific distance metric.
-fn bench_with_metric<D: DistanceMetric + Clone>(
-    path: &PathBuf,
-    config: &DbConfig,
-    num_queries: usize,
-    k: usize,
-    distance: D,
-) -> Result<()> {
-    // Open storage
-    let engine = StorageEngine::open(path)
+    let engine = StorageEngine::open(&path)
         .with_context(|| format!("failed to open database at {}", path.display()))?;
 
     let doc_count = engine.len();
@@ -64,85 +35,297 @@ fn bench_with_metric<D: DistanceMetric + Clone>(
         anyhow::bail!("Database is empty");
     }
 
-    // Create HNSW config
-    let hnsw_config = config.to_hnsw_config()?;
-
-    // Build HNSW graph from storage
-    println!("Loading {} vectors into HNSW graph...", doc_count);
-    let load_start = Instant::now();
-    let mut hnsw: HnswGraph<D> = HnswGraph::new(hnsw_config, distance);
-
-    // Load vectors from storage into graph
     let vector_store = engine.vector_store();
     let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
-    let mut query_vectors: Vec<Vec<f32>> = Vec::new();
+    let dim = vector_store.dim();
 
-    for id in &ids {
-        if is_interrupted() {
-            println!("Interrupted during load");
-            return Ok(());
+    // Sample query vectors (every N-th vector for diversity)
+    let step = ids.len().max(1) / queries.min(ids.len()).max(1);
+    let query_ids: Vec<u64> = ids.iter().step_by(step.max(1)).take(queries).copied().collect();
+    let query_vectors: Vec<Vec<f32>> = query_ids
+        .iter()
+        .filter_map(|&id| vector_store.get(id).ok().map(|v| v.to_vec()))
+        .collect();
+    let num_queries = query_vectors.len();
+
+    println!("Database: {} vectors, dim={}", doc_count, dim);
+    println!("Queries:  {} sampled vectors", num_queries);
+    println!("k={}", k);
+    println!();
+
+    // 1. Brute-force ground truth
+    println!("Computing brute-force ground truth...");
+    let bf_start = Instant::now();
+    let ground_truth: Vec<Vec<PointId>> = query_vectors
+        .iter()
+        .map(|q| brute_force_topk(vector_store, &ids, q, k))
+        .collect();
+    let bf_elapsed = bf_start.elapsed();
+    println!(
+        "  Brute-force: {:.1}ms total, {:.1}us/query",
+        bf_elapsed.as_secs_f64() * 1000.0,
+        bf_elapsed.as_micros() as f64 / num_queries as f64,
+    );
+    println!();
+
+    // 2. HNSW f32 search (via snapshot or heap)
+    println!("=== HNSW f32 ===");
+    let snap_path = path.join("hnsw.snap");
+    let bin_path = path.join("hnsw.bin");
+
+    let ef_values = [50, 100, 200, 400];
+
+    if snap_path.exists() {
+        let snap = HnswSnapshot::open(&snap_path).context("Failed to open snapshot")?;
+        for ef in ef_values {
+            let (recall, qps, latency) = bench_f32_snapshot(
+                &snap, vector_store, &query_vectors, &ground_truth, k, ef,
+            );
+            println!(
+                "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
+            );
         }
-
-        if let Ok(vec) = vector_store.get(*id) {
-            let _ = hnsw.insert(*id, vec);
-
-            // Collect some vectors for queries
-            if query_vectors.len() < num_queries {
-                query_vectors.push(vec.to_vec());
-            }
+    } else if bin_path.exists() {
+        let hnsw: HnswGraph<NormalizedCosineDistance> =
+            HnswGraph::load(&bin_path, NormalizedCosineDistance)
+                .context("Failed to load HNSW")?;
+        for ef in ef_values {
+            let (recall, qps, latency) = bench_f32_heap(
+                &hnsw, vector_store, &query_vectors, &ground_truth, k, ef,
+            );
+            println!(
+                "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
+            );
         }
+    } else {
+        println!("  (no HNSW index found, skipping)");
     }
-    let load_elapsed = load_start.elapsed();
-    println!("Load time: {:.2}s", load_elapsed.as_secs_f64());
 
-    if query_vectors.is_empty() {
-        anyhow::bail!("No vectors loaded");
-    }
+    // 3. HNSW SQ8 two-stage search
+    let params_path = path.join("sq8_params.bin");
+    let sq8_path = path.join("sq8_vectors.bin");
 
-    // If we don't have enough unique vectors, repeat them
-    while query_vectors.len() < num_queries {
-        let idx = query_vectors.len() % ids.len();
-        if let Ok(vec) = vector_store.get(ids[idx]) {
-            query_vectors.push(vec.to_vec());
-        }
-    }
+    if params_path.exists() && sq8_path.exists() {
+        println!();
+        println!("=== HNSW SQ8 (two-stage) ===");
 
-    // Run benchmark
-    println!("\nRunning {} queries (k={})...", num_queries, k);
-    let ef_values = [50, 100, 200];
+        let params = Sq8Params::load(&params_path).context("Failed to load SQ8 params")?;
+        let mut sq8_store = Sq8VectorStore::open(&sq8_path).context("Failed to open SQ8 store")?;
+        sq8_store.restore_id_map(vector_store.id_map());
 
-    for ef in ef_values {
-        if is_interrupted() {
-            println!("Interrupted");
-            return Ok(());
-        }
-
-        let start = Instant::now();
-        let mut total_results = 0usize;
-
-        for query in &query_vectors {
-            if is_interrupted() {
-                println!("Interrupted");
-                return Ok(());
-            }
-
-            if let Ok(results) = hnsw.search(query, k, ef) {
-                total_results += results.len();
-            }
-        }
-
-        let elapsed = start.elapsed();
-        let qps = num_queries as f64 / elapsed.as_secs_f64();
-        let avg_latency_us = elapsed.as_micros() as f64 / num_queries as f64;
-
+        let sq8_size = ids.len() * dim;
+        let f32_size = ids.len() * dim * 4;
         println!(
-            "  ef={:3}: {:8.1} QPS, {:7.1} us/query, {:.1} avg results",
-            ef,
-            qps,
-            avg_latency_us,
-            total_results as f64 / num_queries as f64
+            "  Memory: {:.2}MB (SQ8) vs {:.2}MB (f32) = {:.1}x compression",
+            sq8_size as f64 / 1_048_576.0,
+            f32_size as f64 / 1_048_576.0,
+            f32_size as f64 / sq8_size as f64,
         );
+
+        if snap_path.exists() {
+            let snap = HnswSnapshot::open(&snap_path).context("Failed to open snapshot")?;
+            for ef in ef_values {
+                let (recall, qps, latency) = bench_sq8_snapshot(
+                    &snap, vector_store, &params, &sq8_store, &query_vectors, &ground_truth, k, ef,
+                );
+                println!(
+                    "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
+                );
+            }
+        } else if bin_path.exists() {
+            let hnsw: HnswGraph<NormalizedCosineDistance> =
+                HnswGraph::load(&bin_path, NormalizedCosineDistance)
+                    .context("Failed to load HNSW")?;
+            for ef in ef_values {
+                let (recall, qps, latency) = bench_sq8_heap(
+                    &hnsw, vector_store, &params, &sq8_store, &query_vectors, &ground_truth, k, ef,
+                );
+                println!(
+                    "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
+                );
+            }
+        }
+    } else {
+        println!();
+        println!("=== SQ8 not found (run `v-hnsw build-index` to generate) ===");
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Brute-force ground truth
+// ---------------------------------------------------------------------------
+
+fn brute_force_topk(
+    store: &dyn VectorStore,
+    ids: &[u64],
+    query: &[f32],
+    k: usize,
+) -> Vec<PointId> {
+    let mut dists: Vec<(PointId, f32)> = ids
+        .iter()
+        .filter_map(|&id| {
+            store.get(id).ok().map(|vec| {
+                (id, NormalizedCosineDistance.distance(query, vec))
+            })
+        })
+        .collect();
+    dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    dists.truncate(k);
+    dists.into_iter().map(|(id, _)| id).collect()
+}
+
+// ---------------------------------------------------------------------------
+// f32 benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_f32_snapshot(
+    snap: &HnswSnapshot,
+    store: &dyn VectorStore,
+    queries: &[Vec<f32>],
+    ground_truth: &[Vec<PointId>],
+    k: usize,
+    ef: usize,
+) -> (f64, f64, f64) {
+    let start = Instant::now();
+    let mut total_recall = 0.0_f64;
+
+    for (i, query) in queries.iter().enumerate() {
+        if let Ok(results) = snap.search_ext(&NormalizedCosineDistance, store, query, k, ef) {
+            total_recall += recall_at_k(&results, &ground_truth[i]);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let avg_recall = total_recall / queries.len() as f64;
+    let qps = queries.len() as f64 / elapsed.as_secs_f64();
+    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
+    (avg_recall, qps, latency)
+}
+
+fn bench_f32_heap(
+    hnsw: &HnswGraph<NormalizedCosineDistance>,
+    store: &dyn VectorStore,
+    queries: &[Vec<f32>],
+    ground_truth: &[Vec<PointId>],
+    k: usize,
+    ef: usize,
+) -> (f64, f64, f64) {
+    let start = Instant::now();
+    let mut total_recall = 0.0_f64;
+
+    for (i, query) in queries.iter().enumerate() {
+        if let Ok(results) = hnsw.search_ext(store, query, k, ef) {
+            total_recall += recall_at_k(&results, &ground_truth[i]);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let avg_recall = total_recall / queries.len() as f64;
+    let qps = queries.len() as f64 / elapsed.as_secs_f64();
+    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
+    (avg_recall, qps, latency)
+}
+
+// ---------------------------------------------------------------------------
+// SQ8 benchmarks
+// ---------------------------------------------------------------------------
+
+/// SQ8 distance computer for approximate traversal.
+struct Sq8Dc<'a> {
+    params: &'a Sq8Params,
+    store: &'a Sq8VectorStore,
+}
+
+impl DistanceComputer for Sq8Dc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let codes = self.store.get(id)?;
+        Ok(self.params.asymmetric_distance(query, codes))
+    }
+}
+
+/// f32 distance computer for exact rescore.
+struct F32Dc<'a> {
+    store: &'a dyn VectorStore,
+}
+
+impl DistanceComputer for F32Dc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let vec = self.store.get(id)?;
+        Ok(NormalizedCosineDistance.distance(query, vec))
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+fn bench_sq8_snapshot(
+    snap: &HnswSnapshot,
+    f32_store: &dyn VectorStore,
+    params: &Sq8Params,
+    sq8_store: &Sq8VectorStore,
+    queries: &[Vec<f32>],
+    ground_truth: &[Vec<PointId>],
+    k: usize,
+    ef: usize,
+) -> (f64, f64, f64) {
+    let approx = Sq8Dc { params, store: sq8_store };
+    let exact = F32Dc { store: f32_store };
+
+    let start = Instant::now();
+    let mut total_recall = 0.0_f64;
+
+    for (i, query) in queries.iter().enumerate() {
+        if let Ok(results) = snap.search_two_stage(&approx, &exact, query, k, ef) {
+            total_recall += recall_at_k(&results, &ground_truth[i]);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let avg_recall = total_recall / queries.len() as f64;
+    let qps = queries.len() as f64 / elapsed.as_secs_f64();
+    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
+    (avg_recall, qps, latency)
+}
+
+#[expect(clippy::too_many_arguments)]
+fn bench_sq8_heap(
+    hnsw: &HnswGraph<NormalizedCosineDistance>,
+    f32_store: &dyn VectorStore,
+    params: &Sq8Params,
+    sq8_store: &Sq8VectorStore,
+    queries: &[Vec<f32>],
+    ground_truth: &[Vec<PointId>],
+    k: usize,
+    ef: usize,
+) -> (f64, f64, f64) {
+    let approx = Sq8Dc { params, store: sq8_store };
+    let exact = F32Dc { store: f32_store };
+
+    let start = Instant::now();
+    let mut total_recall = 0.0_f64;
+
+    for (i, query) in queries.iter().enumerate() {
+        if let Ok(results) = hnsw.search_two_stage(&approx, &exact, query, k, ef) {
+            total_recall += recall_at_k(&results, &ground_truth[i]);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let avg_recall = total_recall / queries.len() as f64;
+    let qps = queries.len() as f64 / elapsed.as_secs_f64();
+    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
+    (avg_recall, qps, latency)
+}
+
+// ---------------------------------------------------------------------------
+// Recall computation
+// ---------------------------------------------------------------------------
+
+fn recall_at_k(results: &[(PointId, f32)], truth: &[PointId]) -> f64 {
+    if truth.is_empty() {
+        return 1.0;
+    }
+    let truth_set: HashSet<PointId> = truth.iter().copied().collect();
+    let hits = results.iter().filter(|(id, _)| truth_set.contains(id)).count();
+    hits as f64 / truth.len() as f64
 }

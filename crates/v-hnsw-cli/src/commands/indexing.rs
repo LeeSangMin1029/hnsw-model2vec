@@ -3,9 +3,11 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::{PayloadStore, VectorIndex};
+use v_hnsw_core::{PayloadStore, VectorIndex, VectorStore};
 use v_hnsw_graph::{HnswGraph, HnswSnapshot, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, KoreanBm25Tokenizer};
+use v_hnsw_storage::sq8::Sq8Params;
+use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
 use super::common::{ensure_korean_dict, make_progress_bar};
@@ -51,6 +53,9 @@ pub fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> 
     hnsw.save(&hnsw_path)
         .with_context(|| format!("Failed to save HNSW graph to {}", hnsw_path.display()))?;
     println!("  HNSW graph saved: {}", hnsw_path.display());
+
+    // Build SQ8 quantized vectors
+    build_sq8(path, vector_store)?;
 
     // Build BM25 index
     println!("  Building BM25 index...");
@@ -129,6 +134,9 @@ pub fn update_indexes_incremental(
         .with_context(|| "Failed to save HNSW snapshot")?;
     println!("  HNSW graph updated ({total_changes} changes) + snapshot.");
 
+    // --- SQ8 incremental update ---
+    update_sq8(path, vector_store, added_ids, removed_ids)?;
+
     // --- BM25 incremental update ---
     if total_changes > 0 {
         ensure_korean_dict()?;
@@ -156,5 +164,112 @@ pub fn update_indexes_incremental(
     println!("  BM25 index updated ({total_changes} changes) + snapshot.");
 
     tracing::info!("Incremental index update completed");
+    Ok(())
+}
+
+/// Build SQ8 quantized vector index from the f32 vector store.
+///
+/// Trains per-dimension min/max parameters, then quantizes all vectors.
+fn build_sq8(path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Result<()> {
+    let id_map = vector_store.id_map();
+    if id_map.is_empty() {
+        return Ok(());
+    }
+
+    println!("  Building SQ8 quantized vectors...");
+
+    let dim = vector_store.dim();
+
+    // Collect all vectors for training
+    let vectors: Vec<&[f32]> = id_map
+        .keys()
+        .filter_map(|&id| vector_store.get(id).ok())
+        .collect();
+
+    let params = Sq8Params::train(dim, &vectors)
+        .with_context(|| "Failed to train SQ8 parameters")?;
+
+    // Save params
+    let params_path = path.join("sq8_params.bin");
+    params
+        .save(&params_path)
+        .with_context(|| "Failed to save SQ8 params")?;
+
+    // Create quantized store and insert all vectors
+    let store_path = path.join("sq8_vectors.bin");
+    let mut sq8_store = Sq8VectorStore::create(&store_path, dim, vectors.len() as u32 + 64)
+        .with_context(|| "Failed to create SQ8 vector store")?;
+
+    let mut buf = vec![0u8; dim];
+    for (&id, &slot) in id_map {
+        if let Ok(vec) = vector_store.get(id) {
+            params.quantize_into(vec, &mut buf);
+            sq8_store.insert_at(id, slot, &buf)?;
+        }
+    }
+
+    sq8_store.flush()?;
+
+    let f32_size = id_map.len() * dim * 4;
+    let sq8_size = id_map.len() * dim;
+    println!(
+        "  SQ8 vectors saved: {:.1}x compression ({:.2}MB → {:.2}MB)",
+        f32_size as f64 / sq8_size as f64,
+        f32_size as f64 / 1_048_576.0,
+        sq8_size as f64 / 1_048_576.0,
+    );
+
+    Ok(())
+}
+
+/// Incrementally update SQ8 index for changed vectors.
+///
+/// If SQ8 files don't exist, rebuilds from scratch.
+/// Note: incremental updates reuse existing params (no re-training).
+fn update_sq8(
+    path: &Path,
+    vector_store: &v_hnsw_storage::MmapVectorStore,
+    added_ids: &[u64],
+    removed_ids: &[u64],
+) -> Result<()> {
+    let params_path = path.join("sq8_params.bin");
+    let store_path = path.join("sq8_vectors.bin");
+
+    if !params_path.exists() || !store_path.exists() {
+        // Full rebuild
+        return build_sq8(path, vector_store);
+    }
+
+    if added_ids.is_empty() && removed_ids.is_empty() {
+        return Ok(());
+    }
+
+    let params = Sq8Params::load(&params_path)
+        .with_context(|| "Failed to load SQ8 params")?;
+
+    let mut sq8_store = Sq8VectorStore::open(&store_path)
+        .with_context(|| "Failed to open SQ8 vector store")?;
+
+    // Restore id_map from the main vector store
+    sq8_store.restore_id_map(vector_store.id_map());
+
+    // Insert new vectors at the same slot positions as the main store.
+    let id_map = vector_store.id_map();
+    let mut buf = vec![0u8; params.dim()];
+    for &id in added_ids {
+        if let Some(&slot) = id_map.get(&id) {
+            if let Ok(vec) = vector_store.get(id) {
+                params.quantize_into(vec, &mut buf);
+                sq8_store.insert_at(id, slot, &buf)?;
+            }
+        }
+    }
+
+    sq8_store.flush()?;
+    println!(
+        "  SQ8 vectors updated ({} additions).",
+        added_ids.len()
+    );
+
     Ok(())
 }
