@@ -13,8 +13,9 @@ use std::path::Path;
 use bytemuck::{Pod, Zeroable};
 use v_hnsw_core::{PointId, VhnswError, storage_err, read_le_u64};
 
+use super::fieldnorm::FieldNormLut;
 use super::index::PostingList;
-use super::scorer::Bm25Params;
+use super::scorer::{Bm25Params, PostingView, ScoringCtx};
 use crate::Tokenizer;
 
 const MAGIC: u64 = 0x424D_3235_534E_4150; // "BM25SNAP"
@@ -33,10 +34,17 @@ struct DocLengthEntry {
 /// Posting entry: 16 bytes (doc_id + tf + padding).
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct PostingEntry {
-    doc_id: u64,
-    tf: u32,
+pub(crate) struct PostingEntry {
+    pub doc_id: u64,
+    pub tf: u32,
     _pad: u32,
+}
+
+impl PostingView for PostingEntry {
+    #[inline]
+    fn doc_id(&self) -> PointId { self.doc_id }
+    #[inline]
+    fn tf(&self) -> u32 { self.tf }
 }
 
 /// Write BM25 snapshot file from raw index data.
@@ -110,11 +118,11 @@ pub struct Bm25Snapshot {
     total_length: u64,
     max_doc_id: u64,
     num_terms: usize,
-    num_doc_entries: usize,
-    doc_lengths_offset: usize,
     posting_offsets_offset: usize,
     posting_data_offset: usize,
     params: Bm25Params,
+    fieldnorm_codes: HashMap<PointId, u8>,
+    fieldnorm_lut: FieldNormLut,
 }
 
 impl Bm25Snapshot {
@@ -145,21 +153,38 @@ impl Bm25Snapshot {
         let posting_offsets_offset = doc_lengths_offset + num_doc_entries * 16;
         let posting_data_offset = posting_offsets_offset + num_terms * 8;
 
+        let total_docs = h[2] as usize;
+        let total_length = h[3];
+        let params = Bm25Params::new(
+            f32::from_bits((h[7] & 0xFFFF_FFFF) as u32),
+            f32::from_bits((h[7] >> 32) as u32),
+        );
+
+        let avg_doc_len = if total_docs == 0 { 0.0 }
+            else { total_length as f32 / total_docs as f32 };
+        let fieldnorm_lut = FieldNormLut::build(params.b, avg_doc_len);
+
+        // Build fieldnorm codes from the doc length table
+        let dl_end = doc_lengths_offset + num_doc_entries * 16;
+        let doc_entries: &[DocLengthEntry] =
+            bytemuck::try_cast_slice(&mmap[doc_lengths_offset..dl_end]).unwrap_or(&[]);
+        let fieldnorm_codes: HashMap<PointId, u8> = doc_entries
+            .iter()
+            .map(|e| (e.doc_id, super::fieldnorm::encode(e.length as u32)))
+            .collect();
+
         Ok(Self {
             mmap,
             fst_map,
-            total_docs: h[2] as usize,
-            total_length: h[3],
+            total_docs,
+            total_length,
             max_doc_id: h[4],
             num_terms,
-            num_doc_entries,
-            doc_lengths_offset,
             posting_offsets_offset,
             posting_data_offset,
-            params: Bm25Params::new(
-                f32::from_bits((h[7] & 0xFFFF_FFFF) as u32),
-                f32::from_bits((h[7] >> 32) as u32),
-            ),
+            params,
+            fieldnorm_codes,
+            fieldnorm_lut,
         })
     }
 
@@ -184,7 +209,8 @@ impl Bm25Snapshot {
         tokens.extend(bigrams);
         let terms = self.resolve_terms(&tokens);
         if terms.is_empty() { return Vec::new(); }
-        self.accumulate_and_rank(&terms, limit)
+        let ctx = self.scoring_ctx();
+        super::scorer::accumulate_and_rank(&ctx, &terms, self.max_doc_id, limit)
     }
 
     /// Score specific documents for hybrid search (Dense-Guided BM25).
@@ -197,22 +223,8 @@ impl Bm25Snapshot {
         tokens.extend(bigrams);
         let terms = self.resolve_terms(&tokens);
         if terms.is_empty() { return Vec::new(); }
-
-        let avg = self.avg_doc_length();
-        let mut results = Vec::with_capacity(doc_ids.len());
-        for &doc_id in doc_ids {
-            let doc_len = self.doc_length(doc_id);
-            let mut score = 0.0f32;
-            for &(entries, idf) in &terms {
-                if let Ok(idx) = entries.binary_search_by_key(&doc_id, |e| e.doc_id) {
-                    score += idf * self.params.tf_norm(entries[idx].tf, doc_len, avg);
-                }
-            }
-            if score > 0.0 {
-                results.push((doc_id, score));
-            }
-        }
-        results
+        let ctx = self.scoring_ctx();
+        super::scorer::score_documents_common(&ctx, &terms, doc_ids)
     }
 
     // -- Internal helpers --
@@ -229,67 +241,15 @@ impl Bm25Snapshot {
             .collect()
     }
 
-    /// Vec accumulator ceiling: 256K entries = 1MB max allocation.
-    const MAX_VEC_ACCUMULATOR_ID: u64 = 256_000;
-
-    fn accumulate_and_rank(
-        &self, terms: &[(&[PostingEntry], f32)], limit: usize,
-    ) -> Vec<(PointId, f32)> {
-        let avg = self.avg_doc_length();
-
-        if self.max_doc_id <= Self::MAX_VEC_ACCUMULATOR_ID {
-            let len = self.max_doc_id as usize + 1;
-            let mut scores = vec![0.0f32; len];
-            let mut touched: Vec<PointId> = Vec::with_capacity(256);
-
-            for &(entries, idf) in terms {
-                for e in entries {
-                    let id = e.doc_id as usize;
-                    if id < len {
-                        if scores[id] == 0.0 {
-                            touched.push(e.doc_id);
-                        }
-                        let doc_len = self.doc_length(e.doc_id);
-                        scores[id] += idf * self.params.tf_norm(e.tf, doc_len, avg);
-                    }
-                }
-            }
-
-            let mut results: Vec<(PointId, f32)> = touched
-                .into_iter()
-                .map(|id| (id, scores[id as usize]))
-                .collect();
-            results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-            results.truncate(limit);
-            results
-        } else {
-            let mut score_map: HashMap<PointId, f32> = HashMap::new();
-            for &(entries, idf) in terms {
-                for e in entries {
-                    let doc_len = self.doc_length(e.doc_id);
-                    *score_map.entry(e.doc_id).or_insert(0.0) +=
-                        idf * self.params.tf_norm(e.tf, doc_len, avg);
-                }
-            }
-            let mut results: Vec<_> = score_map.into_iter().collect();
-            results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-            results.truncate(limit);
-            results
+    /// Build a `ScoringCtx` from current snapshot state.
+    fn scoring_ctx(&self) -> ScoringCtx<'_> {
+        ScoringCtx {
+            params: &self.params,
+            avg_doc_len: self.avg_doc_length(),
+            fieldnorm_lut: Some(&self.fieldnorm_lut),
+            fieldnorm_codes: &self.fieldnorm_codes,
+            doc_lengths: None, // LUT is always available for snapshots
         }
-    }
-
-    fn doc_length(&self, doc_id: PointId) -> u32 {
-        let entries = self.doc_length_table();
-        entries
-            .binary_search_by_key(&doc_id, |e| e.doc_id)
-            .ok()
-            .map(|i| entries[i].length as u32)
-            .unwrap_or(0)
-    }
-
-    fn doc_length_table(&self) -> &[DocLengthEntry] {
-        let end = self.doc_lengths_offset + self.num_doc_entries * 16;
-        bytemuck::try_cast_slice(&self.mmap[self.doc_lengths_offset..end]).unwrap_or(&[])
     }
 
     fn posting_entries(&self, ordinal: usize) -> Option<&[PostingEntry]> {

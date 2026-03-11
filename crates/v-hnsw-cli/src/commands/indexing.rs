@@ -172,7 +172,8 @@ pub fn update_indexes_incremental(
 /// Build SQ8 quantized vector index from the f32 vector store.
 ///
 /// Trains per-dimension min/max parameters, then quantizes all vectors.
-fn build_sq8(path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Result<()> {
+/// Shared by `build_indexes` (add command) and `buildindex` (rebuild command).
+pub(crate) fn build_sq8(path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Result<()> {
     let id_map = vector_store.id_map();
     if id_map.is_empty() {
         return Ok(());
@@ -197,9 +198,10 @@ fn build_sq8(path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Res
         .save(&params_path)
         .with_context(|| "Failed to save SQ8 params")?;
 
-    // Create quantized store and insert all vectors
+    // Create quantized store — capacity must cover the max slot index
+    let max_slot = id_map.values().copied().max().unwrap_or(0);
     let store_path = path.join("sq8_vectors.bin");
-    let mut sq8_store = Sq8VectorStore::create(&store_path, dim, vectors.len() as u32 + 64)
+    let mut sq8_store = Sq8VectorStore::create(&store_path, dim, max_slot + 1)
         .with_context(|| "Failed to create SQ8 vector store")?;
 
     let mut buf = vec![0u8; dim];

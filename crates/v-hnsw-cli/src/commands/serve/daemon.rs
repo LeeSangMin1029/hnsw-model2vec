@@ -94,7 +94,6 @@ impl DenseIndex {
 }
 
 /// Sparse index: mmap snapshot or heap index.
-#[expect(clippy::large_enum_variant, reason = "both variants are long-lived singletons")]
 enum SparseIndex {
     Snapshot(Bm25Snapshot),
     Heap(Bm25Index<KoreanBm25Tokenizer>),

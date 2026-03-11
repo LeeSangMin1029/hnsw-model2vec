@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use v_hnsw_core::PointId;
 
 use super::fieldnorm::FieldNormLut;
-use super::index::PostingList;
+use super::index::Posting;
 use super::scorer::Bm25Params;
 
 /// A resolved query term with pre-computed scoring bounds.
@@ -54,7 +54,7 @@ impl<'a> TermCursor<'a> {
 /// - `doc_lengths`: doc_id → token count map
 /// - `avg_doc_len`: average document length
 pub fn maxscore_search(
-    terms: &[(&PostingList, f32)],
+    terms: &[(&[Posting], f32)],
     k: usize,
     params: &Bm25Params,
     doc_lengths: &HashMap<PointId, u32>,
@@ -69,11 +69,11 @@ pub fn maxscore_search(
     // Build cursors with max_contribution bounds
     let mut cursors: Vec<TermCursor<'_>> = terms
         .iter()
-        .filter(|(pl, _)| !pl.postings.is_empty())
-        .map(|(pl, idf)| {
-            let max_contribution = compute_max_contribution(pl, *idf, params, doc_lengths, avg_doc_len);
+        .filter(|(postings, _)| !postings.is_empty())
+        .map(|(postings, idf)| {
+            let max_contribution = compute_max_contribution(postings, *idf, params, doc_lengths, avg_doc_len);
             TermCursor {
-                postings: &pl.postings,
+                postings,
                 idf: *idf,
                 max_contribution,
                 pos: 0,
@@ -185,7 +185,7 @@ pub fn maxscore_search(
 ///
 /// Uses max TF and min doc length from the posting list for a tight upper bound.
 fn compute_max_contribution(
-    pl: &PostingList,
+    postings: &[Posting],
     idf: f32,
     params: &Bm25Params,
     doc_lengths: &HashMap<PointId, u32>,
@@ -194,7 +194,7 @@ fn compute_max_contribution(
     let mut max_tf = 0u32;
     let mut min_doc_len = u32::MAX;
 
-    for p in &pl.postings {
+    for p in postings {
         if p.tf > max_tf {
             max_tf = p.tf;
         }

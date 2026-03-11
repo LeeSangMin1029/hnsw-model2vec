@@ -6,8 +6,15 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use v_hnsw_core::{PointId, VhnswError};
 
-use crate::bm25::scorer::Bm25Params;
+use crate::bm25::scorer::{Bm25Params, PostingView, ScoringCtx};
 use crate::Tokenizer;
+
+impl PostingView for Posting {
+    #[inline]
+    fn doc_id(&self) -> PointId { self.doc_id }
+    #[inline]
+    fn tf(&self) -> u32 { self.tf }
+}
 
 /// A posting entry containing document ID and term frequency.
 #[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
@@ -300,7 +307,8 @@ impl<T: Tokenizer> Bm25Index<T> {
             );
         }
 
-        self.accumulate_and_rank(&terms, limit)
+        let ctx = self.scoring_ctx();
+        super::scorer::accumulate_and_rank(&ctx, &terms, self.max_doc_id, limit)
     }
 
     /// Get the document frequency for a term.
@@ -334,91 +342,33 @@ impl<T: Tokenizer> Bm25Index<T> {
             return Vec::new();
         }
 
-        let avg_doc_len = self.avg_doc_length();
-        let mut results = Vec::with_capacity(doc_ids.len());
-
-        for &doc_id in doc_ids {
-            let mut score = 0.0f32;
-            for &(pl, idf) in &terms {
-                if let Ok(idx) = pl.postings.binary_search_by_key(&doc_id, |p| p.doc_id) {
-                    score += self.score_posting(doc_id, pl.postings[idx].tf, idf, avg_doc_len);
-                }
-            }
-            if score > 0.0 {
-                results.push((doc_id, score));
-            }
-        }
-        results
+        let ctx = self.scoring_ctx();
+        super::scorer::score_documents_common(&ctx, &terms, doc_ids)
     }
 
     // -- Query resolution & scoring utilities --
 
-    /// Resolve query tokens to posting lists with pre-computed IDF weights.
+    /// Resolve query tokens to posting slices with pre-computed IDF weights.
     ///
     /// Reusable by `search()`, `score_documents()`, and `MaxScore`.
-    fn resolve_terms<'a>(&'a self, tokens: &[String]) -> Vec<(&'a PostingList, f32)> {
+    fn resolve_terms<'a>(&'a self, tokens: &[String]) -> Vec<(&'a [Posting], f32)> {
         tokens
             .iter()
             .filter_map(|term| {
                 self.get_posting_list(term)
-                    .map(|pl| (pl, self.params.idf(pl.df(), self.total_docs)))
+                    .map(|pl| (pl.postings.as_slice(), self.params.idf(pl.df(), self.total_docs)))
             })
             .collect()
     }
 
-    /// Vec accumulator ceiling: 256K entries = 1MB max allocation.
-    const MAX_VEC_ACCUMULATOR_ID: u64 = 256_000;
-
-    /// Accumulate BM25 scores and return top-k results.
-    ///
-    /// Chooses Vec (cache-friendly) or HashMap (sparse IDs) accumulator
-    /// based on `max_doc_id`. All state is function-local (thread-safe).
-    /// Compute score for a single posting entry, using LUT if available.
-    #[inline]
-    fn score_posting(&self, doc_id: PointId, tf: u32, idf: f32, avg_doc_len: f32) -> f32 {
-        if let Some(ref lut) = self.fieldnorm_lut {
-            let code = self.fieldnorm_codes.get(&doc_id).copied().unwrap_or(0);
-            idf * lut.tf_norm(self.params.k1, tf, code)
-        } else {
-            let doc_len = self.doc_lengths.get(&doc_id).copied().unwrap_or(0);
-            idf * self.params.tf_norm(tf, doc_len, avg_doc_len)
-        }
-    }
-
-    fn accumulate_and_rank(
-        &self,
-        terms: &[(&PostingList, f32)],
-        limit: usize,
-    ) -> Vec<(PointId, f32)> {
-        let avg_doc_len = self.avg_doc_length();
-
-        if self.max_doc_id <= Self::MAX_VEC_ACCUMULATOR_ID {
-            let len = self.max_doc_id as usize + 1;
-            let mut scores = vec![0.0f32; len];
-            let mut touched: Vec<PointId> = Vec::with_capacity(256);
-
-            for &(pl, idf) in terms {
-                for p in &pl.postings {
-                    let id = p.doc_id as usize;
-                    if id < len {
-                        if scores[id] == 0.0 {
-                            touched.push(p.doc_id);
-                        }
-                        scores[id] += self.score_posting(p.doc_id, p.tf, idf, avg_doc_len);
-                    }
-                }
-            }
-
-            top_k_from_vec(&scores, touched, limit)
-        } else {
-            let mut score_map: HashMap<PointId, f32> = HashMap::new();
-            for &(pl, idf) in terms {
-                for p in &pl.postings {
-                    *score_map.entry(p.doc_id).or_insert(0.0) +=
-                        self.score_posting(p.doc_id, p.tf, idf, avg_doc_len);
-                }
-            }
-            top_k_from_map(score_map, limit)
+    /// Build a `ScoringCtx` from current index state.
+    fn scoring_ctx(&self) -> ScoringCtx<'_> {
+        ScoringCtx {
+            params: &self.params,
+            avg_doc_len: self.avg_doc_length(),
+            fieldnorm_lut: self.fieldnorm_lut.as_ref(),
+            fieldnorm_codes: &self.fieldnorm_codes,
+            doc_lengths: Some(&self.doc_lengths),
         }
     }
 
@@ -565,24 +515,3 @@ impl<T: Tokenizer> Bm25Index<T> {
     }
 }
 
-// -- Top-k extraction utilities (free functions, no &self needed) --
-
-/// Extract top-k results from a Vec accumulator.
-/// Only sorts the touched subset (typically hundreds, not all docs).
-fn top_k_from_vec(scores: &[f32], touched: Vec<PointId>, limit: usize) -> Vec<(PointId, f32)> {
-    let mut results: Vec<(PointId, f32)> = touched
-        .into_iter()
-        .map(|id| (id, scores[id as usize]))
-        .collect();
-    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    results.truncate(limit);
-    results
-}
-
-/// Extract top-k results from a HashMap accumulator.
-fn top_k_from_map(scores: HashMap<PointId, f32>, limit: usize) -> Vec<(PointId, f32)> {
-    let mut results: Vec<(PointId, f32)> = scores.into_iter().collect();
-    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    results.truncate(limit);
-    results
-}
