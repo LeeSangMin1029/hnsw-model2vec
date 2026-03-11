@@ -38,4 +38,4 @@ DbConfig { db_type: "document" | "code" | "auto" }
 - [x] #1 SQ8 양자화
 - [x] #2 FieldNorm 캐시
 - [ ] #3 IDF pre-computation
-- [ ] #4 CodeTokenizer 구현
+- [x] #4 CodeTokenizer 구현

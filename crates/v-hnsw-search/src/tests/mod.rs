@@ -12,7 +12,7 @@ use crate::bm25::{Bm25Index, Bm25Params};
 use crate::config::HybridSearchConfig;
 
 use crate::hybrid::SimpleHybridSearcher;
-use crate::{SimpleTokenizer, Tokenizer, WhitespaceTokenizer};
+use crate::{CodeTokenizer, SimpleTokenizer, Tokenizer, WhitespaceTokenizer};
 
 // ============================================================================
 // BM25 Scoring Tests
@@ -652,4 +652,104 @@ fn test_search_with_only_whitespace_query() {
     index.add_document(1, "hello world");
     let results = index.search("   \t\n  ", 10);
     assert!(results.is_empty());
+}
+
+// ============================================================================
+// CodeTokenizer Tests
+// ============================================================================
+
+#[test]
+fn code_tokenizer_camel_case() {
+    let t = CodeTokenizer::new();
+    let tokens = t.tokenize("processPaymentIntent");
+    assert_eq!(tokens, vec!["process", "payment", "intent"]);
+}
+
+#[test]
+fn code_tokenizer_snake_case() {
+    let t = CodeTokenizer::new();
+    let tokens = t.tokenize("process_payment_intent");
+    assert_eq!(tokens, vec!["process", "payment", "intent"]);
+}
+
+#[test]
+fn code_tokenizer_screaming_case() {
+    let t = CodeTokenizer::new();
+    let tokens = t.tokenize("MAX_BUFFER_SIZE");
+    assert_eq!(tokens, vec!["max", "buffer", "size"]);
+}
+
+#[test]
+fn code_tokenizer_mixed_case_acronym() {
+    let t = CodeTokenizer::new();
+    // "HTMLParser" should split to ["html", "parser"]
+    let tokens = t.tokenize("HTMLParser");
+    assert_eq!(tokens, vec!["html", "parser"]);
+}
+
+#[test]
+fn code_tokenizer_digit_boundaries() {
+    let t = CodeTokenizer::new();
+    // "vec3d" → "vec" + "3" + "d" → only "vec" survives (others < 2 chars)
+    let tokens = t.tokenize("vec3d");
+    assert_eq!(tokens, vec!["vec"]);
+
+    // "int32Value" → "int" + "32" + "value"
+    let tokens = t.tokenize("int32Value");
+    assert_eq!(tokens, vec!["32", "value"]);
+}
+
+#[test]
+fn code_tokenizer_strips_keywords() {
+    let t = CodeTokenizer::new();
+    // "fn" and "pub" are keywords, should be removed
+    let tokens = t.tokenize("pub fn calculate_total");
+    assert_eq!(tokens, vec!["calculate", "total"]);
+}
+
+#[test]
+fn code_tokenizer_strips_short_tokens() {
+    let t = CodeTokenizer::new();
+    // Single-char tokens like "x", "i" should be removed
+    let tokens = t.tokenize("x = i + 1");
+    assert!(tokens.is_empty());
+}
+
+#[test]
+fn code_tokenizer_real_code() {
+    let t = CodeTokenizer::new();
+    let tokens = t.tokenize("fn build_hnsw_graph(vector_store: &MmapVectorStore) -> Result<HnswGraph>");
+    // Should include meaningful identifiers, skip keywords
+    assert!(tokens.contains(&"build".to_string()));
+    assert!(tokens.contains(&"hnsw".to_string()));
+    assert!(tokens.contains(&"graph".to_string()));
+    assert!(tokens.contains(&"vector".to_string()));
+    assert!(tokens.contains(&"store".to_string()));
+    assert!(tokens.contains(&"mmap".to_string()));
+    assert!(tokens.contains(&"result".to_string()));
+    // Keywords should be filtered
+    assert!(!tokens.contains(&"fn".to_string()));
+}
+
+#[test]
+fn code_tokenizer_operators_split() {
+    let t = CodeTokenizer::new();
+    let tokens = t.tokenize("score+=idf*tf_norm");
+    assert!(tokens.contains(&"score".to_string()));
+    assert!(tokens.contains(&"idf".to_string()));
+    assert!(tokens.contains(&"norm".to_string()));
+}
+
+#[test]
+fn code_tokenizer_bm25_integration() {
+    let mut index = Bm25Index::new(CodeTokenizer::new());
+    index.add_document(1, "fn processPayment(amount: f64) -> Result<PaymentResponse>");
+    index.add_document(2, "fn calculateTax(income: f64) -> f64");
+    index.add_document(3, "struct PaymentIntent { amount: f64, currency: String }");
+
+    let results = index.search("payment", 10);
+    let ids: Vec<u64> = results.iter().map(|(id, _)| *id).collect();
+    assert!(ids.contains(&1)); // processPayment
+    assert!(ids.contains(&3)); // PaymentIntent
+    assert!(!ids.contains(&2)); // no payment-related terms
 }

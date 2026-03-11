@@ -115,3 +115,126 @@ impl Tokenizer for SimpleTokenizer {
             .collect()
     }
 }
+
+/// Code-aware tokenizer for BM25 indexing of source code.
+///
+/// Splits identifiers at camelCase, snake_case, and SCREAMING_CASE boundaries,
+/// strips language keywords and short tokens (<2 chars). Designed for code DB
+/// search where Korean morphological analysis is inappropriate.
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode,
+)]
+pub struct CodeTokenizer;
+
+impl CodeTokenizer {
+    /// Create a new code tokenizer.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tokenizer for CodeTokenizer {
+    fn tokenize(&self, text: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+
+        // Split on whitespace, punctuation, operators, brackets
+        for word in text.split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '(' | ')' | '{' | '}' | '[' | ']' | '<' | '>' | ','
+                        | ';' | ':' | '.' | '=' | '+' | '-' | '*' | '/'
+                        | '&' | '|' | '!' | '?' | '#' | '@' | '"' | '\''
+                        | '`' | '~' | '^' | '%' | '\\'
+                )
+        }) {
+            if word.is_empty() {
+                continue;
+            }
+            // Split camelCase / snake_case / SCREAMING_CASE
+            for sub in split_identifier(word) {
+                let lower = sub.to_lowercase();
+                if lower.len() >= 2 && !is_code_stopword(&lower) {
+                    tokens.push(lower);
+                }
+            }
+        }
+        tokens
+    }
+}
+
+/// Split an identifier at camelCase, snake_case, and digit boundaries.
+fn split_identifier(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+
+    // First split on underscores
+    for segment in s.split('_') {
+        if segment.is_empty() {
+            continue;
+        }
+        split_camel_case(segment, &mut parts);
+    }
+
+    if parts.is_empty() && !s.is_empty() {
+        parts.push(s);
+    }
+    parts
+}
+
+/// Split a single segment (no underscores) at camelCase boundaries.
+fn split_camel_case<'a>(segment: &'a str, parts: &mut Vec<&'a str>) {
+    let bytes = segment.as_bytes();
+    let len = bytes.len();
+    if len == 0 {
+        return;
+    }
+
+    let mut start = 0;
+    let mut i = 1;
+
+    while i < len {
+        let prev = bytes[i - 1];
+        let curr = bytes[i];
+
+        let split_here =
+            // lowercase → uppercase: "camelCase" → "camel" | "Case"
+            (prev.is_ascii_lowercase() && curr.is_ascii_uppercase())
+            // letter → digit: "vec3" → "vec" | "3"
+            || (prev.is_ascii_alphabetic() && curr.is_ascii_digit())
+            // digit → letter: "3d" → "3" | "d"
+            || (prev.is_ascii_digit() && curr.is_ascii_alphabetic())
+            // UPPER run end: "HTMLParser" → "HTML" | "Parser"
+            || (i + 1 < len
+                && prev.is_ascii_uppercase()
+                && curr.is_ascii_uppercase()
+                && bytes[i + 1].is_ascii_lowercase());
+
+        if split_here {
+            if i > start {
+                parts.push(&segment[start..i]);
+            }
+            start = i;
+        }
+        i += 1;
+    }
+
+    if start < len {
+        parts.push(&segment[start..]);
+    }
+}
+
+/// Common programming language keywords that add no search value.
+fn is_code_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "fn" | "if" | "else" | "for" | "while" | "let" | "mut" | "pub" | "use"
+            | "mod" | "impl" | "self" | "super" | "crate" | "as" | "in" | "ref"
+            | "return" | "match" | "true" | "false" | "none" | "some" | "ok" | "err"
+            | "var" | "const" | "new" | "this" | "null" | "void" | "int" | "def"
+            | "class" | "import" | "from" | "try" | "catch" | "throw" | "throws"
+            | "static" | "final" | "public" | "private" | "protected" | "abstract"
+            | "func" | "struct" | "enum" | "type" | "interface" | "package"
+            | "do" | "end" | "then" | "begin" | "not" | "and" | "or"
+            | "the" | "is" | "it" | "to" | "of" | "an" | "be" | "no"
+    )
+}
