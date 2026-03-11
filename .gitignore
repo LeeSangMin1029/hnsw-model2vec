@@ -19,6 +19,9 @@ datasets/
 test_*.jsonl
 test_*.parquet
 
+# docs
+.archive-papers
+
 # Cache
 .fastembed_cache/
 .cache/
@@ -58,3 +61,5 @@ models/
 # Node.js
 node_modules/
 package-lock.json
+
+docs/
