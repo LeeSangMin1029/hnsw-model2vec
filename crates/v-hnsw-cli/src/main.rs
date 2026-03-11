@@ -8,26 +8,20 @@ pub use v_hnsw_code as chunk_code;
 mod cli;
 mod commands;
 pub mod error;
+pub mod interrupt;
+mod v_code_cli;
 
 #[cfg(test)]
 mod tests;
 
 use clap::Parser;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use cli::{Cli, Commands};
 use error::CliError;
 
-/// Global flag for Ctrl+C handling.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-/// Check if Ctrl+C was pressed.
-pub fn is_interrupted() -> bool {
-    INTERRUPTED.load(Ordering::Relaxed)
-}
+pub use interrupt::is_interrupted;
 
 fn main() {
-    // Initialize tracing (default: v_hnsw=info, override via RUST_LOG)
     #[allow(clippy::expect_used)]
     let directive = "v_hnsw=info".parse().expect("static directive");
     tracing_subscriber::fmt()
@@ -36,13 +30,7 @@ fn main() {
         )
         .init();
 
-    // Setup Ctrl+C handler
-    if let Err(e) = ctrlc::set_handler(move || {
-        INTERRUPTED.store(true, Ordering::SeqCst);
-        eprintln!("\nInterrupted. Cleaning up...");
-    }) {
-        eprintln!("Warning: Failed to set Ctrl+C handler: {e}");
-    }
+    interrupt::install_handler();
 
     if let Err(err) = run() {
         let cli_err = CliError::from(err);

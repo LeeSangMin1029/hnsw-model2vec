@@ -10,6 +10,10 @@ license.workspace = true
 name = "v-hnsw"
 path = "src/main.rs"
 
+[[bin]]
+name = "v-code"
+path = "src/v_code_main.rs"
+
 [dependencies]
 # Internal crates
 v-hnsw-core.workspace = true

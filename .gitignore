@@ -49,6 +49,7 @@ logs/
 
 # Model cache (downloaded models)
 models/
+.models/
 *.onnx
 
 # Daemon state
