@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::search_result::SearchResultItem;
 
 // ── truncate_text ────────────────────────────────────────────────────
 
@@ -37,19 +38,6 @@ fn truncate_text_multibyte_boundary() {
 fn truncate_text_single_char_limit() {
     let result = truncate_text("abcdef", 1);
     assert_eq!(result, "a...");
-}
-
-// ── is_zero ──────────────────────────────────────────────────────────
-
-#[test]
-fn is_zero_true() {
-    assert!(is_zero(&0));
-}
-
-#[test]
-fn is_zero_false() {
-    assert!(!is_zero(&1));
-    assert!(!is_zero(&42));
 }
 
 // ── parse_vector ─────────────────────────────────────────────────────
@@ -95,46 +83,6 @@ fn parse_vector_invalid_number() {
 fn parse_vector_empty_segment() {
     let result = parse_vector("0.1,,0.3");
     assert!(result.is_err());
-}
-
-// ── looks_like_code_symbol ───────────────────────────────────────────
-
-#[test]
-fn code_symbol_rust_path() {
-    assert!(looks_like_code_symbol("std::collections::HashMap"));
-}
-
-#[test]
-fn code_symbol_snake_case() {
-    assert!(looks_like_code_symbol("my_function"));
-}
-
-#[test]
-fn code_symbol_camel_case() {
-    assert!(looks_like_code_symbol("MyStruct"));
-}
-
-#[test]
-fn code_symbol_plain_lowercase() {
-    // All alphanumeric + underscore => treated as symbol
-    assert!(looks_like_code_symbol("main"));
-}
-
-#[test]
-fn code_symbol_natural_language() {
-    assert!(!looks_like_code_symbol("how to use HashMap"));
-}
-
-#[test]
-fn code_symbol_empty() {
-    // Empty string has no spaces, all chars are alphanumeric/underscore (vacuously true)
-    // so it returns true - that's fine, edge case
-    assert!(looks_like_code_symbol(""));
-}
-
-#[test]
-fn code_symbol_with_spaces() {
-    assert!(!looks_like_code_symbol("hello world"));
 }
 
 // ── compact_output ───────────────────────────────────────────────────
@@ -220,12 +168,9 @@ fn find_output_serialization_skips_empty_fields() {
     };
 
     let json = serde_json::to_value(&output).unwrap();
-    // query, model should be skipped when empty
     assert!(json.get("query").is_none());
     assert!(json.get("model").is_none());
-    // total_docs should be skipped when zero
     assert!(json.get("total_docs").is_none());
-    // elapsed_ms should always be present
     assert!(json.get("elapsed_ms").is_some());
 }
 

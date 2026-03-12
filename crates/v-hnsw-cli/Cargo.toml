@@ -1,33 +1,27 @@
 [package]
 name = "v-hnsw-cli"
-description = "v-hnsw vector database CLI"
+description = "v-hnsw CLI shared library"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "v-hnsw"
-path = "src/main.rs"
-
-[[bin]]
-name = "v-code"
-path = "src/v_code_main.rs"
+[lib]
+name = "v_hnsw_cli"
+path = "src/lib.rs"
 
 [dependencies]
-# Internal crates
+# Internal crates (always needed)
 v-hnsw-core.workspace = true
-v-hnsw-graph.workspace = true
 v-hnsw-storage.workspace = true
-v-hnsw-search = { workspace = true, features = ["korean"] }
+v-code-chunk.workspace = true
 v-hnsw-embed.workspace = true
 
-# Markdown chunking (inline module, replaces v-hnsw-chunk crate)
-pulldown-cmark = "0.13"
+# Document mode dependencies
+v-hnsw-graph = { workspace = true, optional = true }
+v-hnsw-search = { workspace = true, features = ["korean"], optional = true }
+pulldown-cmark = { version = "0.13", optional = true }
 
-# Code chunking (tree-sitter AST parsing)
-v-hnsw-code.workspace = true
-v-hnsw-intel.workspace = true
 
 # CLI
 clap = { workspace = true, features = ["derive"] }
@@ -72,7 +66,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 
 [features]
-default = []
+default = ["doc"]
+doc = [
+    "v-hnsw-graph",
+    "v-hnsw-search",
+    "pulldown-cmark",
+]
 
 [lints]
 workspace = true

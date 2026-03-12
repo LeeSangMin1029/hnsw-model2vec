@@ -74,6 +74,85 @@ pub fn build_results(
         .collect()
 }
 
+// ── Find output ──────────────────────────────────────────────────────
+
+/// Search output for JSON formatting, shared by v-hnsw find and v-code find.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct FindOutput {
+    pub results: Vec<SearchResultItem>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "is_doc_count_zero")]
+    pub total_docs: usize,
+    #[serde(default, skip_serializing_if = "is_elapsed_zero")]
+    pub elapsed_ms: f64,
+}
+
+fn is_doc_count_zero(v: &usize) -> bool {
+    *v == 0
+}
+
+fn is_elapsed_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+/// Truncate text to `max_len` chars, appending "..." if truncated.
+pub fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    let mut end = max_len;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
+}
+
+/// Compact the output: truncate text, strip home prefix, zero out metadata.
+pub fn compact_output(mut output: FindOutput) -> FindOutput {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default()
+        .replace('\\', "/");
+
+    for item in &mut output.results {
+        item.id = 0;
+        item.score = 0.0;
+        item.url = None;
+        if let Some(ref text) = item.text {
+            let cleaned = text.replace('\n', " ");
+            item.text = Some(truncate_text(&cleaned, 150));
+        }
+        if let Some(ref source) = item.source {
+            let short = source
+                .strip_prefix(&home)
+                .unwrap_or(source)
+                .trim_start_matches('/');
+            item.source = Some(short.to_string());
+        }
+    }
+    output.model = String::new();
+    output.total_docs = 0;
+    output.elapsed_ms = 0.0;
+    output
+}
+
+/// Print `FindOutput` as JSON with optional compaction and score filtering.
+pub fn print_find_output(output: FindOutput, full: bool, min_score: f32) -> anyhow::Result<()> {
+    let mut output = output;
+    if min_score > 0.0 {
+        output.results.retain(|item| item.score >= min_score);
+    }
+    let output = if full { output } else { compact_output(output) };
+    let json = serde_json::to_string_pretty(&output)?;
+    println!("{json}");
+    Ok(())
+}
+
+// ── Query language utilities ────────────────────────────────────────
+
 /// Check if query contains Korean (Hangul) characters.
 ///
 /// Returns `true` if any character is in the Hangul Syllables or Jamo range.

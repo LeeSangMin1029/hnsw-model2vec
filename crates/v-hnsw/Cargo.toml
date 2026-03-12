@@ -1,0 +1,22 @@
+[package]
+name = "v-hnsw"
+description = "v-hnsw document vector database CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "v-hnsw"
+path = "src/main.rs"
+
+[dependencies]
+v-hnsw-cli = { workspace = true, features = ["doc"] }
+v-hnsw-core.workspace = true
+clap = { workspace = true, features = ["derive"] }
+anyhow = "1"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

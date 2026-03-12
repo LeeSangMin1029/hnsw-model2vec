@@ -5,9 +5,12 @@ members = [
     "crates/v-hnsw-storage",
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
-    "crates/v-hnsw-code",
-    "crates/v-hnsw-intel",
+    "crates/v-hnsw-rerank",
+    "crates/v-code-chunk",
+    "crates/v-code-intel",
     "crates/v-hnsw-cli",
+    "crates/v-hnsw",
+    "crates/v-code",
 ]
 resolver = "2"
 
@@ -25,8 +28,10 @@ v-hnsw-graph = { path = "crates/v-hnsw-graph" }
 v-hnsw-storage = { path = "crates/v-hnsw-storage" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
-v-hnsw-code = { path = "crates/v-hnsw-code" }
-v-hnsw-intel = { path = "crates/v-hnsw-intel" }
+v-code-chunk = { path = "crates/v-code-chunk" }
+v-code-intel = { path = "crates/v-code-intel" }
+v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
+v-hnsw-cli = { path = "crates/v-hnsw-cli", default-features = false }
 
 # Error handling
 thiserror = "2"
@@ -69,8 +74,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [profile.dev]
 debug = "line-tables-only"
 
-# Local: cargo build --profile local -p v-hnsw-cli  (incremental, fast iteration)
-# Deploy: cargo build --release -p v-hnsw-cli       (full optimization)
+# Local: cargo build --profile local -p v-hnsw -p v-code  (incremental, fast iteration)
+# Deploy: cargo build --release -p v-hnsw -p v-code       (full optimization)
 [profile.local]
 inherits = "release"
 incremental = true

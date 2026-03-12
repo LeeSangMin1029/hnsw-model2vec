@@ -15,7 +15,7 @@ use anyhow::Result;
 use v_hnsw_embed::EmbeddingModel;
 
 use super::common;
-use super::create::DbConfig;
+use super::db_config::DbConfig;
 use crate::is_interrupted;
 
 /// Input type detected from the path.
@@ -105,10 +105,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         db = %db_path.display(),
         "Starting add command"
     );
-    println!("Input type: {:?}", input_type);
-    println!("Input path: {}", input_path.display());
-    println!("Database:   {}", db_path.display());
-    println!();
+    println!("{:?}: {}", input_type, input_path.display());
+    println!("Database: {}", db_path.display());
 
     // Create model
     let model = common::create_model()?;
@@ -177,8 +175,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     }
 
     tracing::info!(inserted, errors, "Add command completed");
-    println!();
-    println!("Done! Database ready at: {}", db_path.display());
+    println!("Done: {}", db_path.display());
 
     Ok(())
 }

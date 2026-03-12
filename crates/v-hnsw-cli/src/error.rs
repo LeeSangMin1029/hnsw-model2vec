@@ -1,6 +1,7 @@
 //! Central error type for the v-hnsw CLI.
 
 use v_hnsw_core::VhnswError;
+#[cfg(feature = "doc")]
 use v_hnsw_embed::EmbedError;
 
 /// CLI error with categorized variants for structured error handling.
@@ -11,6 +12,7 @@ pub enum CliError {
     Database(#[from] VhnswError),
 
     /// Embedding model error.
+    #[cfg(feature = "doc")]
     #[error("embedding: {0}")]
     Embed(#[from] EmbedError),
 

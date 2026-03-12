@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
-use super::create::DbConfig;
+use super::db_config::DbConfig;
 use super::dict;
 
 // ── Re-exports for backwards compatibility ──────────────────────────────
@@ -26,7 +26,7 @@ pub use super::file_utils::{
 pub use super::file_utils::content_hash_bytes;
 pub use super::indexing::{build_indexes, update_indexes_incremental};
 pub use super::ingest::{
-    embed_and_insert, embed_sorted, make_payload, truncate_for_embed, IngestRecord,
+    IngestRecord, embed_and_insert, embed_sorted, make_payload, truncate_for_embed,
 };
 pub use super::query_cache::QueryCache;
 pub use super::search_result::{build_results, fusion_alpha, SearchResultItem};
@@ -110,13 +110,12 @@ pub const DEFAULT_MODEL: &str = "minishlab/potion-multilingual-128M";
 /// Create embedding model (model2vec).
 pub fn create_model() -> Result<Model2VecModel> {
     tracing::info!(model = DEFAULT_MODEL, "Loading model2vec model");
-    println!("Loading model2vec model: {}", DEFAULT_MODEL);
+    println!("Model: {} (dim={})", DEFAULT_MODEL, "loading...");
 
     let model = Model2VecModel::from_pretrained(DEFAULT_MODEL)
         .context("Failed to load model2vec model")?;
 
     tracing::info!(dim = model.dim(), "Model loaded");
-    println!("Model loaded (dim={}).", model.dim());
     Ok(model)
 }
 
@@ -161,7 +160,7 @@ pub fn ensure_database(
             .with_context(|| format!("Failed to open database at {}", path.display()))
     } else {
         tracing::info!(path = %path.display(), dim, "Creating new database");
-        println!("Creating new database at {}", path.display());
+        println!("New database: {} (dim={dim})", path.display());
 
         let storage_config = StorageConfig {
             dim,
@@ -184,13 +183,6 @@ pub fn ensure_database(
             input_path: None,
         };
         db_config.save(path)?;
-
-        println!("  Dimension:  {dim}");
-        println!("  Metric:     cosine");
-        println!("  M:          16");
-        println!("  ef:         200");
-        println!("  Model:      {model_name}");
-        println!();
 
         Ok(engine)
     }

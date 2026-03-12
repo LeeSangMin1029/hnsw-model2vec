@@ -1,0 +1,27 @@
+[package]
+name = "v-code-chunk"
+description = "Tree-sitter based multi-language code chunker library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Internal crates
+v-hnsw-core.workspace = true
+
+# Code chunking (tree-sitter AST parsing)
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

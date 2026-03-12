@@ -116,7 +116,6 @@ pub(crate) fn run_core(
     let all_files = common::scan_files(input_path, exclude, |ext| {
         ext == "md"
             || ext == "markdown"
-            || crate::chunk_code::is_supported_code_file(ext)
             || is_supported_text_file(ext)
     });
 

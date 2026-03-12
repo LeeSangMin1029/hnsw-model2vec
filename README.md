@@ -27,10 +27,14 @@ chmod +x install.sh && ./install.sh
 ### 소스 빌드 (직접)
 
 ```bash
-cargo build --release -p v-hnsw-cli
+# 문서 검색 CLI
+cargo build --release -p v-hnsw
+
+# 코드 인텔리전스 CLI
+cargo build --release -p v-code
 ```
 
-빌드된 바이너리: `target/release/v-hnsw` (Linux/macOS) / `target/release/v-hnsw.exe` (Windows)
+빌드된 바이너리: `target/release/v-hnsw`, `target/release/v-code`
 
 ### 첫 실행 시 자동 다운로드
 
@@ -82,7 +86,16 @@ v-hnsw update my-db
 | `bench` | | 벤치마크 (brute-force ground truth + recall@k + QPS) |
 | `export` | | JSONL 내보내기 |
 | `serve` | | 데몬 수동 관리 |
-| `symbols` | `sym` | 심볼 목록 (함수, 구조체, enum 등) |
+| `collection` | | 컬렉션 관리 |
+
+### v-code 서브커맨드 (코드 인텔리전스)
+
+| 커맨드 | 별칭 | 설명 |
+|--------|------|------|
+| `add` | | 코드 파일 인덱싱 (tree-sitter 청킹 + 임베딩) |
+| `update` | | 변경 파일만 증분 업데이트 |
+| `find` | `f` | 코드 검색 (hybrid BM25+HNSW + cross-encoder reranking) |
+| `symbols` | | 심볼 목록 (함수, 구조체, enum 등) |
 | `def` | `d` | 심볼 정의 위치 |
 | `refs` | `r` | 심볼 참조 검색 |
 | `deps` | | 파일 의존성 그래프 |
@@ -90,9 +103,8 @@ v-hnsw update my-db
 | `gather` | `g` | 심볼 컨텍스트 수집 (callees + callers) |
 | `trace` | `tr` | 두 심볼 간 최단 호출 경로 |
 | `detail` | `dt` | 설계 판단/이력 조회·관리 |
-| `dupes` | `dup` | 중복 코드 감지 (AST/MinHash/임베딩) |
+| `dupes` | `dup` | 중복 코드 감지 (AST hash + MinHash Jaccard) |
 | `stats` | | 크레이트별 코드 통계 |
-| `collection` | | 컬렉션 관리 |
 
 ### find — 검색
 
@@ -131,51 +143,30 @@ v-hnsw add my-db ./project/ --exclude node_modules --exclude .git
 
 입력 타입 자동 감지, 시맨틱 청킹, 임베딩, 인덱싱까지 한 번에 처리합니다.
 
-### code-intel — 코드 인텔리전스
-
-소스코드를 `add`한 DB에서 사용합니다. tree-sitter로 추출된 심볼/호출 관계를 기반으로 합니다.
+### v-code — 코드 인텔리전스
 
 ```bash
-# 심볼 목록
-v-hnsw symbols my-code.db --kind function
-v-hnsw symbols my-code.db --name "search"
+# 코드 인덱싱
+v-code add my-code.db ./src/ --exclude target
 
-# 정의 찾기
-v-hnsw def my-code.db HnswGraph
+# 코드 검색 (hybrid + cross-encoder reranking)
+v-code find my-code.db "error handling pattern"
 
-# 참조 검색
-v-hnsw refs my-code.db search_two_stage
+# 심볼 목록 / 정의 / 참조
+v-code symbols my-code.db --kind function
+v-code def my-code.db HnswGraph
+v-code refs my-code.db search_two_stage
 
-# 파일 의존성 그래프
-v-hnsw deps my-code.db search.rs --depth 2
+# 영향 분석 / 컨텍스트 수집 / 호출 경로
+v-code impact my-code.db HnswGraph --depth 3
+v-code gather my-code.db search_layer -k 20
+v-code trace my-code.db main search_layer
 
-# 변경 영향 분석: "이 심볼 바꾸면 뭐가 깨져?"
-v-hnsw impact my-code.db HnswGraph --depth 3
-
-# 컨텍스트 수집: callees + callers 통합
-v-hnsw gather my-code.db search_layer -k 20
-
-# 두 심볼 간 호출 경로
-v-hnsw trace my-code.db main search_layer
+# 중복 코드 감지
+v-code dupes my-code.db --all --exclude-tests --min-lines 10
 
 # 설계 판단 기록
-v-hnsw detail my-code.db HnswGraph --decision "mmap snapshot for zero-copy"
-```
-
-### dupes — 중복 코드 감지
-
-```bash
-# 통합 파이프라인 (AST + MinHash + HNSW 필터 → 전체 검증)
-v-hnsw dupes my-code.db --all
-
-# AST 구조 해시 기반 (Type-1/2, 식별자 무시)
-v-hnsw dupes my-code.db --ast --threshold 0.7
-
-# 임베딩 코사인 유사도 기반 (Type-3/4)
-v-hnsw dupes my-code.db --embed --threshold 0.8
-
-# 테스트 함수 제외, 최소 줄 수 설정
-v-hnsw dupes my-code.db --all --exclude-tests --min-lines 10
+v-code detail my-code.db HnswGraph --decision "mmap snapshot for zero-copy"
 ```
 
 ### bench — 벤치마크
@@ -299,9 +290,11 @@ crates/
 ├── v-hnsw-search    # 하이브리드 검색 (BM25 + Convex Fusion + MaxScore)
 ├── v-hnsw-storage   # mmap 벡터 저장소 + WAL + SQ8 양자화 + 페이로드 + zstd 압축
 ├── v-hnsw-embed     # model2vec 임베딩
-├── v-hnsw-code      # 소스코드 분석 (tree-sitter 청킹, AST 해시, 호출 그래프)
-├── v-hnsw-intel     # code-intel 커맨드 (def/refs/impact/gather/trace)
-└── v-hnsw-cli       # 통합 CLI (bin: v-hnsw) + 데몬 서버
+├── v-hnsw-rerank    # cross-encoder reranking (ms-marco-TinyBERT)
+├── v-code-chunk     # tree-sitter 코드 청킹 (10개 언어)
+├── v-code-intel     # code-intel 엔진 (호출 그래프, 영향 분석, 클론 감지)
+├── v-hnsw-cli       # 공유 인프라 (lib) + v-hnsw 문서 검색 바이너리
+└── v-code           # v-code 코드 인텔리전스 바이너리
 ```
 
 ### 검색 파이프라인

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 
 use super::daemon::DaemonState;
 use super::{
-    CodeIntelParams, EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchParams,
+    EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchParams,
     UpdateParams,
 };
 
@@ -134,26 +134,6 @@ pub(crate) fn handle_client(
             writer.flush()?;
             anyhow::bail!("Shutdown requested");
         }
-        // ── Code-intel methods ────────────────────────────────────────
-        "stats" | "def" | "refs" | "symbols" | "gather" | "impact" | "trace" | "detail" => {
-            let params: CodeIntelParams =
-                serde_json::from_value(request.params).context("Invalid code-intel params")?;
-            match handle_code_intel(&request.method, &params) {
-                Ok(value) => JsonRpcResponse {
-                    id: request.id,
-                    result: Some(value),
-                    error: None,
-                },
-                Err(e) => JsonRpcResponse {
-                    id: request.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -10,
-                        message: format!("{}: {e}", request.method),
-                    }),
-                },
-            }
-        }
         _ => JsonRpcResponse {
             id: request.id,
             result: None,
@@ -171,51 +151,4 @@ pub(crate) fn handle_client(
     Ok(())
 }
 
-// ── Code-intel dispatch ──────────────────────────────────────────────────
-
-use crate::commands::code_intel;
-
-/// Dispatch a code-intel method and return the result as JSON.
-fn handle_code_intel(method: &str, params: &CodeIntelParams) -> Result<serde_json::Value> {
-    let db = PathBuf::from(&params.db);
-
-    match method {
-        "stats" => code_intel::stats_as_json(&db),
-        "def" => {
-            let name = params.name.as_deref()
-                .context("missing 'name' param for def")?;
-            code_intel::def_as_json(&db, name)
-        }
-        "refs" => {
-            let name = params.name.as_deref()
-                .context("missing 'name' param for refs")?;
-            code_intel::refs_as_json(&db, name)
-        }
-        "symbols" => code_intel::symbols_as_json(&db, params.name.as_deref(), params.kind.as_deref()),
-        "gather" => {
-            let symbol = params.symbol.as_deref()
-                .context("missing 'symbol' param for gather")?;
-            code_intel::gather_as_json(&db, symbol, params.depth.unwrap_or(2), params.k, params.include_tests)
-        }
-        "impact" => {
-            let symbol = params.symbol.as_deref()
-                .context("missing 'symbol' param for impact")?;
-            code_intel::impact_as_json(&db, symbol, params.depth.unwrap_or(2), params.include_tests)
-        }
-        "trace" => {
-            let from = params.from.as_deref()
-                .context("missing 'from' param for trace")?;
-            let to = params.to.as_deref()
-                .context("missing 'to' param for trace")?;
-            code_intel::trace_as_json(&db, from, to)
-        }
-        "detail" => {
-            let symbol = params.symbol.as_deref()
-                .or(params.name.as_deref())
-                .context("missing 'symbol' or 'name' param for detail")?;
-            code_intel::detail_as_json(&db, symbol)
-        }
-        _ => anyhow::bail!("unknown code-intel method: {method}"),
-    }
-}
 

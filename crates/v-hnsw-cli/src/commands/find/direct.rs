@@ -1,10 +1,8 @@
 //! Direct search without daemon (fallback mode).
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::VectorIndex;
@@ -15,7 +13,6 @@ use v_hnsw_storage::StorageEngine;
 
 use crate::commands::common;
 use crate::commands::create::DbConfig;
-use crate::commands::serve;
 
 use super::FindOutput;
 
@@ -119,51 +116,7 @@ fn filter_and_output(
         elapsed_ms: elapsed.as_secs_f64() * 1000.0,
     };
 
-    super::print_output(output, full, min_score)
-}
-
-/// Spawn global daemon in background and wait for it to be ready.
-///
-/// `db_path` is passed so the daemon can preload that database on startup.
-pub fn spawn_daemon(db_path: &Path) -> Result<()> {
-    let canonical = db_path
-        .canonicalize()
-        .with_context(|| format!("Database not found: {}", db_path.display()))?;
-    let path_str = canonical.to_str().context("Non-UTF8 path")?;
-
-    eprintln!("Starting daemon for {}...", canonical.display());
-    common::spawn_detached(&["serve", path_str, "--timeout", "300"])?;
-
-    let start = Instant::now();
-    let timeout = Duration::from_secs(60);
-
-    eprintln!("Waiting for daemon to be ready...");
-
-    loop {
-        if start.elapsed() > timeout {
-            anyhow::bail!("Timeout waiting for daemon to start ({}s)", timeout.as_secs());
-        }
-
-        if let Some(port) = serve::read_port_file()
-            && let Ok(addr) = format!("127.0.0.1:{}", port).parse()
-            && let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500))
-        {
-            let ping = serde_json::json!({"id": 0, "method": "ping", "params": {}});
-            if let Ok(json) = serde_json::to_string(&ping)
-                && writeln!(stream, "{}", json).is_ok()
-            {
-                stream.flush().ok();
-                let mut reader = BufReader::new(&stream);
-                let mut response = String::new();
-                if reader.read_line(&mut response).is_ok() && response.contains("ok") {
-                    eprintln!("Daemon ready on port {}", port);
-                    return Ok(());
-                }
-            }
-        }
-
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    super::print_find_output(output, full, min_score)
 }
 
 /// Raw vector search (dense-only or dense+BM25 hybrid).
@@ -273,7 +226,7 @@ pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, 
 
     let t3 = Instant::now();
     let mut results = hybrid_search(
-        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, k, fetch_k, 200, &config.content_type,
+        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, fetch_k, fetch_k, 200, &config.content_type,
     )?;
     eprintln!("  BM25+Search: {:.0}ms", t3.elapsed().as_millis());
 

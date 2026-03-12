@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_embed::Model2VecModel;
+use v_hnsw_embed::EmbeddingModel;
 use v_hnsw_storage::StorageEngine;
 
 use crate::commands::common::{self, IngestRecord};
@@ -21,7 +21,7 @@ struct EmbeddedBatch {
 /// Returns (inserted, errors, inserted_ids).
 pub fn process_records(
     records: Vec<IngestRecord>,
-    model: &Model2VecModel,
+    model: &dyn EmbeddingModel,
     engine: &mut StorageEngine,
 ) -> Result<(u64, u64, Vec<u64>)> {
     if records.is_empty() {
@@ -146,15 +146,10 @@ pub fn process_records(
     );
 
     println!();
-    println!("Add completed:");
-    println!("  Inserted: {inserted}");
-    println!("  Errors:   {errors}");
-    println!("  Elapsed:  {:.2}s", elapsed.as_secs_f64());
-    if inserted > 0 {
-        println!(
-            "  Rate:     {:.0} items/s",
-            inserted as f64 / elapsed.as_secs_f64()
-        );
+    if errors > 0 {
+        println!("Inserted {inserted} chunks ({errors} errors) in {:.2}s", elapsed.as_secs_f64());
+    } else {
+        println!("Inserted {inserted} chunks in {:.2}s", elapsed.as_secs_f64());
     }
 
     Ok((inserted, errors, inserted_ids))

@@ -1,29 +1,46 @@
 //! CLI command implementations.
 
-pub mod common;
+// Shared modules (no feature gates)
+pub mod db_config;
 pub mod dict;
+pub mod file_index;
 pub mod file_utils;
 pub mod ingest;
-pub mod search_result;
-pub mod add;
-pub mod bench;
-pub mod buildindex;
-pub mod collection;
-pub mod create;
-pub mod delete;
-pub mod export;
-pub mod file_index;
-pub mod find;
-pub mod get;
-pub mod indexing;
 pub mod info;
-pub mod insert;
-pub mod query_cache;
 pub mod readers;
+pub mod search_result;
+
+// Doc-only modules
+#[cfg(feature = "doc")]
+pub mod add;
+#[cfg(feature = "doc")]
+pub mod bench;
+#[cfg(feature = "doc")]
+pub mod buildindex;
+#[cfg(feature = "doc")]
+pub mod collection;
+#[cfg(feature = "doc")]
+pub mod common;
+#[cfg(feature = "doc")]
+pub mod create;
+#[cfg(feature = "doc")]
+pub mod delete;
+#[cfg(feature = "doc")]
+pub mod export;
+#[cfg(feature = "doc")]
+pub mod find;
+#[cfg(feature = "doc")]
+pub mod get;
+#[cfg(feature = "doc")]
+pub mod indexing;
+#[cfg(feature = "doc")]
+pub mod insert;
+#[cfg(feature = "doc")]
+pub mod query_cache;
+#[cfg(feature = "doc")]
 pub mod serve;
+#[cfg(feature = "doc")]
 pub mod update;
-pub mod code_intel;
-pub mod dupes;
 
 #[cfg(test)]
 mod tests;

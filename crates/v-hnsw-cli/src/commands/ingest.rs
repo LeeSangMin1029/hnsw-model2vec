@@ -8,8 +8,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{Payload, PayloadValue};
-use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
+use v_hnsw_embed::EmbeddingModel;
 use v_hnsw_storage::StorageEngine;
+
+use super::file_utils::generate_id;
 
 /// A record for batch ingestion (shared by add and update commands).
 #[derive(Clone)]
@@ -103,7 +105,7 @@ pub fn embed_sorted(model: &dyn EmbeddingModel, texts: &[String]) -> Result<Vec<
 /// For bulk ingestion with pipeline parallelism, use `pipeline::process_records`.
 pub fn embed_and_insert(
     records: &[IngestRecord],
-    model: &Model2VecModel,
+    model: &dyn EmbeddingModel,
     engine: &mut StorageEngine,
 ) -> Result<()> {
     let texts: Vec<String> = records
@@ -135,4 +137,130 @@ pub fn embed_and_insert(
         .context("Failed to insert batch")?;
 
     Ok(())
+}
+
+// ── Code chunk utilities ────────────────────────────────────────────────
+
+/// Intermediate data collected per code chunk before `called_by` resolution.
+pub struct CodeChunkEntry {
+    pub chunk: crate::chunk_code::CodeChunk,
+    pub source: String,
+    pub file_path_str: String,
+    pub mtime: u64,
+    pub lang: &'static str,
+}
+
+/// Build `called_by` reverse index from all chunks' `calls` data.
+///
+/// For each call target, extracts the bare function name (last segment after
+/// `::` or `.`) and maps it to the set of callers (qualified chunk names).
+pub fn build_called_by_index(entries: &[CodeChunkEntry]) -> HashMap<String, Vec<String>> {
+    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+
+    for entry in entries {
+        let caller = &entry.chunk.name;
+        for call in &entry.chunk.calls {
+            let bare = call
+                .rsplit_once("::")
+                .map(|(_, name)| name)
+                .or_else(|| call.rsplit_once('.').map(|(_, name)| name))
+                .unwrap_or(call);
+
+            reverse
+                .entry(bare.to_owned())
+                .or_default()
+                .push(caller.clone());
+        }
+    }
+
+    for callers in reverse.values_mut() {
+        callers.sort();
+        callers.dedup();
+    }
+
+    reverse
+}
+
+/// Look up `called_by` entries for a given chunk name.
+///
+/// Checks both the full qualified name and the bare (last segment) name
+/// against the reverse index built by [`build_called_by_index`].
+pub fn lookup_called_by<'a>(
+    reverse: &'a HashMap<String, Vec<String>>,
+    chunk_name: &str,
+) -> Vec<&'a str> {
+    let bare = chunk_name
+        .rsplit_once("::")
+        .map(|(_, name)| name)
+        .unwrap_or(chunk_name);
+
+    let mut result: Vec<&str> = Vec::new();
+
+    if let Some(callers) = reverse.get(bare) {
+        for c in callers {
+            if c != chunk_name {
+                result.push(c.as_str());
+            }
+        }
+    }
+
+    if bare != chunk_name
+        && let Some(callers) = reverse.get(chunk_name)
+    {
+        for c in callers {
+            if c != chunk_name && !result.contains(&c.as_str()) {
+                result.push(c.as_str());
+            }
+        }
+    }
+
+    result.sort();
+    result
+}
+
+/// Convert a single code chunk to an [`IngestRecord`].
+///
+/// Pass `called_by` slice for reverse-reference enrichment (empty slice if unavailable).
+pub fn code_chunk_to_record(
+    chunk: &crate::chunk_code::CodeChunk,
+    source: &str,
+    file_path_str: &str,
+    lang: &str,
+    mtime: u64,
+    chunk_total: usize,
+    called_by: &[String],
+) -> IngestRecord {
+    let id = generate_id(source, chunk.chunk_index);
+    let embed_text = chunk.to_embed_text(file_path_str, called_by);
+
+    let is_test = source.contains("/tests/")
+        || source.contains("\\tests\\")
+        || source.contains("/test/")
+        || source.contains("\\test\\")
+        || source.ends_with("_test.rs")
+        || chunk.name.starts_with("test_");
+
+    let mut tags = vec![
+        format!("kind:{}", chunk.kind.as_str()),
+        format!("lang:{lang}"),
+        format!("role:{}", if is_test { "test" } else { "prod" }),
+    ];
+    if !chunk.visibility.is_empty() {
+        tags.push(format!("vis:{}", chunk.visibility));
+    }
+    for caller in called_by {
+        tags.push(format!("caller:{caller}"));
+    }
+
+    IngestRecord {
+        id,
+        text: embed_text,
+        source: source.to_owned(),
+        title: Some(chunk.name.clone()),
+        tags,
+        chunk_index: chunk.chunk_index,
+        chunk_total,
+        source_modified_at: mtime,
+        custom: chunk.to_custom_fields(called_by),
+    }
 }

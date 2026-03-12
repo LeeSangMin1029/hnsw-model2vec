@@ -9,9 +9,12 @@ use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
 use super::pipeline::process_records;
-use crate::commands::common::IngestRecord;
 use crate::commands::common;
+use crate::commands::common::IngestRecord;
 use crate::commands::file_index;
+pub use crate::commands::ingest::{
+    CodeChunkEntry, build_called_by_index, code_chunk_to_record, lookup_called_by,
+};
 use crate::is_interrupted;
 
 /// Result of an ingest operation.
@@ -52,7 +55,7 @@ pub fn process_markdown_files(
 ) -> Result<IngestResult> {
     let chunker = MarkdownChunker::new(ChunkConfig::default());
 
-    println!("Found {} markdown file(s)", md_files.len());
+    println!("Files: {} markdown", md_files.len());
 
     let mut records: Vec<IngestRecord> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
@@ -101,7 +104,7 @@ pub fn process_markdown_files(
         file_metadata_map.insert(source, (mtime, size, chunk_ids));
     }
 
-    println!("Total chunks to process: {}", records.len());
+    println!("Chunks: {}", records.len());
 
     finalize_ingest(db_path, records, model, engine, file_metadata_map)
 }
@@ -237,129 +240,6 @@ pub(crate) fn chunk_single_file(
     (records, chunk_ids)
 }
 
-/// Convert a single code chunk to an [`IngestRecord`].
-///
-/// Shared by `process_code_files` (add) and `update::run_core`.
-/// Pass `called_by` slice for reverse-reference enrichment (empty slice if unavailable).
-pub(crate) fn code_chunk_to_record(
-    chunk: &crate::chunk_code::CodeChunk,
-    source: &str,
-    file_path_str: &str,
-    lang: &str,
-    mtime: u64,
-    chunk_total: usize,
-    called_by: &[String],
-) -> IngestRecord {
-    let id = common::generate_id(source, chunk.chunk_index);
-    let embed_text = chunk.to_embed_text(file_path_str, called_by);
-
-    let mut tags = vec![
-        format!("kind:{}", chunk.kind.as_str()),
-        format!("lang:{lang}"),
-    ];
-    if !chunk.visibility.is_empty() {
-        tags.push(format!("vis:{}", chunk.visibility));
-    }
-    for caller in called_by {
-        tags.push(format!("caller:{caller}"));
-    }
-
-    IngestRecord {
-        id,
-        text: embed_text,
-        source: source.to_owned(),
-        title: Some(chunk.name.clone()),
-        tags,
-        chunk_index: chunk.chunk_index,
-        chunk_total,
-        source_modified_at: mtime,
-        custom: chunk.to_custom_fields(called_by),
-    }
-}
-
-/// Intermediate data collected per code chunk before `called_by` resolution.
-pub(super) struct CodeChunkEntry {
-    pub(super) chunk: crate::chunk_code::CodeChunk,
-    pub(super) source: String,
-    pub(super) file_path_str: String,
-    pub(super) mtime: u64,
-    pub(super) lang: &'static str,
-}
-
-/// Build `called_by` reverse index from all chunks' `calls` data.
-///
-/// For each call target, extracts the bare function name (last segment after
-/// `::` or `.`) and maps it to the set of callers (qualified chunk names).
-/// Returns `HashMap<bare_fn_name, Vec<caller_name>>`.
-pub(super) fn build_called_by_index(entries: &[CodeChunkEntry]) -> HashMap<String, Vec<String>> {
-    let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
-
-    for entry in entries {
-        let caller = &entry.chunk.name;
-        for call in &entry.chunk.calls {
-            // Extract bare function name: "self.method" → "method",
-            // "Module::func" → "func", "validate_amount" → "validate_amount"
-            let bare = call
-                .rsplit_once("::")
-                .map(|(_, name)| name)
-                .or_else(|| call.rsplit_once('.').map(|(_, name)| name))
-                .unwrap_or(call);
-
-            reverse
-                .entry(bare.to_owned())
-                .or_default()
-                .push(caller.clone());
-        }
-    }
-
-    // Deduplicate callers per target
-    for callers in reverse.values_mut() {
-        callers.sort();
-        callers.dedup();
-    }
-
-    reverse
-}
-
-/// Look up `called_by` entries for a given chunk name.
-///
-/// Checks both the full qualified name and the bare (last segment) name
-/// against the reverse index built by [`build_called_by_index`].
-pub(super) fn lookup_called_by<'a>(
-    reverse: &'a HashMap<String, Vec<String>>,
-    chunk_name: &str,
-) -> Vec<&'a str> {
-    // Bare name of this chunk: "PaymentIntent::new" → "new"
-    let bare = chunk_name
-        .rsplit_once("::")
-        .map(|(_, name)| name)
-        .unwrap_or(chunk_name);
-
-    let mut result: Vec<&str> = Vec::new();
-
-    if let Some(callers) = reverse.get(bare) {
-        for c in callers {
-            // Don't list self-calls
-            if c != chunk_name {
-                result.push(c.as_str());
-            }
-        }
-    }
-
-    // Also check the full qualified name as a key (e.g., someone calls "Foo::bar")
-    if bare != chunk_name
-        && let Some(callers) = reverse.get(chunk_name)
-    {
-        for c in callers {
-            if c != chunk_name && !result.contains(&c.as_str()) {
-                result.push(c.as_str());
-            }
-        }
-    }
-
-    result.sort();
-    result
-}
 
 /// Process code folder: chunk .rs files via tree-sitter, embed, insert.
 ///
@@ -391,7 +271,7 @@ pub fn process_code_files(
     model: &Model2VecModel,
     engine: &mut StorageEngine,
 ) -> Result<IngestResult> {
-    println!("Found {} code file(s)", code_files.len());
+    println!("Files: {} code", code_files.len());
 
     // === Pass 1: Chunk all files, collect CodeChunk + metadata ===
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
@@ -448,11 +328,7 @@ pub fn process_code_files(
     let reverse_index = build_called_by_index(&entries);
 
     let called_by_count: usize = reverse_index.values().map(Vec::len).sum();
-    println!(
-        "Built called_by index: {} targets, {} reverse edges",
-        reverse_index.len(),
-        called_by_count
-    );
+    println!("Call graph: {} targets, {} edges", reverse_index.len(), called_by_count);
 
     // === Pass 3: Generate IngestRecords with called_by data ===
     let chunk_total_map: HashMap<&str, usize> = {
@@ -487,7 +363,7 @@ pub fn process_code_files(
         ));
     }
 
-    println!("Total code chunks to process: {}", records.len());
+    println!("Symbols: {}", records.len());
 
     finalize_ingest(db_path, records, model, engine, file_metadata_map)
 }
@@ -583,7 +459,7 @@ pub fn process_jsonl(
         });
     }
 
-    println!("Total records to process: {}", records.len());
+    println!("Records: {}", records.len());
 
     let (inserted, errors, added_ids) = process_records(records, model, engine)?;
     Ok(IngestResult {

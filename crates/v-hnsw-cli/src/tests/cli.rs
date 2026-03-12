@@ -185,20 +185,3 @@ fn commands_update_variant() {
     assert!(matches!(cli.command, Commands::Update { .. }));
 }
 
-#[test]
-fn commands_symbols_variant() {
-    let cli = Cli::try_parse_from(["v-hnsw", "symbols", "my.db"]).unwrap();
-    assert!(matches!(cli.command, Commands::Symbols { .. }));
-}
-
-#[test]
-fn commands_impact_variant() {
-    let cli = Cli::try_parse_from(["v-hnsw", "impact", "my.db", "foo"]).unwrap();
-    assert!(matches!(cli.command, Commands::Impact { .. }));
-}
-
-#[test]
-fn commands_detail_variant() {
-    let cli = Cli::try_parse_from(["v-hnsw", "detail", "my.db", "bar"]).unwrap();
-    assert!(matches!(cli.command, Commands::Detail { .. }));
-}
