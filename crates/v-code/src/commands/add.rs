@@ -55,15 +55,10 @@ fn ensure_code_db(path: &Path, dim: usize, model_name: &str) -> Result<StorageEn
         std::fs::create_dir_all(path)?;
 
         let config = DbConfig {
-            version: DbConfig::CURRENT_VERSION,
             dim,
-            metric: "cosine".to_owned(),
-            m: 16,
-            ef_construction: 200,
-            korean: false,
             embed_model: Some(model_name.to_owned()),
-            content_type: "code".to_owned(),
-            input_path: None,
+            code: true,
+            ..DbConfig::default()
         };
         config.save(path)?;
 
@@ -204,7 +199,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 
     // Update config
     if let Ok(mut config) = DbConfig::load(&db_path) {
-        config.content_type = "code".to_owned();
+        config.code = true;
         if let Ok(canonical) = input_path.canonicalize() {
             config.input_path = Some(canonical.to_string_lossy().into_owned());
         }

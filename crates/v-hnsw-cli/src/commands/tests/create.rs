@@ -7,15 +7,11 @@ use crate::commands::create::DbConfig;
 #[test]
 fn db_config_roundtrip_serde() {
     let config = DbConfig {
-        version: DbConfig::CURRENT_VERSION,
         dim: 128,
-        metric: "cosine".to_string(),
-        m: 16,
-        ef_construction: 200,
         korean: true,
         embed_model: Some("test-model".to_string()),
-        content_type: "code".to_string(),
-        input_path: None,
+        code: true,
+        ..DbConfig::default()
     };
 
     let json = serde_json::to_string(&config).unwrap();
@@ -28,12 +24,12 @@ fn db_config_roundtrip_serde() {
     assert_eq!(deserialized.ef_construction, 200);
     assert!(deserialized.korean);
     assert_eq!(deserialized.embed_model.as_deref(), Some("test-model"));
-    assert_eq!(deserialized.content_type, "code");
+    assert!(deserialized.code);
 }
 
 #[test]
 fn db_config_defaults_for_optional_fields() {
-    // Simulate JSON without embed_model and content_type
+    // Simulate JSON without embed_model and code
     let json = r#"{
         "version": 1,
         "dim": 64,
@@ -45,22 +41,38 @@ fn db_config_defaults_for_optional_fields() {
 
     let config: DbConfig = serde_json::from_str(json).unwrap();
     assert!(config.embed_model.is_none(), "embed_model should default to None");
-    assert_eq!(config.content_type, "mixed", "content_type should default to 'mixed'");
+    assert!(!config.code, "code should default to false");
+}
+
+#[test]
+fn db_config_legacy_content_type_migration() {
+    // Simulate old config.json with content_type: "code"
+    let json = r#"{
+        "version": 1,
+        "dim": 256,
+        "metric": "cosine",
+        "m": 16,
+        "ef_construction": 200,
+        "korean": false,
+        "content_type": "code"
+    }"#;
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(tmp_dir.path().join("config.json"), json).unwrap();
+
+    let config = DbConfig::load(tmp_dir.path()).unwrap();
+    assert!(config.code, "content_type='code' should migrate to code=true");
 }
 
 #[test]
 fn db_config_save_and_load_roundtrip() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let config = DbConfig {
-        version: DbConfig::CURRENT_VERSION,
         dim: 256,
         metric: "dot".to_string(),
         m: 32,
         ef_construction: 400,
-        korean: false,
-        embed_model: None,
-        content_type: "markdown".to_string(),
-        input_path: None,
+        ..DbConfig::default()
     };
 
     config.save(tmp_dir.path()).unwrap();
@@ -71,7 +83,7 @@ fn db_config_save_and_load_roundtrip() {
     assert_eq!(loaded.m, 32);
     assert_eq!(loaded.ef_construction, 400);
     assert!(!loaded.korean);
-    assert_eq!(loaded.content_type, "markdown");
+    assert!(!loaded.code);
 }
 
 #[test]
@@ -84,15 +96,8 @@ fn db_config_load_missing_file_errors() {
 #[test]
 fn db_config_embed_model_skip_serializing_if_none() {
     let config = DbConfig {
-        version: 1,
         dim: 64,
-        metric: "cosine".to_string(),
-        m: 16,
-        ef_construction: 200,
-        korean: false,
-        embed_model: None,
-        content_type: "mixed".to_string(),
-        input_path: None,
+        ..DbConfig::default()
     };
 
     let json = serde_json::to_string(&config).unwrap();

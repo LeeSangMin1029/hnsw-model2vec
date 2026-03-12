@@ -159,15 +159,15 @@ pub enum Commands {
         #[arg(long, default_value = "0.25")]
         min_score: f32,
     },
-    /// Start daemon server for fast embedding search.
+    /// Start daemon server for fast embedding search (persistent by default).
     Serve {
         /// Path to database directory to preload (optional).
         db: Option<PathBuf>,
         /// TCP port to listen on (default: 19530).
         #[arg(long, default_value = "19530")]
         port: u16,
-        /// Idle timeout in seconds (default: 300 = 5 minutes).
-        #[arg(long, default_value = "300")]
+        /// Idle timeout in seconds (0 = never, default: 0).
+        #[arg(long, default_value = "0")]
         timeout: u64,
         /// Run in background (daemonize).
         #[arg(long)]

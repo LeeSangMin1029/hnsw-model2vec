@@ -37,7 +37,7 @@ pub fn run(path: PathBuf) -> Result<()> {
              config.metric, config.m, config.ef_construction);
 
     // Init Korean dict before parallel scope (required by BM25 thread)
-    let is_code = config.content_type == "code";
+    let is_code = config.code;
     if !is_code {
         super::common::ensure_korean_dict()?;
     }

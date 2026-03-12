@@ -28,7 +28,7 @@ use super::super::create::DbConfig;
 const MODEL_IDLE_SECS: u64 = 300;
 
 /// Seconds of idle time before evicting a database from memory.
-const DB_IDLE_SECS: u64 = 15;
+const DB_IDLE_SECS: u64 = 600;
 
 /// Dense index: mmap snapshot or heap graph.
 enum DenseIndex {
@@ -349,7 +349,7 @@ fn load_db(db_path: &Path) -> Result<DbIndexes> {
     let engine = StorageEngine::open(db_path)
         .with_context(|| format!("Failed to open storage: {}", db_path.display()))?;
     let dense = load_dense(db_path)?;
-    let sparse = load_sparse(db_path, &config.content_type)?;
+    let sparse = load_sparse(db_path, config.code)?;
     let sq8 = load_sq8(db_path, engine.vector_store());
     Ok(DbIndexes { dense, sparse, sq8, engine, last_used: Instant::now() })
 }
@@ -381,19 +381,18 @@ fn load_dense(db_path: &Path) -> Result<DenseIndex> {
 }
 
 /// Load sparse index: prefer the freshest source (snapshot vs heap).
-fn load_sparse(db_path: &Path, content_type: &str) -> Result<SparseIndex> {
+fn load_sparse(db_path: &Path, code: bool) -> Result<SparseIndex> {
     let snap_path = db_path.join("bm25.snap");
     let bin_path = db_path.join("bm25.bin");
     let fst_path = db_path.join("bm25_terms.fst");
-    let is_code = content_type == "code";
 
     // Use snapshot only if it exists AND is not stale vs .bin
     if snap_path.exists() && fst_path.exists() && !is_newer(&bin_path, &snap_path) {
         let snap = Bm25Snapshot::open(db_path).context("Failed to open BM25 snapshot")?;
-        eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap, {})", snap.total_docs(), content_type);
-        return Ok(SparseIndex::Snapshot(snap, is_code));
+        eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap, code={})", snap.total_docs(), code);
+        return Ok(SparseIndex::Snapshot(snap, code));
     }
-    if is_code {
+    if code {
         let bm25: Bm25Index<CodeTokenizer> = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
         eprintln!("[daemon] BM25 heap loaded (code)");
         Ok(SparseIndex::HeapCode(bm25))

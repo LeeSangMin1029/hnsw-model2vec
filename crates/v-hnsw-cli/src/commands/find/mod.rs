@@ -46,8 +46,56 @@ pub fn run(params: FindParams) -> Result<()> {
     #[expect(clippy::unwrap_used, reason = "query presence validated by early return above")]
     let query = query.unwrap();
 
-    // Hybrid vector search (default)
+    // Try daemon first (fast path: model already loaded, mmap indexes)
+    if let Ok(result) = try_daemon_search(&db, &query, k, &tags) {
+        return print_find_output(result, full, min_score);
+    }
+
+    // Auto-start daemon in background for next search
+    auto_start_daemon(&db);
+
+    // Fallback: direct search (loads model from scratch)
     direct::run_direct(db, query, k, tags, full, min_score)
+}
+
+/// Try to search via running daemon. Returns Err if daemon not available.
+fn try_daemon_search(db: &std::path::Path, query: &str, k: usize, tags: &[String]) -> Result<FindOutput> {
+    let canonical = db.canonicalize()
+        .with_context(|| format!("Database not found: {}", db.display()))?;
+    let db_str = canonical.to_str().unwrap_or("");
+
+    let params = serde_json::json!({
+        "db": db_str,
+        "query": query,
+        "k": k,
+        "tags": tags,
+    });
+
+    let result = super::serve::daemon_rpc("search", params, 30)?;
+
+    let results: Vec<super::search_result::SearchResultItem> =
+        serde_json::from_value(result.get("results").cloned().unwrap_or_default())
+            .unwrap_or_default();
+    let elapsed_ms = result.get("elapsed_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    let config = super::db_config::DbConfig::load(db)?;
+
+    Ok(FindOutput {
+        results,
+        query: query.to_string(),
+        model: config.embed_model.unwrap_or_default(),
+        total_docs: 0, // daemon doesn't return this
+        elapsed_ms,
+    })
+}
+
+/// Auto-start daemon in background if not running.
+fn auto_start_daemon(db: &std::path::Path) {
+    if super::serve::is_daemon_running() {
+        return;
+    }
+    let db_str = db.to_string_lossy();
+    let _ = super::common::spawn_detached(&["serve", "--background", &db_str]);
 }
 
 /// Parse a comma-separated vector string.

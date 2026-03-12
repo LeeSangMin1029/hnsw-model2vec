@@ -49,7 +49,7 @@ fn hybrid_search(
     k: usize,
     fetch_k: usize,
     ef: usize,
-    content_type: &str,
+    code: bool,
 ) -> Result<Vec<(u64, f32)>> {
     let bm25_path = db_path.join("bm25.bin");
     if !bm25_path.exists() {
@@ -64,7 +64,7 @@ fn hybrid_search(
         .fusion_alpha(alpha)
         .build();
 
-    if content_type == "code" {
+    if code {
         let bm25: Bm25Index<CodeTokenizer> =
             Bm25Index::load(&bm25_path).context("Failed to load BM25 index")?;
         let searcher = SimpleHybridSearcher::new(hnsw, bm25, hybrid_config);
@@ -146,7 +146,7 @@ pub fn run_raw_vector(
     let fetch_k = if tags.is_empty() { k } else { k * 10 };
 
     let mut results = if let Some(ref text) = query_text {
-        hybrid_search(ctx.hnsw, &ctx.engine, &db_path, &raw_vec, text, k, fetch_k, ef, &config.content_type)?
+        hybrid_search(ctx.hnsw, &ctx.engine, &db_path, &raw_vec, text, k, fetch_k, ef, config.code)?
     } else {
         ctx.hnsw
             .search_ext(ctx.engine.vector_store(), &raw_vec, fetch_k, ef)
@@ -226,7 +226,7 @@ pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, 
 
     let t3 = Instant::now();
     let mut results = hybrid_search(
-        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, fetch_k, fetch_k, 200, &config.content_type,
+        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, fetch_k, fetch_k, 200, config.code,
     )?;
     eprintln!("  BM25+Search: {:.0}ms", t3.elapsed().as_millis());
 

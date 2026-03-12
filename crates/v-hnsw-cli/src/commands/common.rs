@@ -172,15 +172,10 @@ pub fn ensure_database(
             .with_context(|| format!("Failed to create storage at {}", path.display()))?;
 
         let db_config = DbConfig {
-            version: DbConfig::CURRENT_VERSION,
             dim,
-            metric: "cosine".to_string(),
-            m: 16,
-            ef_construction: 200,
             korean,
             embed_model: Some(model_name.to_string()),
-            content_type: String::new(), // set by caller after creation
-            input_path: None,
+            ..DbConfig::default()
         };
         db_config.save(path)?;
 

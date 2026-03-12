@@ -67,15 +67,12 @@ pub fn run(
     };
 
     let db_config = DbConfig {
-        version: DbConfig::CURRENT_VERSION,
         dim,
         metric: metric_name.to_string(),
         m,
         ef_construction: ef,
         korean,
-        embed_model: None,
-        content_type: "mixed".to_owned(),
-        input_path: None,
+        ..DbConfig::default()
     };
     db_config.save(&path)?;
 

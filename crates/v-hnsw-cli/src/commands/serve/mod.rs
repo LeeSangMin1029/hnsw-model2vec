@@ -153,11 +153,14 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
 
     tracing::info!(port = actual_port, "Daemon listening");
     eprintln!("[daemon] Listening on 127.0.0.1:{}", actual_port);
-    eprintln!("[daemon] Idle timeout: {}s", timeout_secs);
+    if timeout_secs == 0 {
+        eprintln!("[daemon] Persistent mode (no idle timeout)");
+    } else {
+        eprintln!("[daemon] Idle timeout: {}s", timeout_secs);
+    }
     eprintln!("[daemon] Ready for connections");
 
     let mut last_activity = Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
 
     loop {
         if is_interrupted() {
@@ -165,7 +168,7 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
             break;
         }
 
-        if last_activity.elapsed() > timeout {
+        if timeout_secs > 0 && last_activity.elapsed() > Duration::from_secs(timeout_secs) {
             eprintln!("[daemon] Idle timeout reached, shutting down");
             break;
         }

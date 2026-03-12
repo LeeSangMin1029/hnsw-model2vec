@@ -23,28 +23,54 @@ pub struct DbConfig {
     /// Embedding model used (for vsearch auto-detection).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
-    /// Content type: "code", "markdown", or "mixed".
-    #[serde(default = "default_content_type")]
-    pub content_type: String,
+    /// Whether this is a code database (uses CodeTokenizer for BM25).
+    /// Document databases use KoreanBm25Tokenizer.
+    #[serde(default)]
+    pub code: bool,
     /// Original input path used during `add` (for `update` default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_path: Option<String>,
+
+    /// Deprecated: migrated to `code` bool. Kept for backward compat deserialization only.
+    #[serde(default, skip_serializing)]
+    pub content_type: String,
 }
 
-fn default_content_type() -> String {
-    "mixed".to_owned()
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            dim: 0,
+            metric: "cosine".to_owned(),
+            m: 16,
+            ef_construction: 200,
+            korean: false,
+            embed_model: None,
+            code: false,
+            input_path: None,
+            content_type: String::new(),
+        }
+    }
 }
 
 impl DbConfig {
     pub const CURRENT_VERSION: u32 = 1;
 
     /// Load config from database path.
+    ///
+    /// Migrates legacy `content_type` field to `code` bool.
     pub fn load(path: &Path) -> Result<Self> {
         let config_path = path.join("config.json");
         let data = std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config: {}", config_path.display()))?;
-        let config: DbConfig = serde_json::from_str(&data)
+        let mut config: DbConfig = serde_json::from_str(&data)
             .with_context(|| "failed to parse config.json")?;
+
+        // Migrate legacy content_type → code bool
+        if !config.code && config.content_type == "code" {
+            config.code = true;
+        }
+
         Ok(config)
     }
 

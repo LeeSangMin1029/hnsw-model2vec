@@ -72,5 +72,8 @@ fn run() -> anyhow::Result<()> {
                 db, query, k, full, min_score, no_rerank,
             })
         }
+        Commands::Serve { db, port, timeout, background } => {
+            v_hnsw_cli::commands::serve::run(db, port, timeout, background)
+        }
     }
 }

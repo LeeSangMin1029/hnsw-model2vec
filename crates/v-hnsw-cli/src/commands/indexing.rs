@@ -57,13 +57,13 @@ pub fn build_indexes(path: &Path, engine: &StorageEngine, config: &DbConfig) -> 
     // Build SQ8 quantized vectors
     build_sq8(path, vector_store)?;
 
-    // Build BM25 index — tokenizer depends on content type
-    println!("  Building BM25 index (content_type={})...", config.content_type);
+    // Build BM25 index — tokenizer depends on DB type
+    println!("  Building BM25 index (code={})...", config.code);
     let bm25_path = path.join("bm25.bin");
     let payload_store = engine.payload_store();
     let ids: Vec<_> = vector_store.id_map().keys().copied().collect();
 
-    if config.content_type == "code" {
+    if config.code {
         build_bm25(CodeTokenizer::new(), &bm25_path, payload_store, &ids)?;
     } else {
         ensure_korean_dict()?;
@@ -128,7 +128,7 @@ pub fn update_indexes_incremental(
     // --- BM25 incremental update ---
     let payload_store = engine.payload_store();
 
-    if config.content_type == "code" {
+    if config.code {
         update_bm25::<CodeTokenizer>(&bm25_path, path, payload_store, added_ids, removed_ids)?;
     } else {
         if total_changes > 0 {

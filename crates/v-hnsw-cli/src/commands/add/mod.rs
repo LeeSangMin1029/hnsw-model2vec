@@ -115,17 +115,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // Ensure database exists
     let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true)?;
 
-    // Record content type in config
-    let content_type = match input_type {
-        InputType::CodeFolder | InputType::SingleCode => "code",
-        InputType::MarkdownFolder | InputType::SingleMarkdown => "markdown",
-        InputType::Jsonl => "mixed",
-    };
+    // Update config: mark as code DB if code input, store input_path
     if let Ok(mut config) = DbConfig::load(&db_path) {
-        if config.content_type.is_empty() || config.content_type == "mixed" {
-            config.content_type = content_type.to_owned();
+        if matches!(input_type, InputType::CodeFolder | InputType::SingleCode) {
+            config.code = true;
         }
-        // Store input_path for `update` default
         if let Ok(canonical) = input_path.canonicalize() {
             config.input_path = Some(canonical.to_string_lossy().into_owned());
         }
