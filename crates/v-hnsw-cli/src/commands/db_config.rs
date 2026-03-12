@@ -30,10 +30,6 @@ pub struct DbConfig {
     /// Original input path used during `add` (for `update` default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_path: Option<String>,
-
-    /// Deprecated: migrated to `code` bool. Kept for backward compat deserialization only.
-    #[serde(default, skip_serializing)]
-    pub content_type: String,
 }
 
 impl Default for DbConfig {
@@ -48,7 +44,6 @@ impl Default for DbConfig {
             embed_model: None,
             code: false,
             input_path: None,
-            content_type: String::new(),
         }
     }
 }
@@ -57,20 +52,12 @@ impl DbConfig {
     pub const CURRENT_VERSION: u32 = 1;
 
     /// Load config from database path.
-    ///
-    /// Migrates legacy `content_type` field to `code` bool.
     pub fn load(path: &Path) -> Result<Self> {
         let config_path = path.join("config.json");
         let data = std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config: {}", config_path.display()))?;
-        let mut config: DbConfig = serde_json::from_str(&data)
+        let config: DbConfig = serde_json::from_str(&data)
             .with_context(|| "failed to parse config.json")?;
-
-        // Migrate legacy content_type → code bool
-        if !config.code && config.content_type == "code" {
-            config.code = true;
-        }
-
         Ok(config)
     }
 

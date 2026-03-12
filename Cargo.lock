@@ -3850,7 +3850,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "indicatif",
  "serde",
  "serde_json",
  "tempfile",
@@ -3865,7 +3864,6 @@ dependencies = [
  "v-hnsw-rerank",
  "v-hnsw-search",
  "v-hnsw-storage",
- "walkdir",
 ]
 
 [[package]]

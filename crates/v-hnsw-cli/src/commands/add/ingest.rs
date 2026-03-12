@@ -8,7 +8,7 @@ use crate::chunk::{ChunkConfig, MarkdownChunker};
 use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
-use super::pipeline::process_records;
+use crate::commands::pipeline::process_records;
 use crate::commands::common;
 use crate::commands::common::IngestRecord;
 use crate::commands::file_index;

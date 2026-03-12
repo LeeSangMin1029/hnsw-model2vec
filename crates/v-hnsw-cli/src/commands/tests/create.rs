@@ -45,26 +45,6 @@ fn db_config_defaults_for_optional_fields() {
 }
 
 #[test]
-fn db_config_legacy_content_type_migration() {
-    // Simulate old config.json with content_type: "code"
-    let json = r#"{
-        "version": 1,
-        "dim": 256,
-        "metric": "cosine",
-        "m": 16,
-        "ef_construction": 200,
-        "korean": false,
-        "content_type": "code"
-    }"#;
-
-    let tmp_dir = tempfile::tempdir().unwrap();
-    std::fs::write(tmp_dir.path().join("config.json"), json).unwrap();
-
-    let config = DbConfig::load(tmp_dir.path()).unwrap();
-    assert!(config.code, "content_type='code' should migrate to code=true");
-}
-
-#[test]
 fn db_config_save_and_load_roundtrip() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let config = DbConfig {

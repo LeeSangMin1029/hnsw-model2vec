@@ -8,6 +8,8 @@ pub mod file_utils;
 pub mod ingest;
 pub mod info;
 pub mod readers;
+pub mod pipeline;
+pub mod search_context;
 pub mod search_result;
 
 // Doc-only modules

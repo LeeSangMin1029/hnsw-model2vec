@@ -5,38 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::VectorIndex;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{NormalizedCosineDistance, HnswGraph};
+use v_hnsw_graph::{HnswGraph, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, CodeTokenizer, HybridSearchConfig, KoreanBm25Tokenizer, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
 
 use crate::commands::common;
 use crate::commands::create::DbConfig;
+use crate::commands::search_context::SearchContext;
 
 use super::FindOutput;
-
-/// Pre-loaded HNSW + storage context shared by both search paths.
-struct SearchContext {
-    engine: StorageEngine,
-    hnsw: HnswGraph<NormalizedCosineDistance>,
-    total_docs: usize,
-}
-
-impl SearchContext {
-    fn open(db_path: &Path) -> Result<Self> {
-        let hnsw_path = db_path.join("hnsw.bin");
-        if !hnsw_path.exists() {
-            anyhow::bail!("HNSW index not found. Run 'v-hnsw add' first to index data.");
-        }
-        let engine = StorageEngine::open(db_path).context("Failed to open storage")?;
-        let hnsw: HnswGraph<NormalizedCosineDistance> =
-            HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
-                .context("Failed to load HNSW index")?;
-        let total_docs = hnsw.len();
-        Ok(Self { engine, hnsw, total_docs })
-    }
-}
 
 /// Load BM25 index and run hybrid search (dense + sparse).
 #[expect(clippy::too_many_arguments)]
@@ -141,26 +119,26 @@ pub fn run_raw_vector(
         );
     }
 
-    let ctx = SearchContext::open(&db_path)?;
+    let (engine, hnsw, total_docs) = SearchContext::open(&db_path, "v-hnsw add")?.into_parts();
     let start = Instant::now();
     let fetch_k = if tags.is_empty() { k } else { k * 10 };
 
     let mut results = if let Some(ref text) = query_text {
-        hybrid_search(ctx.hnsw, &ctx.engine, &db_path, &raw_vec, text, k, fetch_k, ef, config.code)?
+        hybrid_search(hnsw, &engine, &db_path, &raw_vec, text, k, fetch_k, ef, config.code)?
     } else {
-        ctx.hnsw
-            .search_ext(ctx.engine.vector_store(), &raw_vec, fetch_k, ef)
+        hnsw
+            .search_ext(engine.vector_store(), &raw_vec, fetch_k, ef)
             .context("HNSW search failed")?
     };
 
     filter_and_output(
         &mut results,
-        &ctx.engine,
+        &engine,
         &tags,
         k,
         query_text.unwrap_or_default(),
         String::new(),
-        ctx.total_docs,
+        total_docs,
         start,
         full,
         min_score,
@@ -218,7 +196,7 @@ pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, 
     };
 
     let t2 = Instant::now();
-    let ctx = SearchContext::open(&db_path)?;
+    let (engine, hnsw, total_docs) = SearchContext::open(&db_path, "v-hnsw add")?.into_parts();
     eprintln!("  HNSW+Storage load: {:.0}ms", t2.elapsed().as_millis());
 
     let start = Instant::now();
@@ -226,18 +204,18 @@ pub fn run_direct(db_path: PathBuf, query: String, k: usize, tags: Vec<String>, 
 
     let t3 = Instant::now();
     let mut results = hybrid_search(
-        ctx.hnsw, &ctx.engine, &db_path, &query_embedding, &query, fetch_k, fetch_k, 200, config.code,
+        hnsw, &engine, &db_path, &query_embedding, &query, fetch_k, fetch_k, 200, config.code,
     )?;
     eprintln!("  BM25+Search: {:.0}ms", t3.elapsed().as_millis());
 
     filter_and_output(
         &mut results,
-        &ctx.engine,
+        &engine,
         &tags,
         k,
         query,
         model_name,
-        ctx.total_docs,
+        total_docs,
         start,
         full,
         min_score,

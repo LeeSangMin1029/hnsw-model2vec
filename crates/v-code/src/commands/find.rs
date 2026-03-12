@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::VectorIndex;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_graph::{HnswGraph, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, CodeTokenizer, HybridSearchConfig, SimpleHybridSearcher};
 use v_hnsw_storage::StorageEngine;
 
 use v_hnsw_cli::commands::db_config::DbConfig;
+use v_hnsw_cli::commands::search_context::SearchContext;
 use v_hnsw_cli::commands::search_result::{
     build_results, FindOutput, print_find_output, SearchResultItem,
 };
@@ -92,28 +92,6 @@ fn auto_start_daemon(db: &Path) {
 
 // ── Direct search path (fallback) ───────────────────────────────────────
 
-/// Pre-loaded HNSW + storage context.
-struct SearchContext {
-    engine: StorageEngine,
-    hnsw: HnswGraph<NormalizedCosineDistance>,
-    total_docs: usize,
-}
-
-impl SearchContext {
-    fn open(db_path: &Path) -> Result<Self> {
-        let hnsw_path = db_path.join("hnsw.bin");
-        if !hnsw_path.exists() {
-            anyhow::bail!("HNSW index not found. Run 'v-code add' first.");
-        }
-        let engine = StorageEngine::open(db_path).context("Failed to open storage")?;
-        let hnsw: HnswGraph<NormalizedCosineDistance> =
-            HnswGraph::load(&hnsw_path, NormalizedCosineDistance)
-                .context("Failed to load HNSW index")?;
-        let total_docs = hnsw.len();
-        Ok(Self { engine, hnsw, total_docs })
-    }
-}
-
 /// Run hybrid BM25+HNSW search with code tokenizer.
 fn hybrid_search(
     hnsw: HnswGraph<NormalizedCosineDistance>,
@@ -177,7 +155,7 @@ fn run_direct(db: &Path, query: &str, k: usize, full: bool, min_score: f32, no_r
     eprintln!("  Query embed: {:.0}ms", t1.elapsed().as_millis());
 
     let t2 = Instant::now();
-    let ctx = SearchContext::open(db)?;
+    let (engine, hnsw, total_docs) = SearchContext::open(db, "v-code add")?.into_parts();
     eprintln!("  HNSW+Storage load: {:.0}ms", t2.elapsed().as_millis());
 
     let start = Instant::now();
@@ -185,26 +163,26 @@ fn run_direct(db: &Path, query: &str, k: usize, full: bool, min_score: f32, no_r
 
     let t3 = Instant::now();
     let mut results = hybrid_search(
-        ctx.hnsw, &ctx.engine, db, &query_embedding, query, fetch_k, 200,
+        hnsw, &engine, db, &query_embedding, query, fetch_k, 200,
     )?;
     eprintln!("  BM25+Search: {:.0}ms", t3.elapsed().as_millis());
 
     // Rerank with cross-encoder
     if !no_rerank && results.len() > 1 {
         let t4 = Instant::now();
-        v_hnsw_rerank::rerank_results(&mut results, query, ctx.engine.payload_store(), k)?;
+        v_hnsw_rerank::rerank_results(&mut results, query, engine.payload_store(), k)?;
         eprintln!("  Rerank: {:.0}ms", t4.elapsed().as_millis());
     }
 
     results.truncate(k);
-    let results_with_text = build_results(&results, ctx.engine.payload_store());
+    let results_with_text = build_results(&results, engine.payload_store());
     let elapsed = start.elapsed();
 
     let output = FindOutput {
         results: results_with_text,
         query: query.to_string(),
         model: model_name,
-        total_docs: ctx.total_docs,
+        total_docs,
         elapsed_ms: elapsed.as_secs_f64() * 1000.0,
     };
 

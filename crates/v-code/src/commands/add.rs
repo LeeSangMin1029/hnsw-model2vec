@@ -5,14 +5,13 @@
 //! from v-hnsw-cli for ingestion, payload building, and file indexing.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use v_code_chunk as chunk_code;
+use v_hnsw_cli::commands::common;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::{
@@ -20,8 +19,9 @@ use v_hnsw_cli::commands::file_utils::{
 };
 use v_hnsw_cli::commands::ingest::{
     CodeChunkEntry, IngestRecord, build_called_by_index, code_chunk_to_record,
-    lookup_called_by, make_payload, truncate_for_embed,
+    lookup_called_by,
 };
+use v_hnsw_cli::commands::pipeline::process_records;
 use v_hnsw_cli::is_interrupted;
 
 // ── Model loading ────────────────────────────────────────────────────────
@@ -35,133 +35,6 @@ fn load_code_model() -> Result<Model2VecModel> {
     Ok(model)
 }
 
-// ── Database management ──────────────────────────────────────────────────
-
-/// Ensure database exists (create if new, open if existing).
-fn ensure_code_db(path: &Path, dim: usize, model_name: &str) -> Result<StorageEngine> {
-    if path.exists() {
-        let config = DbConfig::load(path)?;
-        if config.dim != dim {
-            anyhow::bail!(
-                "Dimension mismatch: database has dim={}, but model produces dim={}",
-                config.dim,
-                dim
-            );
-        }
-        StorageEngine::open_exclusive(path)
-            .with_context(|| format!("Failed to open database at {}", path.display()))
-    } else {
-        println!("Creating code DB: {}", path.display());
-        std::fs::create_dir_all(path)?;
-
-        let config = DbConfig {
-            dim,
-            embed_model: Some(model_name.to_owned()),
-            code: true,
-            ..DbConfig::default()
-        };
-        config.save(path)?;
-
-        let storage_config = StorageConfig {
-            dim,
-            ..StorageConfig::default()
-        };
-        StorageEngine::create(path, storage_config)
-            .with_context(|| format!("Failed to create database at {}", path.display()))
-    }
-}
-
-// ── Batch embed + insert ─────────────────────────────────────────────────
-
-/// Process records: embed and insert in batches with progress bar.
-fn process_records(
-    records: Vec<IngestRecord>,
-    model: &dyn EmbeddingModel,
-    engine: &mut StorageEngine,
-) -> Result<(u64, u64, Vec<u64>)> {
-    if records.is_empty() {
-        return Ok((0, 0, Vec::new()));
-    }
-
-    let batch_size = 16;
-    let start = Instant::now();
-
-    let pb = indicatif::ProgressBar::new(records.len() as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({per_sec})")
-            .expect("valid template")
-            .progress_chars("#>-"),
-    );
-
-    let mut inserted = 0u64;
-    let mut errors = 0u64;
-    let mut inserted_ids: Vec<u64> = Vec::new();
-
-    for (batch_idx, batch) in records.chunks(batch_size).enumerate() {
-        if is_interrupted() {
-            break;
-        }
-
-        let texts: Vec<String> = batch
-            .iter()
-            .map(|r| truncate_for_embed(&r.text).to_string())
-            .collect();
-
-        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let embeddings = match model.embed(&refs) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("Embedding error (batch {batch_idx}): {e}");
-                errors += batch.len() as u64;
-                pb.inc(batch.len() as u64);
-                continue;
-            }
-        };
-
-        let items: Vec<(u64, &[f32], _, &str)> = batch
-            .iter()
-            .zip(embeddings.iter())
-            .map(|(rec, emb)| {
-                let payload = make_payload(
-                    &rec.source,
-                    rec.title.as_deref(),
-                    &rec.tags,
-                    rec.chunk_index,
-                    rec.chunk_total,
-                    rec.source_modified_at,
-                    &rec.custom,
-                );
-                (rec.id, emb.as_slice(), payload, rec.text.as_str())
-            })
-            .collect();
-
-        if let Err(e) = engine.insert_batch(&items) {
-            eprintln!("Insert error (batch {batch_idx}): {e}");
-            errors += batch.len() as u64;
-        } else {
-            inserted += batch.len() as u64;
-            inserted_ids.extend(batch.iter().map(|r| r.id));
-        }
-
-        pb.inc(batch.len() as u64);
-    }
-
-    if !is_interrupted() {
-        pb.finish_with_message("Done");
-    }
-
-    engine.checkpoint().context("Failed to checkpoint database")?;
-
-    let elapsed = start.elapsed();
-    println!();
-    println!("Embedded: {inserted} symbols, {errors} errors, {:.2}s", elapsed.as_secs_f64());
-    if inserted > 0 {
-        println!("Rate: {:.0} symbols/s", inserted as f64 / elapsed.as_secs_f64());
-    }
-
-    Ok((inserted, errors, inserted_ids))
-}
 
 // ── Public entry points ──────────────────────────────────────────────────
 
@@ -195,7 +68,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let model = load_code_model()?;
 
     // Open/create database
-    let mut engine = ensure_code_db(&db_path, model.dim(), model.name())?;
+    let mut engine = common::ensure_database(&db_path, model.dim(), model.name(), false, true)?;
 
     // Update config
     if let Ok(mut config) = DbConfig::load(&db_path) {

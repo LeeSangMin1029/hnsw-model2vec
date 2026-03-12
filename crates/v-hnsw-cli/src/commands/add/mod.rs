@@ -4,7 +4,6 @@
 //! Auto-creates database, embeds text, builds indexes.
 
 pub(crate) mod ingest;
-mod pipeline;
 
 #[cfg(test)]
 mod tests;
@@ -113,7 +112,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let model_name = common::DEFAULT_MODEL;
 
     // Ensure database exists
-    let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true)?;
+    let is_code = matches!(input_type, InputType::CodeFolder | InputType::SingleCode);
+    let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true, is_code)?;
 
     // Update config: mark as code DB if code input, store input_path
     if let Ok(mut config) = DbConfig::load(&db_path) {

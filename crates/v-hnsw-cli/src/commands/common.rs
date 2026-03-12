@@ -136,11 +136,14 @@ pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
 // ── Database management ─────────────────────────────────────────────────
 
 /// Auto-create database if it doesn't exist, or open existing with exclusive lock.
+///
+/// `code` marks the database as a code-intelligence DB (uses `CodeTokenizer` for BM25).
 pub fn ensure_database(
     path: &Path,
     dim: usize,
     model_name: &str,
     korean: bool,
+    code: bool,
 ) -> Result<StorageEngine> {
     if path.exists() {
         let config = DbConfig::load(path)?;
@@ -174,6 +177,7 @@ pub fn ensure_database(
         let db_config = DbConfig {
             dim,
             korean,
+            code,
             embed_model: Some(model_name.to_string()),
             ..DbConfig::default()
         };

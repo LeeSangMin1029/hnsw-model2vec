@@ -34,7 +34,7 @@ pub fn run_embed(
     println!("Model loaded (dim={dim}).");
 
     // Open or create DB.
-    let mut engine = common::ensure_database(&path, dim, model_name, false)?;
+    let mut engine = common::ensure_database(&path, dim, model_name, false, false)?;
     let model: Box<dyn EmbeddingModel> = Box::new(model);
 
     let reader_cfg = ReaderConfig {
