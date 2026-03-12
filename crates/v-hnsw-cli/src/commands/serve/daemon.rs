@@ -22,7 +22,7 @@ use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
 use crate::commands::common::{self, QueryCache, SearchResultItem};
-use super::super::create::DbConfig;
+use crate::commands::db_config::DbConfig;
 
 /// Seconds of idle time before unloading the embedding model.
 const MODEL_IDLE_SECS: u64 = 300;
@@ -163,13 +163,13 @@ impl DbIndexes {
 
 /// Search response from daemon.
 #[derive(Debug, serde::Serialize)]
-pub(crate) struct SearchResponse {
+pub struct SearchResponse {
     pub results: Vec<SearchResultItem>,
     pub elapsed_ms: f64,
 }
 
 /// Loaded daemon state: shared model + per-DB indexes.
-pub(crate) struct DaemonState {
+pub struct DaemonState {
     model: Option<Model2VecModel>,
     model_name: Option<String>,
     model_dim: Option<usize>,
@@ -303,34 +303,16 @@ impl DaemonState {
 
     pub fn save_cache(&self) -> Result<()> { self.query_cache.save() }
 
-    /// Run incremental update using the daemon's shared model.
-    ///
-    /// Drops cached read-only engine, runs update with exclusive lock,
-    /// then reloads indexes for subsequent searches.
-    pub fn update(&mut self, db_path: &Path, input_path: &Path, exclude: &[String]) -> Result<crate::commands::update::UpdateStats> {
+    /// Evict a database from cache (for exclusive access by external update).
+    pub fn evict_db(&mut self, db_path: &Path) -> Result<PathBuf> {
         let key = canonicalize(db_path)?;
-        let t0 = Instant::now();
-
-        // Drop cached read-only engine so exclusive lock can be acquired
         self.databases.remove(&key);
+        Ok(key)
+    }
 
-        // Ensure model is loaded before borrowing self immutably
-        self.ensure_model()?;
-        let model = self.model.as_ref();
-
-        // Run core update with the daemon's shared model (no 1GB reload)
-        let stats = crate::commands::update::run_core(&key, input_path, model, exclude)?;
-
-        // Reload indexes so subsequent searches see the new data
-        self.register_db(&key)?;
-
-        eprintln!(
-            "[daemon] Update complete: new={} mod={} del={} unchanged={} ({:.0}ms)",
-            stats.new, stats.modified, stats.deleted, stats.unchanged,
-            t0.elapsed().as_millis()
-        );
-
-        Ok(stats)
+    /// Ensure the embedding model is loaded and return a reference.
+    pub fn model(&mut self) -> Result<&Model2VecModel> {
+        self.ensure_model()
     }
 
     /// Search: resolve embedding → delegate to DbIndexes::search.

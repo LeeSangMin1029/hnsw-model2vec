@@ -145,10 +145,119 @@ pub fn print_find_output(output: FindOutput, full: bool, min_score: f32) -> anyh
     if min_score > 0.0 {
         output.results.retain(|item| item.score >= min_score);
     }
-    let output = if full { output } else { compact_output(output) };
-    let json = serde_json::to_string_pretty(&output)?;
-    println!("{json}");
+    if full {
+        let json = serde_json::to_string_pretty(&output)?;
+        println!("{json}");
+    } else {
+        print_compact_grouped(&output);
+    }
     Ok(())
+}
+
+/// Print results in compact text format, grouped by source file.
+fn print_compact_grouped(output: &FindOutput) {
+    use std::collections::HashMap;
+
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default()
+        .replace('\\', "/");
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+
+    // Group results by source file, preserving insertion order
+    let mut keys: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<&SearchResultItem>> = HashMap::new();
+    for item in &output.results {
+        let source = item.source.as_deref().unwrap_or("(unknown)");
+        let normalized = source.replace('\\', "/");
+        // Try stripping cwd first (more specific), then home
+        let short = normalized
+            .strip_prefix(&cwd)
+            .or_else(|| normalized.strip_prefix(&home))
+            .unwrap_or(&normalized)
+            .trim_start_matches('/')
+            .to_string();
+        if !groups.contains_key(&short) {
+            keys.push(short.clone());
+        }
+        groups.entry(short).or_default().push(item);
+    }
+
+    for file in &keys {
+        let items = &groups[file];
+        println!("{file}");
+        for item in items {
+            let title = item.title.as_deref().unwrap_or("?");
+            let desc = item
+                .text
+                .as_deref()
+                .and_then(|t| extract_description(t))
+                .unwrap_or_default();
+            let lines = item
+                .text
+                .as_deref()
+                .and_then(|t| extract_lines(t))
+                .unwrap_or_default();
+
+            if lines.is_empty() {
+                print!("  {title}");
+            } else {
+                print!("  {title} :{lines}");
+            }
+            if !desc.is_empty() {
+                print!(" — {desc}");
+            }
+            println!();
+        }
+        println!();
+    }
+}
+
+/// Extract the description line from chunk text (after File: line).
+fn extract_description(text: &str) -> Option<&str> {
+    // Text format: "[kind] name\nFile: path:lines\nDescription...\nTypes: ..."
+    let lines: Vec<&str> = text.lines().collect();
+    // Find first line that's not [kind], File:, Signature:, Types:, Calls:, Called by:
+    for line in &lines[1..] {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("File:")
+            || trimmed.starts_with("Signature:")
+            || trimmed.starts_with("Types:")
+            || trimmed.starts_with("Calls:")
+            || trimmed.starts_with("Called by:")
+        {
+            continue;
+        }
+        let desc = truncate_text(trimmed, 80);
+        return Some(if desc.len() == trimmed.len() {
+            trimmed
+        } else {
+            // Return the original trimmed for lifetime; caller will truncate
+            trimmed
+        });
+    }
+    None
+}
+
+/// Extract line range from chunk text "File: path:START-END".
+fn extract_lines(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("File:") {
+            // Format: "./path:10-20" — extract the line range after last ':'
+            let rest = rest.trim();
+            if let Some(colon_pos) = rest.rfind(':') {
+                let range = &rest[colon_pos + 1..];
+                if range.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    return Some(range);
+                }
+            }
+        }
+    }
+    None
 }
 
 // ── Query language utilities ────────────────────────────────────────

@@ -11,7 +11,7 @@ use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
 use super::common::{ensure_korean_dict, make_progress_bar};
-use super::create::DbConfig;
+use super::db_config::DbConfig;
 use crate::is_interrupted;
 
 /// Build and save HNSW and BM25 indexes from storage data.

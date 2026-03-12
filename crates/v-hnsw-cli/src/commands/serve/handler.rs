@@ -10,14 +10,24 @@ use anyhow::{Context, Result};
 use super::daemon::DaemonState;
 use super::{
     EmbedParams, JsonRpcError, JsonRpcRequest, JsonRpcResponse, SearchParams,
-    UpdateParams,
 };
+
+/// Extension handler for methods beyond the built-in set (search/embed/reload/shutdown).
+///
+/// Returns `Some(Ok(value))` on success, `Some(Err(..))` on failure,
+/// or `None` if the method is not handled.
+pub type MethodHandler = fn(
+    method: &str,
+    params: serde_json::Value,
+    state: &mut DaemonState,
+) -> Option<Result<serde_json::Value>>;
 
 /// Handle a single client connection.
 pub(crate) fn handle_client(
     stream: TcpStream,
     state: &mut DaemonState,
     last_activity: &mut Instant,
+    extra: Option<MethodHandler>,
 ) -> Result<()> {
     // Generous timeouts: update can take minutes for large repos
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -76,7 +86,7 @@ pub(crate) fn handle_client(
                     result: None,
                     error: Some(JsonRpcError {
                         code: -2,
-                        message: format!("Reload failed: {}", e),
+                        message: format!("Reload failed: {e}"),
                     }),
                 },
             }
@@ -96,29 +106,7 @@ pub(crate) fn handle_client(
                     result: None,
                     error: Some(JsonRpcError {
                         code: -3,
-                        message: format!("Embed failed: {}", e),
-                    }),
-                },
-            }
-        }
-        "update" => {
-            let params: UpdateParams =
-                serde_json::from_value(request.params).context("Invalid update params")?;
-            let db_path = PathBuf::from(&params.db);
-            let input_path = PathBuf::from(&params.input);
-
-            match state.update(&db_path, &input_path, &params.exclude) {
-                Ok(stats) => JsonRpcResponse {
-                    id: request.id,
-                    result: Some(serde_json::to_value(stats)?),
-                    error: None,
-                },
-                Err(e) => JsonRpcResponse {
-                    id: request.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -4,
-                        message: format!("Update failed: {e}"),
+                        message: format!("Embed failed: {e}"),
                     }),
                 },
             }
@@ -130,25 +118,55 @@ pub(crate) fn handle_client(
                 error: None,
             };
             let response_json = serde_json::to_string(&response)?;
-            writeln!(writer, "{}", response_json)?;
+            writeln!(&mut &*writer, "{response_json}")?;
             writer.flush()?;
             anyhow::bail!("Shutdown requested");
         }
-        _ => JsonRpcResponse {
-            id: request.id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32601,
-                message: format!("Unknown method: {}", request.method),
-            }),
-        },
+        method => {
+            // Delegate to extension handler
+            if let Some(handler) = extra {
+                if let Some(result) = handler(method, request.params, state) {
+                    match result {
+                        Ok(value) => JsonRpcResponse {
+                            id: request.id,
+                            result: Some(value),
+                            error: None,
+                        },
+                        Err(e) => JsonRpcResponse {
+                            id: request.id,
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -4,
+                                message: e.to_string(),
+                            }),
+                        },
+                    }
+                } else {
+                    JsonRpcResponse {
+                        id: request.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32601,
+                            message: format!("Unknown method: {method}"),
+                        }),
+                    }
+                }
+            } else {
+                JsonRpcResponse {
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: format!("Unknown method: {method}"),
+                    }),
+                }
+            }
+        }
     };
 
     let response_json = serde_json::to_string(&response)?;
-    writeln!(writer, "{response_json}")?;
+    writeln!(&mut &*writer, "{response_json}")?;
     writer.flush()?;
 
     Ok(())
 }
-
-

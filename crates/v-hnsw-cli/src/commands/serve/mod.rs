@@ -2,8 +2,11 @@
 //!
 //! Keeps the embedding model loaded in memory to avoid repeated model loading.
 //! Uses TCP socket for cross-platform compatibility.
+//!
+//! Extension methods (e.g. "update") are registered via `MethodHandler` callback
+//! so the core daemon has no compile-time dependency on domain-specific modules.
 
-mod daemon;
+pub mod daemon;
 mod handler;
 
 #[cfg(test)]
@@ -19,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::is_interrupted;
 use daemon::DaemonState;
+
+pub use handler::MethodHandler;
 
 /// JSON-RPC request.
 #[derive(Debug, Deserialize)]
@@ -66,15 +71,6 @@ pub(crate) struct EmbedParams {
     pub texts: Vec<String>,
 }
 
-/// Update request parameters.
-#[derive(Debug, Deserialize)]
-pub(crate) struct UpdateParams {
-    pub db: String,
-    pub input: String,
-    #[serde(default)]
-    pub exclude: Vec<String>,
-}
-
 /// Read the daemon port from global cache file.
 pub fn read_port_file() -> Option<u16> {
     std::fs::read_to_string(super::common::cache_file("v-hnsw.port"))
@@ -103,7 +99,7 @@ fn cleanup_files() {
 /// Check if daemon is already running.
 pub fn is_daemon_running() -> bool {
     if let Some(port) = read_port_file()
-        && let Ok(addr) = format!("127.0.0.1:{}", port).parse()
+        && let Ok(addr) = format!("127.0.0.1:{port}").parse()
     {
         TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
     } else {
@@ -112,11 +108,20 @@ pub fn is_daemon_running() -> bool {
 }
 
 /// Run the daemon server.
-pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: bool) -> Result<()> {
+///
+/// `extra_handler` allows callers to register domain-specific RPC methods
+/// (e.g. v-hnsw registers "update", v-code does not).
+pub fn run(
+    db_path: Option<PathBuf>,
+    port: u16,
+    timeout_secs: u64,
+    background: bool,
+    extra_handler: Option<MethodHandler>,
+) -> Result<()> {
     if is_daemon_running()
         && let Some(existing_port) = read_port_file()
     {
-        eprintln!("[daemon] Already running on port {}", existing_port);
+        eprintln!("[daemon] Already running on port {existing_port}");
         return Ok(());
     }
 
@@ -134,14 +139,14 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
     let mut state = DaemonState::new(initial.as_deref())?;
 
     // Bind to port — no fallback to :0 to prevent duplicate daemons
-    let listener = match TcpListener::bind(format!("127.0.0.1:{}", port)) {
+    let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
         Ok(l) => l,
         Err(_) if is_daemon_running() => {
-            eprintln!("[daemon] Another daemon already owns port {}, exiting", port);
+            eprintln!("[daemon] Another daemon already owns port {port}, exiting");
             return Ok(());
         }
         Err(e) => {
-            anyhow::bail!("Failed to bind to port {}: {} (is another program using it?)", port, e);
+            anyhow::bail!("Failed to bind to port {port}: {e} (is another program using it?)");
         }
     };
 
@@ -152,11 +157,11 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
     listener.set_nonblocking(true)?;
 
     tracing::info!(port = actual_port, "Daemon listening");
-    eprintln!("[daemon] Listening on 127.0.0.1:{}", actual_port);
+    eprintln!("[daemon] Listening on 127.0.0.1:{actual_port}");
     if timeout_secs == 0 {
         eprintln!("[daemon] Persistent mode (no idle timeout)");
     } else {
-        eprintln!("[daemon] Idle timeout: {}s", timeout_secs);
+        eprintln!("[daemon] Idle timeout: {timeout_secs}s");
     }
     eprintln!("[daemon] Ready for connections");
 
@@ -180,21 +185,21 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
 
         match listener.accept() {
             Ok((stream, addr)) => {
-                eprintln!("[daemon] Connection from {}", addr);
+                eprintln!("[daemon] Connection from {addr}");
                 if let Err(e) =
-                    handler::handle_client(stream, &mut state, &mut last_activity)
+                    handler::handle_client(stream, &mut state, &mut last_activity, extra_handler)
                 {
                     if e.to_string().contains("Shutdown requested") {
                         break;
                     }
-                    eprintln!("[daemon] Client error: {}", e);
+                    eprintln!("[daemon] Client error: {e}");
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                eprintln!("[daemon] Accept error: {}", e);
+                eprintln!("[daemon] Accept error: {e}");
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -202,7 +207,7 @@ pub fn run(db_path: Option<PathBuf>, port: u16, timeout_secs: u64, background: b
 
     eprintln!("[daemon] Saving query cache...");
     if let Err(e) = state.save_cache() {
-        eprintln!("[daemon] Failed to save query cache: {}", e);
+        eprintln!("[daemon] Failed to save query cache: {e}");
     }
 
     eprintln!("[daemon] Cleaning up...");
@@ -230,9 +235,6 @@ fn spawn_background(db_path: Option<&Path>, port: u16, timeout_secs: u64) -> Res
 }
 
 /// Send a JSON-RPC request to the running daemon and return the result.
-///
-/// Handles port lookup, TCP connect, timeout, request/response framing,
-/// and error extraction. Callers only need to supply method + params.
 pub fn daemon_rpc(
     method: &str,
     params: serde_json::Value,

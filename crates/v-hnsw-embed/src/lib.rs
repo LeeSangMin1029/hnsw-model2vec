@@ -33,6 +33,7 @@
 //! Models are cached locally for subsequent use.
 
 mod error;
+mod mmap_model;
 mod model;
 mod model2vec;
 

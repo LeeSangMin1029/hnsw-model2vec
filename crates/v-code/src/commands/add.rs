@@ -209,9 +209,20 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     if inserted == 0 {
         println!("No symbols to index.");
     } else {
+        // Build HNSW + BM25 indexes
+        let config = DbConfig::load(&db_path)?;
+        v_hnsw_cli::commands::indexing::update_indexes_incremental(
+            &db_path, &engine, &config, &_inserted_ids, &removed_ids,
+        )?;
+
+        // Notify daemon to reload if running
+        if v_hnsw_cli::commands::serve::notify_daemon_reload(&db_path).is_ok() {
+            println!("Daemon notified to reload indexes.");
+        }
+
         println!();
         println!("Done! Code DB ready: {}", db_path.display());
-        println!("Use: v-code symbols/def/refs/impact/gather/dupes {}", db_path.display());
+        println!("Use: v-code find/symbols/def/refs/impact/gather/dupes {}", db_path.display());
     }
 
     Ok(())

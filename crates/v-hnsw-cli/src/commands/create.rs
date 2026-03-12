@@ -3,24 +3,11 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use v_hnsw_graph::HnswConfig;
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use crate::cli::MetricType;
 
 pub use super::db_config::DbConfig;
-
-impl DbConfig {
-    /// Build an `HnswConfig` from this database config.
-    pub fn to_hnsw_config(&self) -> Result<HnswConfig> {
-        HnswConfig::builder()
-            .dim(self.dim)
-            .m(self.m)
-            .ef_construction(self.ef_construction)
-            .build()
-            .with_context(|| "Failed to create HNSW config")
-    }
-}
 
 /// Run the create command.
 pub fn run(

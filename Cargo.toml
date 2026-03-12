@@ -31,7 +31,7 @@ v-hnsw-embed = { path = "crates/v-hnsw-embed" }
 v-code-chunk = { path = "crates/v-code-chunk" }
 v-code-intel = { path = "crates/v-code-intel" }
 v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
-v-hnsw-cli = { path = "crates/v-hnsw-cli", default-features = false }
+v-hnsw-cli = { path = "crates/v-hnsw-cli" }
 
 # Error handling
 thiserror = "2"

@@ -251,24 +251,4 @@ pub enum Commands {
         #[arg(short, long)]
         exclude: Vec<String>,
     },
-    /// Search code with hybrid BM25+HNSW and cross-encoder reranking.
-    #[command(visible_alias = "f")]
-    Find {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Search query.
-        query: String,
-        /// Number of results.
-        #[arg(short, long, default_value = "10")]
-        k: usize,
-        /// Show full output (scores, model, timing).
-        #[arg(long)]
-        full: bool,
-        /// Minimum score threshold.
-        #[arg(long, default_value = "0.0")]
-        min_score: f32,
-        /// Skip cross-encoder reranking.
-        #[arg(long)]
-        no_rerank: bool,
-    },
 }

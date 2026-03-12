@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use v_hnsw_embed::EmbeddingModel;
 use v_hnsw_storage::StorageEngine;
 
-use crate::commands::common::{self, IngestRecord};
+use super::common::make_progress_bar;
+use crate::commands::ingest::{self, IngestRecord};
 use crate::is_interrupted;
 
 /// Embedded batch ready for storage insertion.
@@ -30,7 +31,7 @@ pub fn process_records(
 
     let batch_size = 256;
 
-    let pb = common::make_progress_bar(records.len() as u64)?;
+    let pb = make_progress_bar(records.len() as u64)?;
     let start = Instant::now();
 
     // Bounded channel: buffer batches so producer can stay ahead during storage I/O
@@ -55,10 +56,10 @@ pub fn process_records(
 
                 let texts: Vec<String> = batch_records
                     .iter()
-                    .map(|r| common::truncate_for_embed(&r.text).to_string())
+                    .map(|r| ingest::truncate_for_embed(&r.text).to_string())
                     .collect();
 
-                let embeddings = match common::embed_sorted(model, &texts) {
+                let embeddings = match ingest::embed_sorted(model, &texts) {
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("Embedding error: {e}");
@@ -97,7 +98,7 @@ pub fn process_records(
                 .iter()
                 .zip(batch.embeddings.iter())
                 .map(|(rec, emb)| {
-                    let payload = common::make_payload(
+                    let payload = ingest::make_payload(
                         &rec.source,
                         rec.title.as_deref(),
                         &rec.tags,

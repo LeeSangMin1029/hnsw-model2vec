@@ -67,13 +67,8 @@ fn run() -> anyhow::Result<()> {
         Commands::Update { db, input, exclude } => {
             commands::add::run_update(db, input, &exclude)
         }
-        Commands::Find { db, query, k, full, min_score, no_rerank } => {
-            commands::find::run(commands::find::FindParams {
-                db, query, k, full, min_score, no_rerank,
-            })
-        }
         Commands::Serve { db, port, timeout, background } => {
-            v_hnsw_cli::commands::serve::run(db, port, timeout, background)
+            v_hnsw_cli::commands::serve::run(db, port, timeout, background, None)
         }
     }
 }

@@ -11,7 +11,7 @@ name = "v-hnsw"
 path = "src/main.rs"
 
 [dependencies]
-v-hnsw-cli = { workspace = true, features = ["doc"] }
+v-hnsw-cli.workspace = true
 v-hnsw-core.workspace = true
 clap = { workspace = true, features = ["derive"] }
 anyhow = "1"

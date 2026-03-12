@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use v_hnsw_graph::HnswConfig;
 
 /// Database metadata stored in config.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +60,16 @@ impl DbConfig {
         let config: DbConfig = serde_json::from_str(&data)
             .with_context(|| "failed to parse config.json")?;
         Ok(config)
+    }
+
+    /// Build an `HnswConfig` from this database config.
+    pub fn to_hnsw_config(&self) -> Result<HnswConfig> {
+        HnswConfig::builder()
+            .dim(self.dim)
+            .m(self.m)
+            .ef_construction(self.ef_construction)
+            .build()
+            .with_context(|| "Failed to create HNSW config")
     }
 
     /// Save config to database path.

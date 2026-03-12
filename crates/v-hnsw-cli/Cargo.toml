@@ -17,10 +17,12 @@ v-hnsw-storage.workspace = true
 v-code-chunk.workspace = true
 v-hnsw-embed.workspace = true
 
-# Document mode dependencies
-v-hnsw-graph = { workspace = true, optional = true }
-v-hnsw-search = { workspace = true, features = ["korean"], optional = true }
-pulldown-cmark = { version = "0.13", optional = true }
+# Index & search (always available — both binaries need these)
+v-hnsw-graph.workspace = true
+v-hnsw-search = { workspace = true, features = ["korean"] }
+
+# Markdown chunking
+pulldown-cmark = "0.13"
 
 
 # CLI
@@ -64,14 +66,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = "3"
-
-[features]
-default = ["doc"]
-doc = [
-    "v-hnsw-graph",
-    "v-hnsw-search",
-    "pulldown-cmark",
-]
 
 [lints]
 workspace = true
