@@ -25,6 +25,7 @@ fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         signature: Some(format!("fn {name}()")),
         calls: calls.iter().map(|s| s.to_string()).collect(),
         types: vec![],
+        imports: vec![],
     }
 }
 
@@ -37,6 +38,7 @@ fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         signature: Some(format!("fn {name}()")),
         calls: calls.iter().map(|s| s.to_string()).collect(),
         types: vec![],
+        imports: vec![],
     }
 }
 

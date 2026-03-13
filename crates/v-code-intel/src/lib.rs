@@ -15,6 +15,7 @@ pub mod graph;
 pub mod helpers;
 pub mod impact;
 pub mod loader;
+pub mod mir;
 pub mod parse;
 pub mod reason;
 pub mod stats;

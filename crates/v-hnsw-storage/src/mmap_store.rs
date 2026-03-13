@@ -15,6 +15,22 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Size of the file header in bytes
 pub const HEADER_SIZE: usize = 64;
 
+/// Create a new mmap file with the given total size.
+///
+/// Opens (or creates) the file at `path`, truncates it to `file_size`,
+/// and returns the writable memory-map together with the file handle.
+pub(crate) fn create_mmap_file(path: &Path, file_size: usize) -> Result<(File, MmapMut)> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.set_len(file_size as u64)?;
+    let mmap = unsafe { MmapMut::map_mut(&file)? };
+    Ok((file, mmap))
+}
+
 /// Memory-mapped vector storage backend.
 ///
 /// # File Layout
@@ -67,16 +83,7 @@ impl MmapVectorStore {
         let slot_size = dim * std::mem::size_of::<f32>();
         let file_size = HEADER_SIZE + (capacity as usize) * slot_size;
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
-
-        file.set_len(file_size as u64)?;
-
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        let (file, mmap) = create_mmap_file(&path, file_size)?;
 
         // Write header
         let mut store = Self {

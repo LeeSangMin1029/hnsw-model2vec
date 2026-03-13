@@ -13,6 +13,9 @@ pub struct CodeChunk {
     pub signature: Option<String>,
     pub calls: Vec<String>,
     pub types: Vec<String>,
+    /// File-level import statements (loaded from payload custom fields).
+    #[serde(default)]
+    pub imports: Vec<String>,
 }
 
 /// Parse the text field of a code chunk into a [`CodeChunk`].
@@ -86,6 +89,7 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         signature,
         calls,
         types,
+        imports: Vec::new(),
     })
 }
 

@@ -13,6 +13,7 @@ fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> CodeChunk {
         signature: None,
         calls: calls.iter().map(|s| s.to_string()).collect(),
         types: types.iter().map(|s| s.to_string()).collect(),
+        imports: vec![],
     }
 }
 

@@ -47,15 +47,7 @@ impl Sq8VectorStore {
         let path = path.as_ref().to_path_buf();
         let file_size = HEADER_SIZE + (capacity as usize) * dim;
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
-
-        file.set_len(file_size as u64)?;
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        let (file, mmap) = crate::mmap_store::create_mmap_file(&path, file_size)?;
 
         let mut store = Self {
             path,

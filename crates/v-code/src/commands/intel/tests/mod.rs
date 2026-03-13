@@ -3,6 +3,7 @@ mod detail;
 mod gather;
 mod graph;
 mod impact;
+mod mir;
 mod parse;
 mod reason;
 mod trace;

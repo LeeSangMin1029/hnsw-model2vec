@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use v_hnsw_core::{DistanceMetric, PointId, VectorStore};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
+use v_hnsw_graph::{DistanceComputer, NormalizedCosineDistance};
+use v_hnsw_storage::sq8::Sq8Params;
+use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use super::db_config::DbConfig;
@@ -131,6 +135,33 @@ pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
             .progress_chars("#>-"),
     );
     Ok(pb)
+}
+
+// ── Distance computers ──────────────────────────────────────────────────
+
+/// f32 distance computer for exact rescore.
+pub(crate) struct F32Dc<'a> {
+    pub store: &'a dyn VectorStore,
+}
+
+impl DistanceComputer for F32Dc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let vec = self.store.get(id)?;
+        Ok(NormalizedCosineDistance.distance(query, vec))
+    }
+}
+
+/// SQ8 distance computer for approximate traversal.
+pub(crate) struct Sq8Dc<'a> {
+    pub params: &'a Sq8Params,
+    pub store: &'a Sq8VectorStore,
+}
+
+impl DistanceComputer for Sq8Dc<'_> {
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let codes = self.store.get(id)?;
+        Ok(self.params.asymmetric_distance(query, codes))
+    }
 }
 
 // ── Database management ─────────────────────────────────────────────────

@@ -10,6 +10,7 @@ fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         signature: Some(format!("fn {name}()")),
         calls: calls.iter().map(|s| s.to_string()).collect(),
         types: vec![],
+        imports: vec![],
     }
 }
 
@@ -77,12 +78,16 @@ fn build_deduplicates_edges() {
 #[test]
 fn build_resolves_short_names() {
     let chunks = vec![
-        chunk("mod_a::Alpha", "src/a.rs", &["Beta"]),
+        {
+            let mut c = chunk("mod_a::Alpha", "src/a.rs", &["Beta"]);
+            c.imports = vec!["use mod_b::Beta;".to_owned()];
+            c
+        },
         chunk("mod_b::Beta", "src/b.rs", &[]),
     ];
     let graph = CallGraph::build(&chunks);
 
-    // "Beta" should resolve to mod_b::Beta via short name
+    // "Beta" should resolve to mod_b::Beta via import
     assert_eq!(graph.callees[0], vec![1]);
 }
 

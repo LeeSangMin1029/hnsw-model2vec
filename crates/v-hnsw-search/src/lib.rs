@@ -47,7 +47,7 @@ mod tests;
 pub use bm25::{Bm25Index, Bm25Params, Bm25Snapshot, Posting, PostingList};
 pub use config::{HybridSearchConfig, HybridSearchConfigBuilder};
 pub use fusion::ConvexFusion;
-pub use hybrid::SimpleHybridSearcher;
+pub use hybrid::{SimpleHybridSearcher, enrich_sparse};
 #[cfg(feature = "korean")]
 pub use korean_tokenizer::{KoreanBm25Tokenizer, init_korean_tokenizer};
 

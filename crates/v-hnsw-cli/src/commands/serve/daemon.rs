@@ -13,15 +13,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::{DistanceMetric, PointId, VectorIndex, VectorStore};
+use v_hnsw_core::{PointId, VectorIndex, VectorStore};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{DistanceComputer, HnswGraph, HnswSnapshot, NormalizedCosineDistance};
+use v_hnsw_graph::{HnswGraph, HnswSnapshot, NormalizedCosineDistance};
 use v_hnsw_search::{Bm25Index, Bm25Snapshot, CodeTokenizer, ConvexFusion, KoreanBm25Tokenizer};
 use v_hnsw_storage::sq8::Sq8Params;
 use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
-use crate::commands::common::{self, QueryCache, SearchResultItem};
+use crate::commands::common::{self, F32Dc, QueryCache, SearchResultItem, Sq8Dc};
 use crate::commands::db_config::DbConfig;
 
 /// Seconds of idle time before unloading the embedding model.
@@ -40,31 +40,6 @@ enum DenseIndex {
 struct Sq8Data {
     params: Sq8Params,
     store: Sq8VectorStore,
-}
-
-/// f32 distance computer for exact rescore.
-struct F32Dc<'a> {
-    store: &'a dyn VectorStore,
-}
-
-impl DistanceComputer for F32Dc<'_> {
-    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let vec = self.store.get(id)?;
-        Ok(NormalizedCosineDistance.distance(query, vec))
-    }
-}
-
-/// SQ8 distance computer for approximate traversal.
-struct Sq8Dc<'a> {
-    params: &'a Sq8Params,
-    store: &'a Sq8VectorStore,
-}
-
-impl DistanceComputer for Sq8Dc<'_> {
-    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let codes = self.store.get(id)?;
-        Ok(self.params.asymmetric_distance(query, codes))
-    }
 }
 
 impl DenseIndex {
@@ -143,7 +118,9 @@ impl DbIndexes {
             .context("HNSW search failed")?;
         let sparse_results = self.sparse.search(query, sparse_limit);
 
-        let all_sparse = enrich_sparse(&self.sparse, query, &dense_results, sparse_results);
+        let all_sparse = v_hnsw_search::enrich_sparse(&dense_results, sparse_results, |ids| {
+            self.sparse.score_documents(query, ids)
+        });
 
         let alpha = common::fusion_alpha(query);
         let fusion = ConvexFusion::with_alpha(alpha);
@@ -411,32 +388,6 @@ fn load_sq8(db_path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> O
 fn canonicalize(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("Database not found: {}", path.display()))
-}
-
-/// Enrich BM25 results with scores for dense candidates missing from BM25 top-k.
-fn enrich_sparse(
-    sparse: &SparseIndex,
-    query: &str,
-    dense_results: &[(PointId, f32)],
-    mut sparse_results: Vec<(PointId, f32)>,
-) -> Vec<(PointId, f32)> {
-    if dense_results.is_empty() {
-        return sparse_results;
-    }
-
-    let sparse_ids: HashSet<PointId> = sparse_results.iter().map(|&(id, _)| id).collect();
-    let missing: Vec<PointId> = dense_results
-        .iter()
-        .filter(|&&(id, _)| !sparse_ids.contains(&id))
-        .map(|&(id, _)| id)
-        .collect();
-
-    if !missing.is_empty() {
-        let extra = sparse.score_documents(query, &missing);
-        sparse_results.extend(extra);
-    }
-
-    sparse_results
 }
 
 /// Ask the OS to trim the process working set, releasing unmapped pages.

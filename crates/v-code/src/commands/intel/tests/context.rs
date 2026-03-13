@@ -55,6 +55,7 @@ fn build_test_graph() -> CallGraph {
             signature: Some("fn main()".to_owned()),
             calls: vec!["foo".to_owned()],
             types: vec![],
+            imports: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -64,6 +65,7 @@ fn build_test_graph() -> CallGraph {
             signature: Some("fn foo() -> i32".to_owned()),
             calls: vec!["bar".to_owned()],
             types: vec![],
+            imports: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -73,6 +75,7 @@ fn build_test_graph() -> CallGraph {
             signature: Some("fn bar() -> bool".to_owned()),
             calls: vec!["baz".to_owned()],
             types: vec![],
+            imports: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -82,6 +85,7 @@ fn build_test_graph() -> CallGraph {
             signature: None,
             calls: vec![],
             types: vec![],
+            imports: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -91,6 +95,7 @@ fn build_test_graph() -> CallGraph {
             signature: None,
             calls: vec!["main".to_owned()],
             types: vec![],
+            imports: vec![],
         },
     ];
     CallGraph::build(&chunks)

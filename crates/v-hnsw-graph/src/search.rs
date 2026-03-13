@@ -89,6 +89,31 @@ impl Ord for HeapEntry {
 pub trait DistanceComputer {
     /// Compute distance from `query` to the vector identified by `id`.
     fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32>;
+
+    /// Prefetch vector data for the given id to hide memory latency.
+    /// Default is a no-op; override for storage backends that support prefetch.
+    fn prefetch(&self, _id: PointId) {}
+}
+
+/// Adapter: wraps `VectorStore + DistanceMetric` into a `DistanceComputer`.
+pub(crate) struct StoreDc<'a, D> {
+    pub store: &'a dyn VectorStore,
+    pub metric: &'a D,
+}
+
+impl<D: DistanceMetric> DistanceComputer for StoreDc<'_, D> {
+    #[inline]
+    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let vec = self.store.get(id)?;
+        Ok(self.metric.distance(query, vec))
+    }
+
+    #[inline]
+    fn prefetch(&self, id: PointId) {
+        if let Ok(vec) = self.store.get(id) {
+            prefetch_vector(vec);
+        }
+    }
 }
 
 /// Top-level HNSW search using the graph's internal vector store.
@@ -273,8 +298,9 @@ fn greedy_closest_dc<N: NodeGraph>(
 
 /// Search within a single layer using a `DistanceComputer`.
 ///
-/// Same algorithm as `search_layer` but uses `DistanceComputer` instead of
-/// `VectorStore + DistanceMetric` for flexibility (SQ8, PQ, etc.).
+/// Uses a min-heap for candidates (closest first) and a max-heap for results.
+/// Applies software prefetch via `DistanceComputer::prefetch` to hide memory latency.
+/// Reuses thread-local buffers to avoid per-query allocations.
 fn search_layer_dc<N: NodeGraph>(
     nodes: &N,
     dc: &dyn DistanceComputer,
@@ -308,12 +334,22 @@ fn search_layer_dc<N: NodeGraph>(
                 None => continue,
             };
 
-            for &neighbor_id in neighbor_ids {
+            // Traverse neighbors with software prefetch (lookahead = 4)
+            const PREFETCH_AHEAD: usize = 4;
+            for (i, &neighbor_id) in neighbor_ids.iter().enumerate() {
                 if !buf.visited.insert(neighbor_id) {
                     continue;
                 }
                 if nodes.is_deleted(neighbor_id) {
                     continue;
+                }
+
+                // Prefetch ahead to hide memory latency
+                if i + PREFETCH_AHEAD < neighbor_ids.len() {
+                    let ahead_id = neighbor_ids[i + PREFETCH_AHEAD];
+                    if !buf.visited.contains(&ahead_id) {
+                        dc.prefetch(ahead_id);
+                    }
                 }
 
                 let dist = dc.distance(query, neighbor_id)?;
@@ -351,52 +387,23 @@ fn search_layer_dc<N: NodeGraph>(
 /// Greedy descent: find the single closest node at a given layer.
 ///
 /// Shared by both search and insert paths.
+/// Delegates to `greedy_closest_dc` via `StoreDc` adapter.
 pub(crate) fn greedy_closest<D: DistanceMetric, N: NodeGraph>(
     nodes: &N,
     store: &dyn VectorStore,
     distance: &D,
     query: &[f32],
-    mut cur_id: PointId,
-    mut cur_dist: f32,
+    cur_id: PointId,
+    cur_dist: f32,
     layer: LayerId,
 ) -> v_hnsw_core::Result<(PointId, f32)> {
-    loop {
-        let mut changed = false;
-        let neighbors = match nodes.neighbors(cur_id, layer) {
-            Some(n) => n,
-            None => break,
-        };
-
-        for &neighbor_id in neighbors {
-            if nodes.is_deleted(neighbor_id) {
-                continue;
-            }
-            let vec = store.get(neighbor_id)?;
-            let dist = distance.distance(query, vec);
-            if dist < cur_dist {
-                cur_dist = dist;
-                cur_id = neighbor_id;
-                changed = true;
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
-
-    Ok((cur_id, cur_dist))
+    let dc = StoreDc { store, metric: distance };
+    greedy_closest_dc(nodes, &dc, query, cur_id, cur_dist, layer)
 }
 
 /// Search within a single layer using beam search.
 ///
-/// Uses a min-heap for candidates (to explore closest first) and a max-heap
-/// for results (to efficiently evict the farthest when full).
-///
-/// Applies software prefetch for the next neighbor's vector while computing
-/// distance for the current one.
-///
-/// Reuses thread-local buffers to avoid per-query HashSet/BinaryHeap allocations.
+/// Delegates to `search_layer_dc` via `StoreDc` adapter (with prefetch support).
 pub(crate) fn search_layer<D: DistanceMetric, N: NodeGraph>(
     nodes: &N,
     store: &dyn VectorStore,
@@ -406,88 +413,6 @@ pub(crate) fn search_layer<D: DistanceMetric, N: NodeGraph>(
     ef: usize,
     layer: LayerId,
 ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-    SEARCH_BUF.with_borrow_mut(|buf| {
-        buf.clear();
-
-        // Initialize with entry points
-        for &(id, dist) in entry_points {
-            if buf.visited.insert(id) {
-                buf.candidates.push(Reverse(HeapEntry { id, dist }));
-                // Only add non-deleted nodes to results
-                if !nodes.is_deleted(id) {
-                    buf.results.push(HeapEntry { id, dist });
-                }
-            }
-        }
-
-        while let Some(Reverse(closest)) = buf.candidates.pop() {
-            // If the closest candidate is farther than the worst result and we have
-            // enough results, we can stop.
-            if let Some(worst) = buf.results.peek()
-                && closest.dist > worst.dist
-                && buf.results.len() >= ef
-            {
-                break;
-            }
-
-            // Get neighbor list for this candidate at the given layer
-            let neighbor_ids = match nodes.neighbors(closest.id, layer) {
-                Some(n) => n,
-                None => continue,
-            };
-
-            // Traverse neighbors with software prefetch (lookahead = 4)
-            const PREFETCH_AHEAD: usize = 4;
-            for (i, &neighbor_id) in neighbor_ids.iter().enumerate() {
-                if !buf.visited.insert(neighbor_id) {
-                    continue;
-                }
-
-                // Check if this node is deleted
-                if nodes.is_deleted(neighbor_id) {
-                    continue;
-                }
-
-                // Prefetch ahead to hide memory latency (~60ns L3 miss vs ~20ns distance)
-                if i + PREFETCH_AHEAD < neighbor_ids.len() {
-                    let ahead_id = neighbor_ids[i + PREFETCH_AHEAD];
-                    if !buf.visited.contains(&ahead_id)
-                        && let Ok(ahead_vec) = store.get(ahead_id) {
-                            prefetch_vector(ahead_vec);
-                        }
-                }
-
-                let vec = store.get(neighbor_id)?;
-                let dist = distance.distance(query, vec);
-
-                // Check if this neighbor should be added
-                let should_add = if buf.results.len() < ef {
-                    true
-                } else if let Some(worst) = buf.results.peek() {
-                    dist < worst.dist
-                } else {
-                    true
-                };
-
-                if should_add {
-                    buf.candidates.push(Reverse(HeapEntry {
-                        id: neighbor_id,
-                        dist,
-                    }));
-                    buf.results.push(HeapEntry {
-                        id: neighbor_id,
-                        dist,
-                    });
-                    if buf.results.len() > ef {
-                        buf.results.pop(); // Remove the farthest
-                    }
-                }
-            }
-        }
-
-        // Collect results (drain to keep capacity for next search)
-        let result_vec: Vec<(PointId, f32)> =
-            buf.results.drain().map(|e| (e.id, e.dist)).collect();
-        Ok(result_vec)
-    })
+    let dc = StoreDc { store, metric: distance };
+    search_layer_dc(nodes, &dc, query, entry_points, ef, layer)
 }

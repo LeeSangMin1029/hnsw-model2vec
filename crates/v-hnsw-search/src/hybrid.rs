@@ -70,7 +70,7 @@ where
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         let dense = self.dense_index.search(query_vector, self.config.dense_limit, self.config.ef_search)?;
         let sparse = self.sparse_index.search(query_text, self.config.sparse_limit);
-        let all_sparse = enrich_sparse(&self.sparse_index, query_text, &dense, sparse);
+        let all_sparse = enrich_sparse(&dense, sparse, |ids| self.sparse_index.score_documents(query_text, ids));
         Ok(self.fusion.fuse(&dense, &all_sparse, k))
     }
 
@@ -84,7 +84,7 @@ where
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         let dense = self.dense_index.search_ext(store, query_vector, self.config.dense_limit, self.config.ef_search)?;
         let sparse = self.sparse_index.search(query_text, self.config.sparse_limit);
-        let all_sparse = enrich_sparse(&self.sparse_index, query_text, &dense, sparse);
+        let all_sparse = enrich_sparse(&dense, sparse, |ids| self.sparse_index.score_documents(query_text, ids));
         Ok(self.fusion.fuse(&dense, &all_sparse, k))
     }
 
@@ -103,11 +103,12 @@ where
 }
 
 /// Enrich BM25 results with scores for dense candidates not in BM25 top-k.
-fn enrich_sparse<T: Tokenizer>(
-    sparse_index: &Bm25Index<T>,
-    query_text: &str,
+///
+/// `score_fn` receives the missing doc IDs and returns their BM25 scores.
+pub fn enrich_sparse(
     dense_results: &[(PointId, f32)],
     mut sparse_results: Vec<(PointId, f32)>,
+    score_fn: impl FnOnce(&[PointId]) -> Vec<(PointId, f32)>,
 ) -> Vec<(PointId, f32)> {
     if dense_results.is_empty() {
         return sparse_results;
@@ -121,7 +122,7 @@ fn enrich_sparse<T: Tokenizer>(
         .collect();
 
     if !missing.is_empty() {
-        let extra = sparse_index.score_documents(query_text, &missing);
+        let extra = score_fn(&missing);
         sparse_results.extend(extra);
     }
 

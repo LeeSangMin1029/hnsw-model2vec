@@ -44,30 +44,10 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     unsafe {
-        let len = a.len();
-        let chunks = len / 8;
-        let remainder = len % 8;
-
-        let mut sum = _mm256_setzero_ps();
-
-        let a_ptr = a.as_ptr();
-        let b_ptr = b.as_ptr();
-
-        for i in 0..chunks {
-            let offset = i * 8;
-            let va = _mm256_loadu_ps(a_ptr.add(offset));
-            let vb = _mm256_loadu_ps(b_ptr.add(offset));
-            sum = _mm256_fmadd_ps(va, vb, sum);
-        }
-
-        let mut result = hsum_avx2(sum);
-
-        let tail_start = chunks * 8;
-        for i in 0..remainder {
-            result += a[tail_start + i] * b[tail_start + i];
-        }
-
-        result
+        super::avx2_reduce!(a, b,
+            |va, vb, sum| _mm256_fmadd_ps(va, vb, sum),
+            |ai, bi| ai * bi
+        )
     }
 }
 

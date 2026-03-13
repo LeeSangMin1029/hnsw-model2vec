@@ -9,9 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use v_hnsw_core::{DistanceMetric, PointId, VectorStore};
-use v_hnsw_graph::{
-    DistanceComputer, HnswGraph, HnswSnapshot, NormalizedCosineDistance,
-};
+use v_hnsw_graph::{HnswGraph, HnswSnapshot, NormalizedCosineDistance};
 use v_hnsw_storage::sq8::Sq8Params;
 use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
@@ -177,6 +175,35 @@ fn brute_force_topk(
 }
 
 // ---------------------------------------------------------------------------
+// Common benchmark harness
+// ---------------------------------------------------------------------------
+
+/// Run a search function over queries and measure recall/QPS/latency.
+fn bench_search<F>(
+    search_fn: F,
+    queries: &[Vec<f32>],
+    ground_truth: &[Vec<PointId>],
+) -> (f64, f64, f64)
+where
+    F: Fn(&[f32]) -> Option<Vec<(PointId, f32)>>,
+{
+    let start = Instant::now();
+    let mut total_recall = 0.0_f64;
+
+    for (i, query) in queries.iter().enumerate() {
+        if let Some(results) = search_fn(query) {
+            total_recall += recall_at_k(&results, &ground_truth[i]);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let avg_recall = total_recall / queries.len() as f64;
+    let qps = queries.len() as f64 / elapsed.as_secs_f64();
+    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
+    (avg_recall, qps, latency)
+}
+
+// ---------------------------------------------------------------------------
 // f32 benchmarks
 // ---------------------------------------------------------------------------
 
@@ -188,20 +215,11 @@ fn bench_f32_snapshot(
     k: usize,
     ef: usize,
 ) -> (f64, f64, f64) {
-    let start = Instant::now();
-    let mut total_recall = 0.0_f64;
-
-    for (i, query) in queries.iter().enumerate() {
-        if let Ok(results) = snap.search_ext(&NormalizedCosineDistance, store, query, k, ef) {
-            total_recall += recall_at_k(&results, &ground_truth[i]);
-        }
-    }
-
-    let elapsed = start.elapsed();
-    let avg_recall = total_recall / queries.len() as f64;
-    let qps = queries.len() as f64 / elapsed.as_secs_f64();
-    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
-    (avg_recall, qps, latency)
+    bench_search(
+        |q| snap.search_ext(&NormalizedCosineDistance, store, q, k, ef).ok(),
+        queries,
+        ground_truth,
+    )
 }
 
 fn bench_f32_heap(
@@ -212,50 +230,18 @@ fn bench_f32_heap(
     k: usize,
     ef: usize,
 ) -> (f64, f64, f64) {
-    let start = Instant::now();
-    let mut total_recall = 0.0_f64;
-
-    for (i, query) in queries.iter().enumerate() {
-        if let Ok(results) = hnsw.search_ext(store, query, k, ef) {
-            total_recall += recall_at_k(&results, &ground_truth[i]);
-        }
-    }
-
-    let elapsed = start.elapsed();
-    let avg_recall = total_recall / queries.len() as f64;
-    let qps = queries.len() as f64 / elapsed.as_secs_f64();
-    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
-    (avg_recall, qps, latency)
+    bench_search(
+        |q| hnsw.search_ext(store, q, k, ef).ok(),
+        queries,
+        ground_truth,
+    )
 }
 
 // ---------------------------------------------------------------------------
 // SQ8 benchmarks
 // ---------------------------------------------------------------------------
 
-/// SQ8 distance computer for approximate traversal.
-struct Sq8Dc<'a> {
-    params: &'a Sq8Params,
-    store: &'a Sq8VectorStore,
-}
-
-impl DistanceComputer for Sq8Dc<'_> {
-    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let codes = self.store.get(id)?;
-        Ok(self.params.asymmetric_distance(query, codes))
-    }
-}
-
-/// f32 distance computer for exact rescore.
-struct F32Dc<'a> {
-    store: &'a dyn VectorStore,
-}
-
-impl DistanceComputer for F32Dc<'_> {
-    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let vec = self.store.get(id)?;
-        Ok(NormalizedCosineDistance.distance(query, vec))
-    }
-}
+use super::common::{F32Dc, Sq8Dc};
 
 #[expect(clippy::too_many_arguments)]
 fn bench_sq8_snapshot(
@@ -270,21 +256,11 @@ fn bench_sq8_snapshot(
 ) -> (f64, f64, f64) {
     let approx = Sq8Dc { params, store: sq8_store };
     let exact = F32Dc { store: f32_store };
-
-    let start = Instant::now();
-    let mut total_recall = 0.0_f64;
-
-    for (i, query) in queries.iter().enumerate() {
-        if let Ok(results) = snap.search_two_stage(&approx, &exact, query, k, ef) {
-            total_recall += recall_at_k(&results, &ground_truth[i]);
-        }
-    }
-
-    let elapsed = start.elapsed();
-    let avg_recall = total_recall / queries.len() as f64;
-    let qps = queries.len() as f64 / elapsed.as_secs_f64();
-    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
-    (avg_recall, qps, latency)
+    bench_search(
+        |q| snap.search_two_stage(&approx, &exact, q, k, ef).ok(),
+        queries,
+        ground_truth,
+    )
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -300,21 +276,11 @@ fn bench_sq8_heap(
 ) -> (f64, f64, f64) {
     let approx = Sq8Dc { params, store: sq8_store };
     let exact = F32Dc { store: f32_store };
-
-    let start = Instant::now();
-    let mut total_recall = 0.0_f64;
-
-    for (i, query) in queries.iter().enumerate() {
-        if let Ok(results) = hnsw.search_two_stage(&approx, &exact, query, k, ef) {
-            total_recall += recall_at_k(&results, &ground_truth[i]);
-        }
-    }
-
-    let elapsed = start.elapsed();
-    let avg_recall = total_recall / queries.len() as f64;
-    let qps = queries.len() as f64 / elapsed.as_secs_f64();
-    let latency = elapsed.as_micros() as f64 / queries.len() as f64;
-    (avg_recall, qps, latency)
+    bench_search(
+        |q| hnsw.search_two_stage(&approx, &exact, q, k, ef).ok(),
+        queries,
+        ground_truth,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -4,9 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use v_hnsw_core::PayloadStore;
+use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_storage::StorageEngine;
 
+use crate::mir;
 use crate::parse::{self, CodeChunk};
 
 /// Load all code chunks from the database, using a bincode cache.
@@ -52,8 +53,13 @@ pub fn load_chunks_from_db(path: &Path) -> Result<Vec<CodeChunk>> {
     let mut chunks = Vec::new();
     for id in ids {
         if let Ok(Some(text)) = payload_store.get_text(id)
-            && let Some(chunk) = parse::parse_chunk(&text)
+            && let Some(mut chunk) = parse::parse_chunk(&text)
         {
+            if let Ok(Some(payload)) = payload_store.get_payload(id) {
+                if let Some(PayloadValue::StringList(imports)) = payload.custom.get("imports") {
+                    chunk.imports.clone_from(imports);
+                }
+            }
             chunks.push(chunk);
         }
     }
@@ -65,13 +71,56 @@ fn cache_path(db: &Path) -> PathBuf {
 }
 
 /// Load graph from cache or build from chunks.
+///
+/// If a Cargo.toml is found near the DB (Rust project), automatically
+/// collects MIR via `cargo rustc --emit=mir` for 100% accurate call resolution.
+/// Falls back to tree-sitter heuristics for non-Rust projects or on MIR failure.
 pub fn load_or_build_graph(db: &Path) -> Result<crate::graph::CallGraph> {
     if let Some(g) = crate::graph::CallGraph::load(db) {
         return Ok(g);
     }
 
     let chunks = load_chunks(db)?;
-    let g = crate::graph::CallGraph::build(&chunks);
+
+    // Try MIR-based graph if this is a Rust project.
+    let cargo_root = find_cargo_root(db);
+    let g = if let Some(project_root) = cargo_root {
+        match mir::collect_workspace_mir(&project_root) {
+            Ok(mir_fns) => {
+                let mir_map = mir::build_mir_call_map(&mir_fns);
+                if mir_map.is_empty() {
+                    crate::graph::CallGraph::build(&chunks)
+                } else {
+                    crate::graph::CallGraph::build_with_mir(&chunks, &mir_map)
+                }
+            }
+            Err(_) => {
+                crate::graph::CallGraph::build(&chunks)
+            }
+        }
+    } else {
+        crate::graph::CallGraph::build(&chunks)
+    };
+
     let _ = g.save(db);
     Ok(g)
+}
+
+/// Walk up from the DB path to find a Cargo.toml (Rust project root).
+fn find_cargo_root(db: &Path) -> Option<PathBuf> {
+    // Canonicalize to handle relative paths like `.v-hnsw-code.db`.
+    let abs = db.canonicalize().ok()?;
+    let start = if abs.is_dir() {
+        abs
+    } else {
+        abs.parent()?.to_path_buf()
+    };
+    let mut dir = start.as_path();
+    for _ in 0..10 {
+        if dir.join("Cargo.toml").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
