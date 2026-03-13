@@ -22,23 +22,23 @@ use anyhow::Result;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_stats, run_symbols, run_def, run_refs, run_gather, run_impact, run_trace};
+pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 
-pub use v_code_intel::bfs::{BfsEntryExt, HasIdx, build_bfs_json, print_bfs_grouped};
+pub use v_code_intel::bfs::build_bfs_json;
 #[cfg(test)]
 pub use v_code_intel::context;
+#[cfg(test)]
 pub use v_code_intel::gather;
 pub use v_code_intel::graph;
-pub use v_code_intel::helpers::{format_lines_opt, relative_path, grouped_json, grouped_json_refs};
-#[cfg(test)]
-pub use v_code_intel::helpers::format_lines_str_opt;
+pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path, grouped_json};
 pub use v_code_intel::impact;
 pub use v_code_intel::loader::{load_chunks, load_or_build_graph};
 pub use v_code_intel::parse::CodeChunk;
 #[cfg(test)]
 pub use v_code_intel::parse;
+#[cfg(test)]
 pub use v_code_intel::reason;
 pub use v_code_intel::stats::{build_stats, stats_to_json};
 pub use v_code_intel::trace;
@@ -52,35 +52,7 @@ pub enum OutputFormat {
     Json,
 }
 
-// ── Shared utilities (used by commands.rs and json_api.rs) ───────────────
-
-/// Print reasoning annotations for entries that have reason data.
-pub(crate) fn print_detail_annotations(
-    db: &Path,
-    graph: &graph::CallGraph,
-    entries: &[impl HasIdx],
-) {
-    use std::collections::HashSet;
-
-    let mut found = false;
-    let mut seen = HashSet::new();
-    for e in entries {
-        let name = &graph.names[e.idx() as usize];
-        if !seen.insert(name.as_str()) {
-            continue;
-        }
-        if let Ok(Some(entry)) = reason::load_reason(db, name) {
-            if !found {
-                println!("  [reasoning]");
-                found = true;
-            }
-            println!("    {name}: {}", reason::one_line_summary(&entry));
-        }
-    }
-    if found {
-        println!();
-    }
-}
+// ── Shared utilities (used by commands.rs) ────────────────────────────────
 
 fn query_cache_dir(db: &Path) -> PathBuf {
     db.join("cache")
@@ -136,29 +108,6 @@ pub(crate) fn print_grouped(chunks: &[&CodeChunk], compact: bool) {
         }
         if !compact { println!(); }
     }
-}
-
-fn find_refs<'a>(chunks: &'a [CodeChunk], name: &str) -> Vec<(&'a CodeChunk, Vec<&'static str>)> {
-    let name_lower = name.to_lowercase();
-    chunks
-        .iter()
-        .filter_map(|c| {
-            let mut via = Vec::new();
-            if c.calls.iter().any(|s| s.to_lowercase().contains(&name_lower)) {
-                via.push("calls");
-            }
-            if c.types.iter().any(|s| s.to_lowercase().contains(&name_lower)) {
-                via.push("types");
-            }
-            if c.signature.as_ref().is_some_and(|s| s.to_lowercase().contains(&name_lower)) {
-                via.push("signature");
-            }
-            if c.name.to_lowercase().contains(&name_lower) {
-                via.push("name");
-            }
-            if via.is_empty() { None } else { Some((c, via)) }
-        })
-        .collect()
 }
 
 fn parent_dir(path: &str) -> String {

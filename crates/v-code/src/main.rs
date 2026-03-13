@@ -39,19 +39,20 @@ fn run() -> anyhow::Result<()> {
         Commands::Symbols { db, name, kind, format, include_tests, limit, compact } => {
             intel::run_symbols(db, name, kind, format, include_tests, limit, compact || env_compact())
         }
-        Commands::Def { db, name, format, compact } => intel::run_def(db, name, format, compact || env_compact()),
-        Commands::Refs { db, name, format, compact } => intel::run_refs(db, name, format, compact || env_compact()),
+        Commands::Context { db, symbol, depth, format } => {
+            intel::run_context(db, symbol, depth, format)
+        }
         Commands::Deps { db, file, format, depth } => {
             intel::deps::run_deps(db, file, format, depth)
         }
-        Commands::Impact { db, symbol, depth, format, include_tests, detail } => {
-            intel::run_impact(db, symbol, depth, format, include_tests, detail)
+        Commands::Blast { db, symbol, depth, format, include_tests } => {
+            intel::run_blast(db, symbol, depth, format, include_tests)
+        }
+        Commands::Jump { db, symbol, depth, format } => {
+            intel::run_jump(db, symbol, depth, format)
         }
         Commands::Trace { db, from, to, format } => {
             intel::run_trace(db, from, to, format)
-        }
-        Commands::Gather { db, symbol, depth, k, format, include_tests, detail } => {
-            intel::run_gather(db, symbol, depth, k, format, include_tests, detail)
         }
         Commands::Detail {
             db, symbol, add, decision, why, constraint, rejected,

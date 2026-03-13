@@ -41,33 +41,19 @@ pub enum Commands {
         #[arg(long)]
         compact: bool,
     },
-    /// Find symbol definition location.
-    #[command(visible_alias = "d")]
-    Def {
+    /// Unified context: definition + callers + callees + types + tests.
+    #[command(visible_alias = "ctx")]
+    Context {
         /// Path to the database directory.
         db: PathBuf,
-        /// Symbol name to find.
-        name: String,
+        /// Symbol name to look up.
+        symbol: String,
+        /// Max BFS depth (default: 1).
+        #[arg(long, default_value = "1")]
+        depth: u32,
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
-        /// Compact output: no signatures.
-        #[arg(long)]
-        compact: bool,
-    },
-    /// Find all references to a symbol.
-    #[command(visible_alias = "r")]
-    Refs {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Symbol name to find references to.
-        name: String,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
-        /// Compact output: no via details.
-        #[arg(long)]
-        compact: bool,
     },
     /// Show file-level dependency graph from code chunks.
     Deps {
@@ -82,9 +68,9 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         depth: usize,
     },
-    /// Show impact of changing a symbol (reverse BFS: callers).
-    #[command(visible_alias = "imp")]
-    Impact {
+    /// Show blast radius of changing a symbol (transitive callers + summary).
+    #[command(visible_alias = "bl")]
+    Blast {
         /// Path to the database directory.
         db: PathBuf,
         /// Symbol name to analyse.
@@ -98,9 +84,6 @@ pub enum Commands {
         /// Include test symbols in results (hidden by default).
         #[arg(long)]
         include_tests: bool,
-        /// Show reasoning details for each symbol in results.
-        #[arg(long)]
-        detail: bool,
     },
     /// Find shortest call path between two symbols.
     #[command(visible_alias = "tr")]
@@ -114,29 +97,6 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
-    },
-    /// Gather context + impact for full symbol understanding.
-    #[command(visible_alias = "g")]
-    Gather {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Symbol name to gather around.
-        symbol: String,
-        /// Max BFS depth (default: 2).
-        #[arg(long, default_value = "2")]
-        depth: u32,
-        /// Max results to show (default: 15).
-        #[arg(short, long, default_value = "15")]
-        k: usize,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
-        /// Include test symbols in results (hidden by default).
-        #[arg(long)]
-        include_tests: bool,
-        /// Show reasoning details for each symbol in results.
-        #[arg(long)]
-        detail: bool,
     },
     /// View or manage reasoning (design decisions, history) for a symbol.
     #[command(visible_alias = "dt")]
@@ -196,6 +156,20 @@ pub enum Commands {
         /// Related symbol for cross-referencing.
         #[arg(long)]
         relate: Option<String>,
+    },
+    /// Show execution flow tree (DFS callee traversal).
+    #[command(visible_alias = "j")]
+    Jump {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to trace execution flow for.
+        symbol: String,
+        /// Max DFS depth (default: 2).
+        #[arg(long, default_value = "2")]
+        depth: u32,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
     },
     /// Find duplicate code (token Jaccard default, --ast structural).
     #[command(visible_alias = "dup")]

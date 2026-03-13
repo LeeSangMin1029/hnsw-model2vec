@@ -27,13 +27,70 @@ pub fn format_lines_opt(lines: Option<(usize, usize)>) -> String {
 /// Looks for `crates/` as the project-relative anchor. Falls back to the
 /// original path when no anchor is found.
 pub fn relative_path(path: &str) -> &str {
-    // Normalise backslashes for matching.
     if let Some(idx) = path.find("crates/") {
         &path[idx..]
     } else if let Some(idx) = path.find("src/") {
         &path[idx..]
     } else {
         path
+    }
+}
+
+/// Build a multi-base alias map from a set of paths.
+///
+/// Groups paths by their directory prefix, assigns short aliases (`[A]`, `[B]`, …)
+/// to directories containing 2+ files, and returns (alias_map, legend).
+///
+/// ```text
+/// [A] = crates/v-hnsw-cli/src/commands/
+/// [B] = crates/v-hnsw-storage/src/
+/// ```
+pub fn build_path_aliases(paths: &[&str]) -> (std::collections::BTreeMap<String, String>, Vec<(String, String)>) {
+    use std::collections::BTreeMap;
+
+    // Count files per directory.
+    let mut dir_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for p in paths {
+        let dir = match p.rfind('/') {
+            Some(i) => &p[..=i],
+            None => "",
+        };
+        *dir_counts.entry(dir).or_default() += 1;
+    }
+
+    // Assign aliases to directories with 1+ files (all dirs get aliases for consistency).
+    let mut alias_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut legend: Vec<(String, String)> = Vec::new();
+    let mut label = b'A';
+
+    for (&dir, &_count) in &dir_counts {
+        if dir.is_empty() {
+            continue;
+        }
+        let alias = format!("[{}]", label as char);
+        alias_map.insert(dir.to_owned(), alias.clone());
+        legend.push((alias, dir.to_owned()));
+        label += 1;
+        if label > b'Z' {
+            break;
+        }
+    }
+
+    (alias_map, legend)
+}
+
+/// Shorten a path using the alias map: replace the directory with its alias.
+pub fn apply_alias(path: &str, alias_map: &std::collections::BTreeMap<String, String>) -> String {
+    // Find the longest matching directory prefix.
+    let dir = match path.rfind('/') {
+        Some(i) => &path[..=i],
+        None => return path.to_owned(),
+    };
+    if let Some(alias) = alias_map.get(dir) {
+        let file = &path[dir.len()..];
+        format!("{alias}{file}")
+    } else {
+        path.to_owned()
     }
 }
 

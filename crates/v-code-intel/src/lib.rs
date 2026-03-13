@@ -7,13 +7,16 @@
 //! the pure analysis logic.
 
 pub mod bfs;
+pub mod blast;
 pub mod clones;
 pub mod context;
+pub mod context_cmd;
 pub mod deps;
 pub mod gather;
 pub mod graph;
 pub mod helpers;
 pub mod impact;
+pub mod jump;
 pub mod loader;
 pub mod lsp;
 pub mod parse;
