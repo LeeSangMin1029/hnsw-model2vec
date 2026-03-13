@@ -303,15 +303,16 @@ fn truncate_str(s: &str, max_tokens: usize, median_len: usize) -> &str {
 fn load_optional_f32_tensor(safet: &SafeTensors<'_>, name: &str) -> Option<Vec<f32>> {
     let t = safet.tensor(name).ok()?;
     let raw = t.data();
+    // chunks_exact guarantees correct slice length, so try_into never fails
     let floats = match t.dtype() {
         safetensors::Dtype::F64 => raw.chunks_exact(8)
-            .map(|b| f64::from_le_bytes(b.try_into().expect("8 bytes")) as f32)
+            .filter_map(|b| b.try_into().ok().map(|a| f64::from_le_bytes(a) as f32))
             .collect(),
         safetensors::Dtype::F32 => raw.chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().expect("4 bytes")))
+            .filter_map(|b| b.try_into().ok().map(f32::from_le_bytes))
             .collect(),
         safetensors::Dtype::F16 => raw.chunks_exact(2)
-            .map(|b| f16::from_le_bytes(b.try_into().expect("2 bytes")).to_f32())
+            .filter_map(|b| b.try_into().ok().map(|a| f16::from_le_bytes(a).to_f32()))
             .collect(),
         _ => return None,
     };
@@ -323,7 +324,7 @@ fn load_optional_mapping(safet: &SafeTensors<'_>) -> Option<Vec<usize>> {
     let t = safet.tensor("mapping").ok()?;
     let raw = t.data();
     let mapping = raw.chunks_exact(4)
-        .map(|b| i32::from_le_bytes(b.try_into().expect("4 bytes")) as usize)
+        .filter_map(|b| b.try_into().ok().map(|a| i32::from_le_bytes(a) as usize))
         .collect();
     Some(mapping)
 }
@@ -351,5 +352,7 @@ fn resolve_model_path(model_name: &str) -> Result<PathBuf, EmbedError> {
         .map_err(|e| EmbedError::Download(format!("config.json: {e}")))?;
 
     // Return the directory containing the downloaded files
-    Ok(mdl.parent().expect("safetensors has parent dir").to_path_buf())
+    mdl.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| EmbedError::Download("safetensors file has no parent directory".into()))
 }

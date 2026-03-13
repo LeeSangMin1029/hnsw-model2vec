@@ -59,6 +59,9 @@ impl CrossEncoderReranker {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
 
+        // SAFETY: candle requires unsafe for mmap — the safetensors file is read-only
+        // and its lifetime is tied to VarBuilder (kept alive by BertModel).
+        #[expect(unsafe_code, reason = "candle mmap API requires unsafe")]
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
                 .context("Failed to load model weights")?

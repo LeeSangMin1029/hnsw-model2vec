@@ -190,14 +190,12 @@ impl LspCallResolver {
                 if let Some((line, col)) =
                     find_call_position_in_chunk(chunk, call, file_lines.map(Vec::as_slice))
                     && let Ok(Some(loc)) = self.definition(&fpath, line, col)
-                {
-                    if let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
+                    && let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
                         call_map
                             .entry(caller_name.clone())
                             .or_default()
                             .push(callee);
                     }
-                }
             }
 
             // Deduplicate callees
@@ -360,14 +358,13 @@ fn has_python_files(root: &Path) -> bool {
     }
     // Fall back to scanning for .py files
     for dir in [root.to_path_buf(), root.join("src"), root.join("lib"), root.join("app")] {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            if entries
+        if let Ok(entries) = std::fs::read_dir(dir)
+            && entries
                 .flatten()
                 .any(|e| e.path().extension().is_some_and(|ext| ext == "py"))
             {
                 return true;
             }
-        }
     }
     false
 }
