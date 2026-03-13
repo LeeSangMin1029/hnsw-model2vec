@@ -352,29 +352,20 @@ fn detect_lsp_command(root: &Path) -> Option<Vec<String>> {
 }
 
 fn has_python_files(root: &Path) -> bool {
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            if entry
-                .path()
-                .extension()
-                .is_some_and(|e| e == "py")
-            {
-                return true;
-            }
+    // Check project markers first (fast)
+    for marker in ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"] {
+        if root.join(marker).exists() {
+            return true;
         }
     }
-    // Check common subdirs
-    for subdir in ["src", "lib", "app"] {
-        let d = root.join(subdir);
-        if let Ok(entries) = std::fs::read_dir(d) {
-            for entry in entries.flatten() {
-                if entry
-                    .path()
-                    .extension()
-                    .is_some_and(|e| e == "py")
-                {
-                    return true;
-                }
+    // Fall back to scanning for .py files
+    for dir in [root.to_path_buf(), root.join("src"), root.join("lib"), root.join("app")] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            if entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "py"))
+            {
+                return true;
             }
         }
     }
