@@ -14,6 +14,7 @@ bincode.workspace = true
 bytemuck.workspace = true
 memmap2.workspace = true
 fst = "0.4"
+rustc-hash.workspace = true
 lindera = { version = "2.1", optional = true }
 unicode-normalization = { workspace = true, optional = true }
 

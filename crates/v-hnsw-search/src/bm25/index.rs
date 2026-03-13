@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use v_hnsw_core::{PointId, VhnswError};
 
@@ -116,7 +117,7 @@ pub struct Bm25Index<T: Tokenizer> {
     /// Cached maximum document ID (for Vec accumulator sizing).
     max_doc_id: u64,
     /// FieldNorm codes: doc_id → quantized length byte (lazy-built).
-    fieldnorm_codes: HashMap<PointId, u8>,
+    fieldnorm_codes: FxHashMap<PointId, u8>,
     /// FieldNorm LUT: 256-entry cache for length normalization (lazy-built).
     fieldnorm_lut: Option<super::fieldnorm::FieldNormLut>,
 }
@@ -138,7 +139,7 @@ impl<T: Tokenizer> Bm25Index<T> {
             total_docs: 0,
             params: Bm25Params::new(k1, b),
             max_doc_id: 0,
-            fieldnorm_codes: HashMap::new(),
+            fieldnorm_codes: FxHashMap::default(),
             fieldnorm_lut: None,
         }
     }
@@ -437,7 +438,7 @@ impl<T: Tokenizer> Bm25Index<T> {
         if let Some(dir) = path.as_ref().parent()
             && super::fst_storage::fst_exists(dir) {
                 let fst = super::fst_storage::load_fst::<T>(dir)?;
-                let fieldnorm_codes: HashMap<PointId, u8> = fst.doc_lengths
+                let fieldnorm_codes: FxHashMap<PointId, u8> = fst.doc_lengths
                     .iter()
                     .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
                     .collect();
@@ -484,7 +485,7 @@ impl<T: Tokenizer> Bm25Index<T> {
         let doc_lengths: HashMap<PointId, u32> = data.doc_lengths.into_iter().collect();
         let max_doc_id = doc_lengths.keys().max().copied().unwrap_or(0);
 
-        let fieldnorm_codes: HashMap<PointId, u8> = doc_lengths
+        let fieldnorm_codes: FxHashMap<PointId, u8> = doc_lengths
             .iter()
             .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
             .collect();

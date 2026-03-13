@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use rustc_hash::FxHashMap;
+
 use v_hnsw_core::PointId;
 
 use super::fieldnorm::FieldNormLut;
@@ -60,7 +62,7 @@ pub fn maxscore_search(
     doc_lengths: &HashMap<PointId, u32>,
     avg_doc_len: f32,
     fieldnorm_lut: Option<&FieldNormLut>,
-    fieldnorm_codes: &HashMap<PointId, u8>,
+    fieldnorm_codes: &FxHashMap<PointId, u8>,
 ) -> Vec<(PointId, f32)> {
     if terms.is_empty() || k == 0 {
         return Vec::new();

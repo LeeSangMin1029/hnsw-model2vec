@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+use rustc_hash::FxHashMap;
+
 use bytemuck::{Pod, Zeroable};
 use v_hnsw_core::{PointId, VhnswError, storage_err, read_le_u64};
 
@@ -124,7 +126,7 @@ pub struct Bm25Snapshot {
     posting_offsets_offset: usize,
     posting_data_offset: usize,
     params: Bm25Params,
-    fieldnorm_codes: HashMap<PointId, u8>,
+    fieldnorm_codes: FxHashMap<PointId, u8>,
     fieldnorm_lut: FieldNormLut,
 }
 
@@ -171,7 +173,7 @@ impl Bm25Snapshot {
         let dl_end = doc_lengths_offset + num_doc_entries * 16;
         let doc_entries: &[DocLengthEntry] =
             bytemuck::try_cast_slice(&mmap[doc_lengths_offset..dl_end]).unwrap_or(&[]);
-        let fieldnorm_codes: HashMap<PointId, u8> = doc_entries
+        let fieldnorm_codes: FxHashMap<PointId, u8> = doc_entries
             .iter()
             .map(|e| (e.doc_id, super::fieldnorm::encode(e.length as u32)))
             .collect();

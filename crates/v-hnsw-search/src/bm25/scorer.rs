@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use rustc_hash::FxHashMap;
+
 use serde::{Deserialize, Serialize};
 use v_hnsw_core::PointId;
 
@@ -96,7 +98,7 @@ pub(crate) struct ScoringCtx<'a> {
     pub params: &'a Bm25Params,
     pub avg_doc_len: f32,
     pub fieldnorm_lut: Option<&'a FieldNormLut>,
-    pub fieldnorm_codes: &'a HashMap<PointId, u8>,
+    pub fieldnorm_codes: &'a FxHashMap<PointId, u8>,
     /// Fallback when `FieldNormLut` is not available.
     pub doc_lengths: Option<&'a HashMap<PointId, u32>>,
 }
@@ -156,7 +158,7 @@ pub(crate) fn accumulate_and_rank<P: PostingView>(
         results.truncate(limit);
         results
     } else {
-        let mut score_map: HashMap<PointId, f32> = HashMap::new();
+        let mut score_map: FxHashMap<PointId, f32> = FxHashMap::default();
         for &(postings, idf) in terms {
             for p in postings {
                 *score_map.entry(p.doc_id()).or_insert(0.0) +=

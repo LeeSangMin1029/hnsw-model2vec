@@ -3951,6 +3951,7 @@ dependencies = [
  "lindera",
  "memmap2",
  "proptest",
+ "rustc-hash",
  "serde",
  "serde_json",
  "unicode-normalization",
