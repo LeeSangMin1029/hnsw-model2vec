@@ -11,7 +11,10 @@ use v_hnsw_core::{Payload, PayloadValue};
 use v_hnsw_embed::EmbeddingModel;
 use v_hnsw_storage::StorageEngine;
 
-use super::file_utils::generate_id;
+use std::path::Path;
+
+use super::file_index;
+use super::file_utils::{generate_id, get_file_mtime, normalize_source};
 
 /// A record for batch ingestion (shared by add and update commands).
 #[derive(Clone)]
@@ -262,5 +265,67 @@ pub fn code_chunk_to_record(
         chunk_total,
         source_modified_at: mtime,
         custom: chunk.to_custom_fields(called_by),
+    }
+}
+
+/// Chunk code files via tree-sitter and collect entries with file metadata.
+///
+/// Iterates over `code_files`, reads each file, chunks it, and populates
+/// `entries` and `file_metadata_map`. Skips files that cannot be read or
+/// have no supported language / empty chunks.
+///
+/// `is_interrupted` is polled before each file to support graceful shutdown.
+pub fn chunk_code_files(
+    code_files: &[impl AsRef<Path>],
+    is_interrupted: impl Fn() -> bool,
+    entries: &mut Vec<CodeChunkEntry>,
+    file_metadata_map: &mut HashMap<String, (u64, u64, Vec<u64>)>,
+) {
+    for code_path in code_files {
+        if is_interrupted() {
+            break;
+        }
+        let code_path = code_path.as_ref();
+
+        let source_code = match std::fs::read_to_string(code_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {e}", code_path.display());
+                continue;
+            }
+        };
+
+        let ext = code_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let chunks = match crate::chunk_code::chunk_for_language(ext, &source_code) {
+            Some(c) => c,
+            None => continue,
+        };
+        if chunks.is_empty() {
+            continue;
+        }
+
+        let source = normalize_source(code_path);
+        let file_path_str = code_path.to_string_lossy().to_string();
+        let mtime = get_file_mtime(code_path).unwrap_or(0);
+        let size = file_index::get_file_size(code_path).unwrap_or(0);
+        let mut chunk_ids = Vec::new();
+
+        let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
+        for chunk in chunks {
+            let id = generate_id(&source, chunk.chunk_index);
+            chunk_ids.push(id);
+            entries.push(CodeChunkEntry {
+                chunk,
+                source: source.clone(),
+                file_path_str: file_path_str.clone(),
+                mtime,
+                lang,
+            });
+        }
+
+        file_metadata_map.insert(source, (mtime, size, chunk_ids));
     }
 }

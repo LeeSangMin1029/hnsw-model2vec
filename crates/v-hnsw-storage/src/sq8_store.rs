@@ -119,12 +119,7 @@ impl Sq8VectorStore {
     /// Used during build to match the slot assignment of the main f32 store,
     /// so that `restore_id_map` works correctly after reopening.
     pub fn insert_at(&mut self, id: PointId, slot: u32, codes: &[u8]) -> Result<()> {
-        if codes.len() != self.dim {
-            return Err(VhnswError::DimensionMismatch {
-                expected: self.dim,
-                got: codes.len(),
-            });
-        }
+        v_hnsw_core::check_dimension(self.dim, codes.len())?;
 
         if slot >= self.capacity {
             self.grow(slot.saturating_mul(2).max(slot + 1))?;
@@ -144,12 +139,7 @@ impl Sq8VectorStore {
 
     /// Insert a quantized vector.
     pub fn insert(&mut self, id: PointId, codes: &[u8]) -> Result<()> {
-        if codes.len() != self.dim {
-            return Err(VhnswError::DimensionMismatch {
-                expected: self.dim,
-                got: codes.len(),
-            });
-        }
+        v_hnsw_core::check_dimension(self.dim, codes.len())?;
 
         if let Some(&slot) = self.id_to_slot.get(&id) {
             // Overwrite existing

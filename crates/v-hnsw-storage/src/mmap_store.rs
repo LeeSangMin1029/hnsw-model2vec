@@ -383,12 +383,7 @@ impl MmapVectorStore {
 
         // Insert each vector
         for &(id, vector) in batch {
-            if vector.len() != self.dim {
-                return Err(VhnswError::DimensionMismatch {
-                    expected: self.dim,
-                    got: vector.len(),
-                });
-            }
+            v_hnsw_core::check_dimension(self.dim, vector.len())?;
             if let Some(&existing_slot) = self.id_to_slot.get(&id) {
                 self.write_slot(existing_slot, vector)?;
             } else {
@@ -458,12 +453,7 @@ impl VectorStore for MmapVectorStore {
     }
 
     fn insert(&mut self, id: PointId, vector: &[f32]) -> Result<()> {
-        if vector.len() != self.dim {
-            return Err(VhnswError::DimensionMismatch {
-                expected: self.dim,
-                got: vector.len(),
-            });
-        }
+        v_hnsw_core::check_dimension(self.dim, vector.len())?;
 
         // If updating existing point, reuse its slot
         if let Some(&existing_slot) = self.id_to_slot.get(&id) {

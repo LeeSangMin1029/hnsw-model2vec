@@ -14,9 +14,7 @@ use v_code_chunk as chunk_code;
 use v_hnsw_cli::commands::common;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
-use v_hnsw_cli::commands::file_utils::{
-    generate_id, get_file_mtime, normalize_source, scan_files,
-};
+use v_hnsw_cli::commands::file_utils::scan_files;
 use v_hnsw_cli::commands::ingest::{
     CodeChunkEntry, IngestRecord, build_called_by_index, code_chunk_to_record,
     lookup_called_by,
@@ -82,53 +80,12 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // === Pass 1: Chunk all files ===
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
-
-    for code_path in &code_files {
-        if is_interrupted() {
-            break;
-        }
-
-        let source_code = match std::fs::read_to_string(code_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading {}: {e}", code_path.display());
-                continue;
-            }
-        };
-
-        let ext = code_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let chunks = match chunk_code::chunk_for_language(ext, &source_code) {
-            Some(c) => c,
-            None => continue,
-        };
-        if chunks.is_empty() {
-            continue;
-        }
-
-        let source = normalize_source(code_path);
-        let file_path_str = code_path.to_string_lossy().to_string();
-        let mtime = get_file_mtime(code_path).unwrap_or(0);
-        let size = file_index::get_file_size(code_path).unwrap_or(0);
-        let mut chunk_ids = Vec::new();
-
-        let lang = chunk_code::lang_for_extension(ext).unwrap_or("unknown");
-        for chunk in chunks {
-            let id = generate_id(&source, chunk.chunk_index);
-            chunk_ids.push(id);
-            entries.push(CodeChunkEntry {
-                chunk,
-                source: source.clone(),
-                file_path_str: file_path_str.clone(),
-                mtime,
-                lang,
-            });
-        }
-
-        file_metadata_map.insert(source, (mtime, size, chunk_ids));
-    }
+    v_hnsw_cli::commands::ingest::chunk_code_files(
+        &code_files,
+        is_interrupted,
+        &mut entries,
+        &mut file_metadata_map,
+    );
 
     // === Pass 2: Build called_by reverse index ===
     let reverse_index = build_called_by_index(&entries);

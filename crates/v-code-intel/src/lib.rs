@@ -14,6 +14,7 @@ pub mod gather;
 pub mod graph;
 pub mod helpers;
 pub mod impact;
+pub mod lang_ir;
 pub mod loader;
 pub mod mir;
 pub mod parse;

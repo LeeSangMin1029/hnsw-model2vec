@@ -9,7 +9,7 @@ mod tests;
 
 pub use error::VhnswError;
 pub use traits::{DistanceMetric, PayloadStore, VectorIndex, VectorStore};
-pub use types::{Dim, LayerId, Payload, PayloadValue, PointId};
+pub use types::{check_dimension, Dim, LayerId, Payload, PayloadValue, PointId};
 
 /// Convenience Result alias.
 pub type Result<T> = std::result::Result<T, VhnswError>;

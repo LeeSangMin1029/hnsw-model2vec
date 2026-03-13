@@ -3,9 +3,25 @@
 pub mod fvecs;
 pub mod jsonl;
 
+use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+
+/// Open a file or return a single-element error iterator.
+///
+/// Intended for [`VectorReader::records`] implementations that need to re-open
+/// the source file from the beginning.
+pub(crate) fn open_or_error_iter(
+    path: &Path,
+) -> std::result::Result<File, Box<dyn Iterator<Item = Result<InputRecord>>>> {
+    File::open(path).map_err(|e| {
+        Box::new(std::iter::once(Err(anyhow::anyhow!(
+            "cannot re-open {}: {e}",
+            path.display()
+        )))) as Box<dyn Iterator<Item = Result<InputRecord>>>
+    })
+}
 
 /// A single record produced by any reader.
 pub struct InputRecord {

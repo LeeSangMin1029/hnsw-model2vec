@@ -276,53 +276,12 @@ pub fn process_code_files(
     // === Pass 1: Chunk all files, collect CodeChunk + metadata ===
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
-
-    for code_path in code_files {
-        if is_interrupted() {
-            break;
-        }
-
-        let source_code = match std::fs::read_to_string(code_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading {}: {e}", code_path.display());
-                continue;
-            }
-        };
-
-        let ext = code_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let chunks = match crate::chunk_code::chunk_for_language(ext, &source_code) {
-            Some(c) => c,
-            None => continue,
-        };
-        if chunks.is_empty() {
-            continue;
-        }
-
-        let source = common::normalize_source(code_path);
-        let file_path_str = code_path.to_string_lossy().to_string();
-        let mtime = common::get_file_mtime(code_path).unwrap_or(0);
-        let size = file_index::get_file_size(code_path).unwrap_or(0);
-        let mut chunk_ids = Vec::new();
-
-        let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
-        for chunk in chunks {
-            let id = common::generate_id(&source, chunk.chunk_index);
-            chunk_ids.push(id);
-            entries.push(CodeChunkEntry {
-                chunk,
-                source: source.clone(),
-                file_path_str: file_path_str.clone(),
-                mtime,
-                lang,
-            });
-        }
-
-        file_metadata_map.insert(source, (mtime, size, chunk_ids));
-    }
+    crate::commands::ingest::chunk_code_files(
+        code_files,
+        is_interrupted,
+        &mut entries,
+        &mut file_metadata_map,
+    );
 
     // === Pass 2: Build called_by reverse index ===
     let reverse_index = build_called_by_index(&entries);

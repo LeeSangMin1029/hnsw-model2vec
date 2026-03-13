@@ -148,7 +148,7 @@ fn distance::L2Distance::compute(_1: &L2Distance, _2: &[f32]) -> f32 {
     }
 }
 
-// ── build_with_mir integration ──────────────────────────────────────
+// ── build_with_resolved_calls integration ──────────────────────────────────────
 
 fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
     CodeChunk {
@@ -164,7 +164,7 @@ fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
 }
 
 #[test]
-fn build_with_mir_resolves_calls() {
+fn build_with_resolved_calls_resolves_calls() {
     // tree-sitter chunks: A calls "self.run" which won't resolve without MIR.
     let chunks = vec![
         chunk("mod_a::Foo::process", "src/a.rs", &["self.run"]),
@@ -183,13 +183,13 @@ fn mod_a::Foo::process(_1: &Foo) -> () {
     let fns = parse_mir(mir_text, "test_crate", Path::new("."));
     let mir_map = build_mir_call_map(&fns);
 
-    let graph = CallGraph::build_with_mir(&chunks, &mir_map);
+    let graph = CallGraph::build_with_resolved_calls(&chunks, &mir_map);
     // Foo::process → Foo::run (index 2), NOT Bar::run (index 1).
     assert_eq!(graph.callees[0], vec![2], "MIR should resolve to Foo::run");
 }
 
 #[test]
-fn build_with_mir_no_fallback_for_rust_files() {
+fn build_with_resolved_calls_no_fallback_for_rust_files() {
     // Rust files with no MIR data should NOT fall back to tree-sitter.
     let chunks = vec![
         chunk("mod_a::Alpha", "src/a.rs", &["mod_b::Beta"]),
@@ -197,13 +197,13 @@ fn build_with_mir_no_fallback_for_rust_files() {
     ];
 
     let mir_map = build_mir_call_map(&[]);
-    let graph = CallGraph::build_with_mir(&chunks, &mir_map);
+    let graph = CallGraph::build_with_resolved_calls(&chunks, &mir_map);
     // MIR is authoritative for Rust — no fallback edges.
     assert_eq!(graph.callees[0], vec![] as Vec<u32>, "no fallback for .rs files");
 }
 
 #[test]
-fn build_with_mir_falls_back_for_non_rust() {
+fn build_with_resolved_calls_falls_back_for_non_rust() {
     // Non-Rust files should still use tree-sitter fallback.
     let chunks = vec![
         chunk("mod_a::Alpha", "src/a.ts", &["mod_b::Beta"]),
@@ -211,6 +211,6 @@ fn build_with_mir_falls_back_for_non_rust() {
     ];
 
     let mir_map = build_mir_call_map(&[]);
-    let graph = CallGraph::build_with_mir(&chunks, &mir_map);
+    let graph = CallGraph::build_with_resolved_calls(&chunks, &mir_map);
     assert_eq!(graph.callees[0], vec![1], "fallback should work for .ts files");
 }

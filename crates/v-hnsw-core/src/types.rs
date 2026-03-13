@@ -4,6 +4,20 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::VhnswError;
+
+/// Check that the vector dimension matches the expected value.
+///
+/// # Errors
+///
+/// Returns [`VhnswError::DimensionMismatch`] when `got != expected`.
+pub fn check_dimension(expected: Dim, got: Dim) -> crate::Result<()> {
+    if got != expected {
+        return Err(VhnswError::DimensionMismatch { expected, got });
+    }
+    Ok(())
+}
+
 /// Unique identifier for a vector point.
 pub type PointId = u64;
 

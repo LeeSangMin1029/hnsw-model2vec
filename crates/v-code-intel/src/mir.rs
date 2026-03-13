@@ -2,7 +2,7 @@
 //!
 //! `cargo rustc -p <crate> -- --emit=mir` produces text MIR where every method
 //! call is fully resolved (e.g. `<Vec<u32> as Default>::default`).  This module
-//! parses that output into caller→callee pairs that `CallGraph::build_with_mir`
+//! parses that output into caller→callee pairs that `CallGraph::build_with_resolved_calls`
 //! can consume.
 
 use std::collections::BTreeMap;

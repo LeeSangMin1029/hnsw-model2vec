@@ -127,9 +127,9 @@ impl CallGraph {
         }
     }
 
-    /// Build the call graph using MIR-resolved calls when available,
-    /// falling back to tree-sitter heuristics for unmatched calls.
-    pub fn build_with_mir(chunks: &[CodeChunk], mir_calls: &MirCallMap) -> Self {
+    /// Build the call graph using language-resolved calls (MIR, Python AST, etc.)
+    /// when available, falling back to tree-sitter heuristics for unmatched calls.
+    pub fn build_with_resolved_calls(chunks: &[CodeChunk], mir_calls: &MirCallMap) -> Self {
         let len = chunks.len();
 
         // Multi-map: name → all chunk indices with that name (for MIR matching).
@@ -211,8 +211,7 @@ impl CallGraph {
                         &callee_lower, callee_module, &exact, chunks,
                     ) {
                         let tgt_usize = tgt as usize;
-                        // MIR callees are Rust-only — skip non-Rust targets.
-                        if tgt_usize != src && chunks[tgt_usize].file.ends_with(".rs") {
+                        if tgt_usize != src {
                             callees[src].push(tgt);
                             callers[tgt_usize].push(src as u32);
                         }
@@ -220,7 +219,7 @@ impl CallGraph {
                 }
             }
 
-            // Fallback to tree-sitter heuristics if MIR had no data for this chunk.
+            // Fallback to tree-sitter heuristics if resolved calls had no data for this chunk.
             // Skip fallback for Rust files — MIR is authoritative for those.
             let is_rust = c.file.ends_with(".rs");
             if !mir_used && !is_rust {

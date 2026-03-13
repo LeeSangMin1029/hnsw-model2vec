@@ -86,14 +86,9 @@ impl VectorReader for FvecsReader {
     }
 
     fn records(&mut self) -> Box<dyn Iterator<Item = Result<InputRecord>> + '_> {
-        let file = match File::open(&self.path) {
+        let file = match super::open_or_error_iter(&self.path) {
             Ok(f) => f,
-            Err(e) => {
-                return Box::new(std::iter::once(Err(anyhow::anyhow!(
-                    "cannot re-open {}: {e}",
-                    self.path.display()
-                ))));
-            }
+            Err(it) => return it,
         };
 
         let variant = self.variant;

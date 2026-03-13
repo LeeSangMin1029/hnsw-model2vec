@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_storage::StorageEngine;
 
+use crate::lang_ir;
 use crate::mir;
 use crate::parse::{self, CodeChunk};
 
@@ -82,28 +83,64 @@ pub fn load_or_build_graph(db: &Path) -> Result<crate::graph::CallGraph> {
 
     let chunks = load_chunks(db)?;
 
-    // Try MIR-based graph if this is a Rust project.
+    // Collect resolved calls from language-specific IR/AST analysis.
+    let mut resolved_calls = mir::MirCallMap::new();
+
+    // Rust: MIR-based call resolution.
     let cargo_root = find_cargo_root(db);
-    let g = if let Some(project_root) = cargo_root {
-        match mir::collect_workspace_mir(&project_root) {
-            Ok(mir_fns) => {
-                let mir_map = mir::build_mir_call_map(&mir_fns);
-                if mir_map.is_empty() {
-                    crate::graph::CallGraph::build(&chunks)
-                } else {
-                    crate::graph::CallGraph::build_with_mir(&chunks, &mir_map)
-                }
-            }
-            Err(_) => {
-                crate::graph::CallGraph::build(&chunks)
-            }
-        }
-    } else {
+    if let Some(ref project_root) = cargo_root
+        && let Ok(mir_fns) = mir::collect_workspace_mir(project_root)
+    {
+        let mir_map = mir::build_mir_call_map(&mir_fns);
+        resolved_calls.extend(mir_map);
+    }
+
+    // Python: AST-based call resolution.
+    let effective_root = cargo_root
+        .clone()
+        .or_else(|| find_project_root(db))
+        .unwrap_or_else(|| PathBuf::from("."));
+    if lang_ir::has_python_files(&effective_root)
+        && let Ok(py_calls) = lang_ir::collect_python_calls(&effective_root)
+    {
+        resolved_calls.extend(py_calls);
+    }
+
+    // Future: Go, TypeScript, etc.
+
+    let g = if resolved_calls.is_empty() {
         crate::graph::CallGraph::build(&chunks)
+    } else {
+        crate::graph::CallGraph::build_with_resolved_calls(&chunks, &resolved_calls)
     };
 
     let _ = g.save(db);
     Ok(g)
+}
+
+/// Walk up from the DB path to find a project root directory.
+///
+/// Looks for common project markers: `.git`, `pyproject.toml`, `setup.py`,
+/// `go.mod`, `package.json`, etc.
+fn find_project_root(db: &Path) -> Option<PathBuf> {
+    let abs = db.canonicalize().ok()?;
+    let start = if abs.is_dir() {
+        abs
+    } else {
+        abs.parent()?.to_path_buf()
+    };
+    let markers = [
+        ".git", "pyproject.toml", "setup.py", "setup.cfg",
+        "go.mod", "package.json", "tsconfig.json",
+    ];
+    let mut dir = start.as_path();
+    for _ in 0..10 {
+        if markers.iter().any(|m| dir.join(m).exists()) {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 /// Walk up from the DB path to find a Cargo.toml (Rust project root).

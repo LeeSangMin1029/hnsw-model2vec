@@ -38,12 +38,7 @@ impl VectorStore for InMemoryVectorStore {
     }
 
     fn insert(&mut self, id: PointId, vector: &[f32]) -> v_hnsw_core::Result<()> {
-        if vector.len() != self.dim {
-            return Err(VhnswError::DimensionMismatch {
-                expected: self.dim,
-                got: vector.len(),
-            });
-        }
+        v_hnsw_core::check_dimension(self.dim, vector.len())?;
         self.vectors.insert(id, vector.to_vec());
         Ok(())
     }
