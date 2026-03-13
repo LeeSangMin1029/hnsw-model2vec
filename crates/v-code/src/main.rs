@@ -24,6 +24,11 @@ fn main() {
     }
 }
 
+/// V_CODE_COMPACT=1 makes --compact the default for all commands.
+fn env_compact() -> bool {
+    std::env::var("V_CODE_COMPACT").is_ok_and(|v| v == "1" || v == "true")
+}
+
 fn run() -> anyhow::Result<()> {
     use cli::{Cli, Commands};
     use commands::intel;
@@ -32,10 +37,10 @@ fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Symbols { db, name, kind, format, include_tests, limit, compact } => {
-            intel::run_symbols(db, name, kind, format, include_tests, limit, compact)
+            intel::run_symbols(db, name, kind, format, include_tests, limit, compact || env_compact())
         }
-        Commands::Def { db, name, format, compact } => intel::run_def(db, name, format, compact),
-        Commands::Refs { db, name, format, compact } => intel::run_refs(db, name, format, compact),
+        Commands::Def { db, name, format, compact } => intel::run_def(db, name, format, compact || env_compact()),
+        Commands::Refs { db, name, format, compact } => intel::run_refs(db, name, format, compact || env_compact()),
         Commands::Deps { db, file, format, depth } => {
             intel::deps::run_deps(db, file, format, depth)
         }

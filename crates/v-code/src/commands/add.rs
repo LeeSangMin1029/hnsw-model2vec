@@ -144,7 +144,35 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     Ok(())
 }
 
-/// Run the v-code update command (re-runs add for now).
+/// Run the v-code update command (incremental: only re-processes changed files).
 pub fn run_update(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<()> {
+    use v_hnsw_cli::commands::file_utils::get_file_mtime;
+
+    let all_files = scan_files(&input_path, exclude, chunk_code::is_supported_code_file);
+    if all_files.is_empty() {
+        anyhow::bail!("No supported code files found in {}", input_path.display());
+    }
+
+    let file_idx = file_index::load_file_index(&db_path)?;
+
+    let changed_files: Vec<_> = all_files
+        .into_iter()
+        .filter(|f| {
+            let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
+            match file_idx.get_file(&source) {
+                Some(entry) => {
+                    get_file_mtime(f).is_none_or(|m| m != entry.mtime)
+                }
+                None => true, // new file
+            }
+        })
+        .collect();
+
+    if changed_files.is_empty() {
+        println!("No files changed since last index. Nothing to update.");
+        return Ok(());
+    }
+
+    println!("{} files changed, re-indexing...", changed_files.len());
     run(db_path, input_path, exclude)
 }

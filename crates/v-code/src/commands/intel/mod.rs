@@ -113,7 +113,7 @@ pub(super) fn cached_json(db: &Path, cache_key: &str, compute: impl FnOnce() -> 
 }
 
 /// Print chunks grouped by parent directory.
-pub(crate) fn print_grouped(chunks: &[&CodeChunk], _label: Option<&str>) {
+pub(crate) fn print_grouped(chunks: &[&CodeChunk], compact: bool) {
     let mut groups: BTreeMap<String, Vec<&CodeChunk>> = BTreeMap::new();
     for c in chunks {
         let dir = parent_dir(&c.file);
@@ -125,33 +125,16 @@ pub(crate) fn print_grouped(chunks: &[&CodeChunk], _label: Option<&str>) {
         for c in items {
             let filename = file_name(&c.file);
             let lines = format_lines_opt(c.lines);
-            let sig = c.signature.as_deref().unwrap_or("");
             println!("    {filename}{lines}  [{kind}] {name}",
                 kind = c.kind, name = c.name);
-            if !sig.is_empty() {
-                println!("      {sig}");
+            if !compact {
+                let sig = c.signature.as_deref().unwrap_or("");
+                if !sig.is_empty() {
+                    println!("      {sig}");
+                }
             }
         }
-        println!();
-    }
-}
-
-/// Print chunks grouped by directory — compact mode (no signatures).
-pub(crate) fn print_grouped_compact(chunks: &[&CodeChunk]) {
-    let mut groups: BTreeMap<String, Vec<&CodeChunk>> = BTreeMap::new();
-    for c in chunks {
-        let dir = parent_dir(&c.file);
-        groups.entry(dir).or_default().push(c);
-    }
-
-    for (dir, items) in &groups {
-        println!("  {dir}/");
-        for c in items {
-            let filename = file_name(&c.file);
-            let lines = format_lines_opt(c.lines);
-            println!("    {filename}{lines}  [{kind}] {name}",
-                kind = c.kind, name = c.name);
-        }
+        if !compact { println!(); }
     }
 }
 

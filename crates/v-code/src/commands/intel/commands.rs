@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use super::{
     OutputFormat, cached_json, find_refs, parent_dir, file_name, print_detail_annotations,
-    print_grouped, print_grouped_compact,
+    print_grouped,
 };
 use super::{
     build_bfs_json, print_bfs_grouped, BfsEntryExt, HasIdx,
@@ -315,11 +315,7 @@ fn run_chunk_query(
     } else {
         let suffix = if let Some(n) = limit { format!(" (showing {}/{})", display.len().min(n), total) } else { String::new() };
         println!("{}{suffix}", header(total));
-        if compact {
-            print_grouped_compact(&display);
-        } else {
-            print_grouped(&display, None);
-        }
+        print_grouped(&display, compact);
     }
     Ok(())
 }
