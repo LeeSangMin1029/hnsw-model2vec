@@ -567,12 +567,12 @@ fn same_file(pstore: &impl PayloadStore, id_a: u64, id_b: u64) -> bool {
         .get_payload(id_a)
         .ok()
         .flatten()
-        .map(|p| p.source.clone());
+        .map(|p| p.source);
     let file_b = pstore
         .get_payload(id_b)
         .ok()
         .flatten()
-        .map(|p| p.source.clone());
+        .map(|p| p.source);
     file_a.is_some() && file_a == file_b
 }
 
