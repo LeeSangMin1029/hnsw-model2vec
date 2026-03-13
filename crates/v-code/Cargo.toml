@@ -11,7 +11,7 @@ name = "v-code"
 path = "src/main.rs"
 
 [dependencies]
-v-hnsw-cli.workspace = true
+v-hnsw-cli = { workspace = true, features = ["code-intel"] }
 v-hnsw-core.workspace = true
 v-hnsw-storage.workspace = true
 v-hnsw-embed.workspace = true

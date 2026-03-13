@@ -21,6 +21,9 @@ v-hnsw-embed.workspace = true
 v-hnsw-graph.workspace = true
 v-hnsw-search = { workspace = true, features = ["korean"] }
 
+# Code intelligence (optional — only v-code binary enables this)
+v-code-intel = { workspace = true, optional = true }
+
 # Markdown chunking
 pulldown-cmark = "0.13"
 
@@ -63,6 +66,9 @@ walkdir = "2"
 # Logging
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+code-intel = ["dep:v-code-intel"]
 
 [dev-dependencies]
 tempfile = "3"

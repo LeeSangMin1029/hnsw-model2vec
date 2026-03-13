@@ -7,8 +7,7 @@ use anyhow::{Context, Result};
 use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_storage::StorageEngine;
 
-use crate::lang_ir;
-use crate::mir;
+use crate::lsp::{self, CallMap, LspCallResolver};
 use crate::parse::{self, CodeChunk};
 
 /// Load all code chunks from the database, using a bincode cache.
@@ -73,40 +72,26 @@ fn cache_path(db: &Path) -> PathBuf {
 
 /// Load graph from cache or build from chunks.
 ///
-/// If a Cargo.toml is found near the DB (Rust project), automatically
-/// collects MIR via `cargo rustc --emit=mir` for 100% accurate call resolution.
-/// Falls back to tree-sitter heuristics for non-Rust projects or on MIR failure.
-pub fn load_or_build_graph(db: &Path) -> Result<crate::graph::CallGraph> {
+/// If an `LspCallResolver` is provided, uses LSP `textDocument/definition`
+/// for accurate call resolution. Falls back to tree-sitter heuristics otherwise.
+pub fn load_or_build_graph(
+    db: &Path,
+    lsp: Option<&mut LspCallResolver>,
+) -> Result<crate::graph::CallGraph> {
     if let Some(g) = crate::graph::CallGraph::load(db) {
         return Ok(g);
     }
 
     let chunks = load_chunks(db)?;
 
-    // Collect resolved calls from language-specific IR/AST analysis.
-    let mut resolved_calls = mir::MirCallMap::new();
-
-    // Rust: MIR-based call resolution.
-    let cargo_root = find_cargo_root(db);
-    if let Some(ref project_root) = cargo_root
-        && let Ok(mir_fns) = mir::collect_workspace_mir(project_root)
-    {
-        let mir_map = mir::build_mir_call_map(&mir_fns);
-        resolved_calls.extend(mir_map);
-    }
-
-    // Python: AST-based call resolution.
-    let effective_root = cargo_root
-        .clone()
-        .or_else(|| find_project_root(db))
-        .unwrap_or_else(|| PathBuf::from("."));
-    if lang_ir::has_python_files(&effective_root)
-        && let Ok(py_calls) = lang_ir::collect_python_calls(&effective_root)
-    {
-        resolved_calls.extend(py_calls);
-    }
-
-    // Future: Go, TypeScript, etc.
+    // Try LSP-based call resolution if a resolver is available.
+    let resolved_calls: CallMap = if let Some(resolver) = lsp {
+        let project_root = lsp::find_project_root(db)
+            .unwrap_or_else(|| PathBuf::from("."));
+        resolver.resolve_calls(&chunks, &project_root).unwrap_or_default()
+    } else {
+        CallMap::new()
+    };
 
     let g = if resolved_calls.is_empty() {
         crate::graph::CallGraph::build(&chunks)
@@ -116,48 +101,4 @@ pub fn load_or_build_graph(db: &Path) -> Result<crate::graph::CallGraph> {
 
     let _ = g.save(db);
     Ok(g)
-}
-
-/// Walk up from the DB path to find a project root directory.
-///
-/// Looks for common project markers: `.git`, `pyproject.toml`, `setup.py`,
-/// `go.mod`, `package.json`, etc.
-fn find_project_root(db: &Path) -> Option<PathBuf> {
-    let abs = db.canonicalize().ok()?;
-    let start = if abs.is_dir() {
-        abs
-    } else {
-        abs.parent()?.to_path_buf()
-    };
-    let markers = [
-        ".git", "pyproject.toml", "setup.py", "setup.cfg",
-        "go.mod", "package.json", "tsconfig.json",
-    ];
-    let mut dir = start.as_path();
-    for _ in 0..10 {
-        if markers.iter().any(|m| dir.join(m).exists()) {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-    None
-}
-
-/// Walk up from the DB path to find a Cargo.toml (Rust project root).
-fn find_cargo_root(db: &Path) -> Option<PathBuf> {
-    // Canonicalize to handle relative paths like `.v-hnsw-code.db`.
-    let abs = db.canonicalize().ok()?;
-    let start = if abs.is_dir() {
-        abs
-    } else {
-        abs.parent()?.to_path_buf()
-    };
-    let mut dir = start.as_path();
-    for _ in 0..10 {
-        if dir.join("Cargo.toml").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-    None
 }

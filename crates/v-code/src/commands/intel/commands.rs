@@ -164,7 +164,7 @@ pub fn run_impact(
     if matches!(format, OutputFormat::Json) {
         let key = format!("impact:{symbol}:{depth}:{include_tests}");
         return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db)?;
+            let graph = load_or_build_graph(&db, None)?;
             let seeds = graph.resolve(&symbol);
             let entries = compute_impact_entries(&graph, &seeds, depth, include_tests);
             let json = build_bfs_json(&graph, &entries);
@@ -172,7 +172,7 @@ pub fn run_impact(
         });
     }
 
-    let graph = load_or_build_graph(&db)?;
+    let graph = load_or_build_graph(&db, None)?;
     let seeds = graph.resolve(&symbol);
 
     if seeds.is_empty() {
@@ -225,7 +225,7 @@ pub fn run_trace(
     if matches!(format, OutputFormat::Json) {
         let key = format!("trace:{from}:{to}");
         return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db)?;
+            let graph = load_or_build_graph(&db, None)?;
             let sources = graph.resolve(&from);
             let targets = graph.resolve(&to);
             let json = match trace::bfs_shortest_path(&graph, &sources, &targets) {
@@ -236,7 +236,7 @@ pub fn run_trace(
         });
     }
 
-    let graph = load_or_build_graph(&db)?;
+    let graph = load_or_build_graph(&db, None)?;
     let sources = graph.resolve(&from);
     let targets = graph.resolve(&to);
 
@@ -307,7 +307,7 @@ where
 {
     if matches!(format, OutputFormat::Json) {
         return cached_json(db, cache_key, || {
-            let graph = load_or_build_graph(db)?;
+            let graph = load_or_build_graph(db, None)?;
             let seeds = graph.resolve(symbol);
             let entries = compute(&graph, &seeds);
             let json = build_bfs_json(&graph, &entries);
@@ -315,7 +315,7 @@ where
         });
     }
 
-    let graph = load_or_build_graph(db)?;
+    let graph = load_or_build_graph(db, None)?;
     let seeds = graph.resolve(symbol);
 
     if seeds.is_empty() {

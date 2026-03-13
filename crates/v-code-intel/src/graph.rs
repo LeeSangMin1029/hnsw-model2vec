@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::mir::MirCallMap;
+use crate::lsp::CallMap;
 use crate::parse::CodeChunk;
 
 /// Cache format version — bump when struct layout changes.
@@ -127,9 +127,9 @@ impl CallGraph {
         }
     }
 
-    /// Build the call graph using language-resolved calls (MIR, Python AST, etc.)
+    /// Build the call graph using language-resolved calls (LSP definition, etc.)
     /// when available, falling back to tree-sitter heuristics for unmatched calls.
-    pub fn build_with_resolved_calls(chunks: &[CodeChunk], mir_calls: &MirCallMap) -> Self {
+    pub fn build_with_resolved_calls(chunks: &[CodeChunk], mir_calls: &CallMap) -> Self {
         let len = chunks.len();
 
         // Multi-map: name → all chunk indices with that name (for MIR matching).

@@ -182,6 +182,9 @@ pub fn run(
         state.maybe_unload_model();
         // Evict idle databases to free mmap memory
         state.maybe_evict_databases();
+        // Evict idle LSP servers to free subprocess memory
+        #[cfg(feature = "code-intel")]
+        state.maybe_evict_lsp();
 
         match listener.accept() {
             Ok((stream, addr)) => {
