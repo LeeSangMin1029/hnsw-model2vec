@@ -92,7 +92,7 @@ pub fn run_symbols(
 }
 
 /// `v-hnsw def` — find definition location of a symbol.
-pub fn run_def(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
+pub fn run_def(db: PathBuf, name: String, format: OutputFormat, compact: bool) -> Result<()> {
     let key = format!("def:{name}");
     let name_lower = name.to_lowercase();
     run_chunk_query(&db, format, &key,
@@ -103,12 +103,12 @@ pub fn run_def(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
         &format!("No definition found for \"{name}\"."),
         |_| format!("Definition of \"{name}\":\n"),
         None,
-        false,
+        compact,
     )
 }
 
 /// `v-hnsw refs` — find all references to a symbol.
-pub fn run_refs(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
+pub fn run_refs(db: PathBuf, name: String, format: OutputFormat, compact: bool) -> Result<()> {
     if matches!(format, OutputFormat::Json) {
         let key = format!("refs:{name}");
         return cached_json(&db, &key, || {
@@ -135,11 +135,16 @@ pub fn run_refs(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
         for (c, via) in items {
             let filename = file_name(&c.file);
             let lines = format_lines_opt(c.lines);
-            let via_str = via.join(", ");
-            println!("    {filename}{lines}  [{kind}] {name} (via {via_str})",
-                kind = c.kind, name = c.name);
+            if compact {
+                println!("    {filename}{lines}  [{kind}] {name}",
+                    kind = c.kind, name = c.name);
+            } else {
+                let via_str = via.join(", ");
+                println!("    {filename}{lines}  [{kind}] {name} (via {via_str})",
+                    kind = c.kind, name = c.name);
+            }
         }
-        println!();
+        if !compact { println!(); }
     }
     Ok(())
 }

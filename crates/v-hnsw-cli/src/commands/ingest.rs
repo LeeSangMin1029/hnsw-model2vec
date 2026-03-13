@@ -268,6 +268,45 @@ pub fn code_chunk_to_record(
     }
 }
 
+/// Convert chunked entries into `IngestRecord`s (Pass 2 + Pass 3 combined).
+///
+/// Builds the called_by reverse index and generates records with caller data.
+pub fn entries_to_records(entries: &[CodeChunkEntry]) -> Vec<IngestRecord> {
+    let reverse_index = build_called_by_index(entries);
+
+    let chunk_total_map: HashMap<&str, usize> = {
+        let mut m: HashMap<&str, usize> = HashMap::new();
+        for entry in entries {
+            *m.entry(&entry.source).or_default() += 1;
+        }
+        m
+    };
+
+    let mut records: Vec<IngestRecord> = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let chunk_total = chunk_total_map
+            .get(entry.source.as_str())
+            .copied()
+            .unwrap_or(1);
+
+        let called_by_refs = lookup_called_by(&reverse_index, &entry.chunk.name);
+        let called_by: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
+
+        records.push(code_chunk_to_record(
+            &entry.chunk,
+            &entry.source,
+            &entry.file_path_str,
+            entry.lang,
+            entry.mtime,
+            chunk_total,
+            &called_by,
+        ));
+    }
+
+    records
+}
+
 /// Chunk code files via tree-sitter and collect entries with file metadata.
 ///
 /// Iterates over `code_files`, reads each file, chunks it, and populates

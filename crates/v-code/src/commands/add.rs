@@ -15,10 +15,7 @@ use v_hnsw_cli::commands::common;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::scan_files;
-use v_hnsw_cli::commands::ingest::{
-    CodeChunkEntry, IngestRecord, build_called_by_index, code_chunk_to_record,
-    lookup_called_by,
-};
+use v_hnsw_cli::commands::ingest::{CodeChunkEntry, entries_to_records};
 use v_hnsw_cli::commands::pipeline::process_records;
 use v_hnsw_cli::is_interrupted;
 
@@ -87,46 +84,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         &mut file_metadata_map,
     );
 
-    // === Pass 2: Build called_by reverse index ===
-    let reverse_index = build_called_by_index(&entries);
-    let called_by_count: usize = reverse_index.values().map(Vec::len).sum();
-    println!(
-        "Call graph: {} callees, {} caller edges",
-        reverse_index.len(),
-        called_by_count
-    );
-
-    // === Pass 3: Generate IngestRecords ===
-    let chunk_total_map: HashMap<&str, usize> = {
-        let mut m: HashMap<&str, usize> = HashMap::new();
-        for entry in &entries {
-            *m.entry(&entry.source).or_default() += 1;
-        }
-        m
-    };
-
-    let mut records: Vec<IngestRecord> = Vec::with_capacity(entries.len());
-
-    for entry in &entries {
-        let chunk_total = chunk_total_map
-            .get(entry.source.as_str())
-            .copied()
-            .unwrap_or(1);
-
-        let called_by_refs = lookup_called_by(&reverse_index, &entry.chunk.name);
-        let called_by: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
-
-        records.push(code_chunk_to_record(
-            &entry.chunk,
-            &entry.source,
-            &entry.file_path_str,
-            entry.lang,
-            entry.mtime,
-            chunk_total,
-            &called_by,
-        ));
-    }
-
+    // === Pass 2+3: Build called_by index + generate IngestRecords ===
+    let records = entries_to_records(&entries);
     println!("Symbols: {} (functions, structs, enums, ...)", records.len());
 
     // === Remove stale chunks for re-added files ===

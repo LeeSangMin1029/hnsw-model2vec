@@ -156,10 +156,11 @@ pub fn run(cfg: DupesConfig) -> Result<()> {
     }
 
     if !sub_clones.is_empty() {
+        let capped: Vec<_> = sub_clones.into_iter().take(k).collect();
         if json {
-            print_sub_block_json(&sub_clones, pstore);
+            print_sub_block_json(&capped, pstore);
         } else {
-            print_sub_block_text(&sub_clones, pstore);
+            print_sub_block_text(&capped, pstore);
         }
     }
 

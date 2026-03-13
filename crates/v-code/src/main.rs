@@ -34,8 +34,8 @@ fn run() -> anyhow::Result<()> {
         Commands::Symbols { db, name, kind, format, include_tests, limit, compact } => {
             intel::run_symbols(db, name, kind, format, include_tests, limit, compact)
         }
-        Commands::Def { db, name, format } => intel::run_def(db, name, format),
-        Commands::Refs { db, name, format } => intel::run_refs(db, name, format),
+        Commands::Def { db, name, format, compact } => intel::run_def(db, name, format, compact),
+        Commands::Refs { db, name, format, compact } => intel::run_refs(db, name, format, compact),
         Commands::Deps { db, file, format, depth } => {
             intel::deps::run_deps(db, file, format, depth)
         }

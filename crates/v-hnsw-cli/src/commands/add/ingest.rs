@@ -12,9 +12,7 @@ use crate::commands::pipeline::process_records;
 use crate::commands::common;
 use crate::commands::common::IngestRecord;
 use crate::commands::file_index;
-pub use crate::commands::ingest::{
-    CodeChunkEntry, build_called_by_index, code_chunk_to_record, lookup_called_by,
-};
+pub use crate::commands::ingest::{CodeChunkEntry, code_chunk_to_record, entries_to_records};
 use crate::is_interrupted;
 
 /// Result of an ingest operation.
@@ -283,45 +281,8 @@ pub fn process_code_files(
         &mut file_metadata_map,
     );
 
-    // === Pass 2: Build called_by reverse index ===
-    let reverse_index = build_called_by_index(&entries);
-
-    let called_by_count: usize = reverse_index.values().map(Vec::len).sum();
-    println!("Call graph: {} targets, {} edges", reverse_index.len(), called_by_count);
-
-    // === Pass 3: Generate IngestRecords with called_by data ===
-    let chunk_total_map: HashMap<&str, usize> = {
-        let mut m: HashMap<&str, usize> = HashMap::new();
-        for entry in &entries {
-            *m.entry(&entry.source).or_default() += 1;
-        }
-        m
-    };
-
-    let mut records: Vec<IngestRecord> = Vec::with_capacity(entries.len());
-
-    for entry in &entries {
-        let chunk = &entry.chunk;
-        let chunk_total = chunk_total_map
-            .get(entry.source.as_str())
-            .copied()
-            .unwrap_or(1);
-
-        // Resolve called_by for this chunk
-        let called_by_refs = lookup_called_by(&reverse_index, &chunk.name);
-        let called_by: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
-
-        records.push(code_chunk_to_record(
-            chunk,
-            &entry.source,
-            &entry.file_path_str,
-            entry.lang,
-            entry.mtime,
-            chunk_total,
-            &called_by,
-        ));
-    }
-
+    // === Pass 2+3: Build called_by index + generate IngestRecords ===
+    let records = entries_to_records(&entries);
     println!("Symbols: {}", records.len());
 
     finalize_ingest(db_path, records, model, engine, file_metadata_map)

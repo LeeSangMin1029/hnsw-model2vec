@@ -51,6 +51,9 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Compact output: no signatures.
+        #[arg(long)]
+        compact: bool,
     },
     /// Find all references to a symbol.
     #[command(visible_alias = "r")]
@@ -62,6 +65,9 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Compact output: no via details.
+        #[arg(long)]
+        compact: bool,
     },
     /// Show file-level dependency graph from code chunks.
     Deps {

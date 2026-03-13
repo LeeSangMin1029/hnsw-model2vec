@@ -1,4 +1,5 @@
-use crate::commands::add::ingest::{build_called_by_index, lookup_called_by, CodeChunkEntry};
+use crate::commands::ingest::{build_called_by_index, lookup_called_by};
+use crate::commands::add::ingest::CodeChunkEntry;
 
 fn make_entry(name: &str, calls: &[&str]) -> CodeChunkEntry {
     CodeChunkEntry {
