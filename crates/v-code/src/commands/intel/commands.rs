@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use super::{
     OutputFormat, cached_json, find_refs, parent_dir, file_name, print_detail_annotations,
-    print_grouped,
+    print_grouped, print_grouped_compact,
 };
 use super::{
     build_bfs_json, print_bfs_grouped, BfsEntryExt, HasIdx,
@@ -64,18 +64,30 @@ pub fn run_symbols(
     name: Option<String>,
     kind: Option<String>,
     format: OutputFormat,
+    include_tests: bool,
+    limit: Option<usize>,
+    compact: bool,
 ) -> Result<()> {
-    let key = format!("symbols:{}:{}", name.as_deref().unwrap_or(""), kind.as_deref().unwrap_or(""));
+    let key = format!(
+        "symbols:{}:{}:{}:{}",
+        name.as_deref().unwrap_or(""),
+        kind.as_deref().unwrap_or(""),
+        if include_tests { "t" } else { "" },
+        limit.map_or(String::new(), |l| l.to_string()),
+    );
     run_chunk_query(&db, format, &key,
         |c| {
             if let Some(ref n) = name
                 && !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
             if let Some(ref k) = kind
                 && c.kind.to_lowercase() != k.to_lowercase() { return false; }
+            if !include_tests && v_code_intel::graph::is_test_chunk(c) { return false; }
             true
         },
         "No symbols found.",
         |n| format!("{n} symbols found:\n"),
+        limit,
+        compact,
     )
 }
 
@@ -90,6 +102,8 @@ pub fn run_def(db: PathBuf, name: String, format: OutputFormat) -> Result<()> {
         },
         &format!("No definition found for \"{name}\"."),
         |_| format!("Definition of \"{name}\":\n"),
+        None,
+        false,
     )
 }
 
@@ -272,21 +286,35 @@ fn run_chunk_query(
     filter: impl Fn(&CodeChunk) -> bool,
     empty_msg: &str,
     header: impl FnOnce(usize) -> String,
+    limit: Option<usize>,
+    compact: bool,
 ) -> Result<()> {
     if matches!(format, OutputFormat::Json) {
         return cached_json(db, cache_key, || {
             let chunks = load_chunks(db)?;
-            let filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| filter(c)).collect();
+            let mut filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| filter(c)).collect();
+            if let Some(n) = limit { filtered.truncate(n); }
             Ok(serde_json::to_string(&grouped_json(&filtered))?)
         });
     }
     let chunks = load_chunks(db)?;
     let filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| filter(c)).collect();
-    if filtered.is_empty() {
+    let total = filtered.len();
+    let display: Vec<&CodeChunk> = if let Some(n) = limit {
+        filtered.into_iter().take(n).collect()
+    } else {
+        filtered
+    };
+    if display.is_empty() {
         println!("{empty_msg}");
     } else {
-        println!("{}", header(filtered.len()));
-        print_grouped(&filtered, None);
+        let suffix = if let Some(n) = limit { format!(" (showing {}/{})", display.len().min(n), total) } else { String::new() };
+        println!("{}{suffix}", header(total));
+        if compact {
+            print_grouped_compact(&display);
+        } else {
+            print_grouped(&display, None);
+        }
     }
     Ok(())
 }

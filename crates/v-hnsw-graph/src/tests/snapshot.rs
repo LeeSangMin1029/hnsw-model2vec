@@ -5,9 +5,7 @@ use crate::search::NodeGraph;
 use crate::snapshot::HnswSnapshot;
 use v_hnsw_core::VectorIndex;
 
-fn test_vector(id: u64, dim: usize) -> Vec<f32> {
-    (0..dim).map(|j| (id as f32 * 0.1 + j as f32 * 0.3).sin()).collect()
-}
+use super::helpers::test_vector;
 
 #[test]
 fn test_snapshot_roundtrip() -> v_hnsw_core::Result<()> {

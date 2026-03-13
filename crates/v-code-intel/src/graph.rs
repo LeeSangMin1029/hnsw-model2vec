@@ -598,7 +598,7 @@ fn strip_chunk_generics(name: &str) -> String {
     result
 }
 
-fn is_test_chunk(c: &CodeChunk) -> bool {
+pub fn is_test_chunk(c: &CodeChunk) -> bool {
     c.file.contains("/tests/")
         || c.file.contains("\\tests\\")
         || c.file.ends_with("_test.rs")

@@ -31,6 +31,15 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Include test symbols in results (excluded by default).
+        #[arg(long)]
+        include_tests: bool,
+        /// Max number of symbols to show.
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Compact output: name and location only (no signatures).
+        #[arg(long)]
+        compact: bool,
     },
     /// Find symbol definition location.
     #[command(visible_alias = "d")]

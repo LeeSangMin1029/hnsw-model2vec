@@ -136,6 +136,25 @@ pub(crate) fn print_grouped(chunks: &[&CodeChunk], _label: Option<&str>) {
     }
 }
 
+/// Print chunks grouped by directory — compact mode (no signatures).
+pub(crate) fn print_grouped_compact(chunks: &[&CodeChunk]) {
+    let mut groups: BTreeMap<String, Vec<&CodeChunk>> = BTreeMap::new();
+    for c in chunks {
+        let dir = parent_dir(&c.file);
+        groups.entry(dir).or_default().push(c);
+    }
+
+    for (dir, items) in &groups {
+        println!("  {dir}/");
+        for c in items {
+            let filename = file_name(&c.file);
+            let lines = format_lines_opt(c.lines);
+            println!("    {filename}{lines}  [{kind}] {name}",
+                kind = c.kind, name = c.name);
+        }
+    }
+}
+
 fn find_refs<'a>(chunks: &'a [CodeChunk], name: &str) -> Vec<(&'a CodeChunk, Vec<&'static str>)> {
     let name_lower = name.to_lowercase();
     chunks

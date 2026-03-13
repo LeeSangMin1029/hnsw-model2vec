@@ -213,8 +213,8 @@ impl DaemonState {
         if !self.databases.contains_key(&key) {
             self.register_db(&key)?;
         }
-        #[allow(clippy::unwrap_used)]
-        let db = self.databases.get_mut(&key).unwrap();
+        let db = self.databases.get_mut(&key)
+            .context("DB disappeared after register")?;
         db.last_used = Instant::now();
         Ok(db)
     }
@@ -236,8 +236,7 @@ impl DaemonState {
             self.model = Some(m);
         }
         self.last_embed_at = Instant::now();
-        #[allow(clippy::unwrap_used)]
-        Ok(self.model.as_ref().unwrap())
+        self.model.as_ref().context("model not loaded after ensure")
     }
 
     /// Resolve query → embedding (cache hit or model inference).
@@ -318,8 +317,8 @@ impl DaemonState {
             eprintln!("[daemon] LSP server started ({} active)", self.lsp_servers.len());
         }
 
-        #[allow(clippy::unwrap_used)]
-        let entry = self.lsp_servers.get_mut(&key).unwrap();
+        let entry = self.lsp_servers.get_mut(&key)
+            .context("LSP server disappeared after insert")?;
         entry.last_used = Instant::now();
         Ok(&mut entry.resolver)
     }

@@ -31,8 +31,8 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Symbols { db, name, kind, format } => {
-            intel::run_symbols(db, name, kind, format)
+        Commands::Symbols { db, name, kind, format, include_tests, limit, compact } => {
+            intel::run_symbols(db, name, kind, format, include_tests, limit, compact)
         }
         Commands::Def { db, name, format } => intel::run_def(db, name, format),
         Commands::Refs { db, name, format } => intel::run_refs(db, name, format),

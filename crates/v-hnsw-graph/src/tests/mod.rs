@@ -1,6 +1,7 @@
 mod config;
 mod delta;
 mod graph;
+mod helpers;
 mod insert;
 mod node;
 mod proptests;
