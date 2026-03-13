@@ -161,16 +161,18 @@ impl LspCallResolver {
     /// Opens each unique source file, then queries `textDocument/definition`
     /// for each call site found by tree-sitter in the chunks.
     pub fn resolve_calls(&mut self, chunks: &[CodeChunk], project_root: &Path) -> Result<CallMap> {
-        // Open all unique source files
-        let mut opened: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        // Open all unique source files and cache their contents for position lookup
+        let mut file_cache: std::collections::HashMap<PathBuf, Vec<String>> =
+            std::collections::HashMap::new();
         for chunk in chunks {
             let fpath = project_root.join(&chunk.file);
-            if opened.contains(&fpath) {
+            if file_cache.contains_key(&fpath) {
                 continue;
             }
             if let Ok(text) = std::fs::read_to_string(&fpath) {
                 self.did_open(&fpath, &text)?;
-                opened.insert(fpath);
+                let lines: Vec<String> = text.lines().map(String::from).collect();
+                file_cache.insert(fpath, lines);
             }
         }
 
@@ -182,22 +184,20 @@ impl LspCallResolver {
         for chunk in chunks {
             let fpath = project_root.join(&chunk.file);
             let caller_name = normalize_chunk_name(&chunk.name);
+            let file_lines = file_cache.get(&fpath);
 
-            // Use the chunk's call list from tree-sitter to find call sites
-            // and resolve each one via LSP definition
             for call in &chunk.calls {
-                // We need the line/col of each call site.
-                // For now, use the chunk's start line + search within the chunk text.
-                if let Some((line, col)) = find_call_position_in_chunk(chunk, call)
-                    && let Ok(Some(loc)) = self.definition(&fpath, line, col) {
-                        // Convert definition location back to a chunk name
-                        if let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
-                            call_map
-                                .entry(caller_name.clone())
-                                .or_default()
-                                .push(callee);
-                        }
+                if let Some((line, col)) =
+                    find_call_position_in_chunk(chunk, call, file_lines.map(Vec::as_slice))
+                    && let Ok(Some(loc)) = self.definition(&fpath, line, col)
+                {
+                    if let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
+                        call_map
+                            .entry(caller_name.clone())
+                            .or_default()
+                            .push(callee);
                     }
+                }
             }
 
             // Deduplicate callees
@@ -460,20 +460,37 @@ fn parse_definition_result(result: &serde_json::Value) -> Result<Option<Location
 
 /// Find the (line, col) of a call site within a chunk's source file.
 ///
-/// Reads the file and searches for the call name within the chunk's line range.
-fn find_call_position_in_chunk(chunk: &CodeChunk, call_name: &str) -> Option<(u32, u32)> {
+/// Searches the source lines within the chunk's line range for the call pattern
+/// (e.g. `.method(` or `func(`). Returns 0-indexed (line, col) for LSP.
+fn find_call_position_in_chunk(
+    chunk: &CodeChunk,
+    call_name: &str,
+    file_lines: Option<&[String]>,
+) -> Option<(u32, u32)> {
     let (start, end) = chunk.lines?;
     let short = call_name.rsplit("::").next().unwrap_or(call_name);
+    let patterns = [format!(".{short}("), format!("{short}("), short.to_string()];
 
-    // We don't have the body text, so we just return the approximate position.
-    // Use the start line and column 0 as a placeholder — the LSP server
-    // will resolve based on the symbol name at that position.
-    // A more precise approach would read the source file.
-    let patterns = [format!(".{short}("), format!("{short}(")];
+    if let Some(lines) = file_lines {
+        // Search within chunk's line range (1-indexed → 0-indexed)
+        let from = start.saturating_sub(1);
+        let to = end.min(lines.len());
 
-    // Return start line (0-indexed for LSP) with col 0
-    // The caller should ideally read the file for precise positioning
-    let _ = (end, &patterns);
+        for (i, line) in lines[from..to].iter().enumerate() {
+            for pat in &patterns {
+                if let Some(col) = line.find(pat.as_str()) {
+                    let actual_col = if pat.starts_with('.') {
+                        col + 1 // point at method name, not the dot
+                    } else {
+                        col
+                    };
+                    return Some(((from + i) as u32, actual_col as u32));
+                }
+            }
+        }
+    }
+
+    // Fallback: return chunk start line, col 0
     Some((start.saturating_sub(1) as u32, 0))
 }
 
