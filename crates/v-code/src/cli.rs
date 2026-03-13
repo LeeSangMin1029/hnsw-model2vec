@@ -200,6 +200,9 @@ pub enum Commands {
         /// Minimum sub-block size (lines) for intra-function clone detection.
         #[arg(long, default_value = "5")]
         min_sub_lines: usize,
+        /// Analyze duplicate pairs: callee/caller match, blast radius, merge safety.
+        #[arg(long)]
+        analyze: bool,
     },
     /// Show per-crate code statistics (functions, structs, enums).
     Stats {
