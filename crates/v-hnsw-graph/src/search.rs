@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
+
+use rustc_hash::FxHashSet;
 
 use v_hnsw_core::{DistanceMetric, LayerId, PointId, VectorStore, VhnswError};
 use crate::distance::prefetch_vector;
@@ -31,7 +33,7 @@ impl NodeGraph for HashMap<PointId, Node> {
 
 /// Reusable search buffers to avoid per-query allocations.
 struct SearchBuffer {
-    visited: HashSet<PointId>,
+    visited: FxHashSet<PointId>,
     candidates: BinaryHeap<Reverse<HeapEntry>>,
     results: BinaryHeap<HeapEntry>,
 }
@@ -39,7 +41,7 @@ struct SearchBuffer {
 impl SearchBuffer {
     fn new() -> Self {
         Self {
-            visited: HashSet::new(),
+            visited: FxHashSet::default(),
             candidates: BinaryHeap::new(),
             results: BinaryHeap::new(),
         }

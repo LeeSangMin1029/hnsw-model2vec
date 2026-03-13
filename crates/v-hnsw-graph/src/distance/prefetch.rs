@@ -42,8 +42,9 @@ pub fn prefetch_vector(data: &[f32]) {
     }
     let ptr = data.as_ptr() as *const u8;
     let byte_len = data.len() * 4;
-    // Prefetch up to 4 cache lines (256 bytes, covers first 64 f32)
-    let lines = (byte_len / 64).min(4);
+    // Prefetch up to 8 cache lines (512 bytes, covers first 128 f32)
+    // dim=384 → 1536 bytes → 24 lines; 8 lines covers ~33% which is the hot portion
+    let lines = (byte_len / 64).min(8);
     for i in 0..lines {
         prefetch_read(unsafe { ptr.add(i * 64) } as *const f32);
     }

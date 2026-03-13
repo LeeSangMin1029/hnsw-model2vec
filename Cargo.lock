@@ -3921,6 +3921,7 @@ dependencies = [
  "memmap2",
  "proptest",
  "rayon",
+ "rustc-hash",
  "tracing",
  "v-hnsw-core",
 ]

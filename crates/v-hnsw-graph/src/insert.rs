@@ -152,11 +152,11 @@ fn insert_core<D: DistanceMetric>(
 
         let selected = select_neighbors(&candidates, max_neighbors);
 
-        if let Some(node) = nodes.get_mut(&id) {
-            node.set_neighbors(layer, selected.clone());
-        }
-
         prune_backward_connections(nodes, store, distance, id, &selected, layer, max_neighbors);
+
+        if let Some(node) = nodes.get_mut(&id) {
+            node.set_neighbors(layer, selected);
+        }
 
         ep = candidates;
     }

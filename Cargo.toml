@@ -59,6 +59,9 @@ tracing = "0.1"
 # Cache
 lru = "0.16"
 
+# Fast hashing
+rustc-hash = "2"
+
 # String compression
 zstd = "0.13"
 
