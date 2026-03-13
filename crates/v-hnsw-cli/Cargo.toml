@@ -14,8 +14,8 @@ path = "src/lib.rs"
 # Internal crates (always needed)
 v-hnsw-core.workspace = true
 v-hnsw-storage.workspace = true
-v-code-chunk.workspace = true
 v-hnsw-embed.workspace = true
+
 
 # Index & search (always available — both binaries need these)
 v-hnsw-graph.workspace = true

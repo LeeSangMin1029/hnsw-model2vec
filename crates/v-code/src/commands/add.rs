@@ -15,7 +15,7 @@ use v_hnsw_cli::commands::common;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::scan_files;
-use v_hnsw_cli::commands::ingest::{CodeChunkEntry, entries_to_records};
+use super::ingest::{CodeChunkEntry, entries_to_records};
 use v_hnsw_cli::commands::pipeline::process_records;
 use v_hnsw_cli::is_interrupted;
 
@@ -77,7 +77,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // === Pass 1: Chunk all files ===
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
-    v_hnsw_cli::commands::ingest::chunk_code_files(
+    super::ingest::chunk_code_files(
         &code_files,
         is_interrupted,
         &mut entries,

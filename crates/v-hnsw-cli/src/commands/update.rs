@@ -112,11 +112,9 @@ pub(crate) fn run_core(
     let mut engine = StorageEngine::open_exclusive(db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
-    // Scan input folder for all supported files (markdown + code)
+    // Scan input folder for markdown files (doc-only binary)
     let all_files = common::scan_files(input_path, exclude, |ext| {
-        ext == "md"
-            || ext == "markdown"
-            || is_supported_text_file(ext)
+        ext == "md" || ext == "markdown"
     });
 
     if all_files.is_empty() {
@@ -124,7 +122,7 @@ pub(crate) fn run_core(
         return Ok(UpdateStats::default());
     }
 
-    eprintln!("Scanning {} files (markdown + code)...", all_files.len());
+    eprintln!("Scanning {} markdown files...", all_files.len());
 
     let mut stats = UpdateStats::default();
     let mut seen_files = std::collections::HashSet::new();
@@ -259,17 +257,6 @@ pub(crate) fn run_core(
     )?;
 
     Ok(stats)
-}
-
-/// Check if a file extension is a supported text-based source file
-/// (not Rust code, but still worth indexing as plain text chunks).
-pub(crate) fn is_supported_text_file(ext: &str) -> bool {
-    matches!(
-        ext,
-        "ts" | "tsx" | "js" | "jsx" | "svelte" | "vue"
-            | "py" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
-            | "toml" | "yaml" | "yml" | "json"
-    )
 }
 
 /// Print update statistics.

@@ -2,7 +2,6 @@
 
 pub mod chunk;
 pub mod cli;
-pub use v_code_chunk as chunk_code;
 pub mod commands;
 pub mod error;
 pub mod interrupt;

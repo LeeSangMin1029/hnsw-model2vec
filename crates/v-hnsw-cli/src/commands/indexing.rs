@@ -88,9 +88,11 @@ pub fn update_indexes_incremental(
 ) -> Result<()> {
     let hnsw_path = path.join("hnsw.bin");
     let bm25_path = path.join("bm25.bin");
+    let bm25_exists = bm25_path.exists()
+        || v_hnsw_search::bm25_fst_exists(path);
 
     // Fallback to full rebuild if index files missing
-    if !hnsw_path.exists() || !bm25_path.exists() {
+    if !hnsw_path.exists() || !bm25_exists {
         tracing::info!("Index files missing, falling back to full rebuild");
         println!("Index files not found, performing full rebuild...");
         return build_indexes(path, engine, config);
@@ -276,6 +278,12 @@ fn build_bm25<T: Tokenizer>(
     bm25.build_fieldnorm_cache();
     bm25.save(bm25_path)
         .with_context(|| format!("Failed to save BM25 index to {}", bm25_path.display()))?;
+
+    // Also save mmap snapshot for fast search loading
+    if let Some(dir) = bm25_path.parent() {
+        bm25.save_snapshot(dir)
+            .with_context(|| "Failed to save BM25 snapshot")?;
+    }
     Ok(())
 }
 

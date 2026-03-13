@@ -3879,7 +3879,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
- "v-code-chunk",
  "v-code-intel",
  "v-hnsw-core",
  "v-hnsw-embed",

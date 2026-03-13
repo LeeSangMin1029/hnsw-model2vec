@@ -45,6 +45,7 @@ mod tests;
 
 // Re-exports
 pub use bm25::{Bm25Index, Bm25Params, Bm25Snapshot, Posting, PostingList};
+pub use bm25::fst_storage::fst_exists as bm25_fst_exists;
 pub use config::{HybridSearchConfig, HybridSearchConfigBuilder};
 pub use fusion::ConvexFusion;
 pub use hybrid::{SimpleHybridSearcher, enrich_sparse};

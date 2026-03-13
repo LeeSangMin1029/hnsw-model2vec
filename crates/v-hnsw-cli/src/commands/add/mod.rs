@@ -5,9 +5,6 @@
 
 pub(crate) mod ingest;
 
-#[cfg(test)]
-mod tests;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -22,12 +19,8 @@ use crate::is_interrupted;
 enum InputType {
     /// Folder containing markdown files.
     MarkdownFolder,
-    /// Folder containing code files (.rs, etc.).
-    CodeFolder,
     /// Single markdown file.
     SingleMarkdown,
-    /// Single code file (.rs, .py, etc.).
-    SingleCode,
     /// JSONL file.
     Jsonl,
 }
@@ -35,9 +28,8 @@ enum InputType {
 /// Detect input type from path (recursive for directories).
 fn detect_input_type(path: &Path, exclude: &[String]) -> Result<InputType> {
     if path.is_dir() {
-        // Recursively check what kind of files the folder contains
+        // Recursively check for markdown files
         let mut has_md = false;
-        let mut has_code = false;
         for entry in walkdir::WalkDir::new(path)
             .max_depth(5)
             .into_iter()
@@ -51,20 +43,13 @@ fn detect_input_type(path: &Path, exclude: &[String]) -> Result<InputType> {
             .filter_map(|e| e.ok())
         {
             if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                match ext {
-                    "md" | "markdown" => has_md = true,
-                    e if crate::chunk_code::is_supported_code_file(e) => has_code = true,
-                    _ => {}
+                if ext == "md" || ext == "markdown" {
+                    has_md = true;
+                    break;
                 }
             }
-            if has_md && has_code {
-                break;
-            }
         }
-        // Code takes priority when both exist (code folder may contain README.md)
-        if has_code {
-            Ok(InputType::CodeFolder)
-        } else if has_md {
+        if has_md {
             Ok(InputType::MarkdownFolder)
         } else {
             anyhow::bail!(
@@ -80,11 +65,8 @@ fn detect_input_type(path: &Path, exclude: &[String]) -> Result<InputType> {
         match ext.as_deref() {
             Some("jsonl") | Some("ndjson") => Ok(InputType::Jsonl),
             Some("md") | Some("markdown") => Ok(InputType::SingleMarkdown),
-            Some(ext) if crate::chunk_code::is_supported_code_file(ext) => {
-                Ok(InputType::SingleCode)
-            }
             _ => anyhow::bail!(
-                "Unsupported file type: {}. Supported: .md, .rs, .py, .ts, .jsonl, or folder",
+                "Unsupported file type: {}. Supported: .md, .markdown, .jsonl, or folder",
                 path.display()
             ),
         }
@@ -112,14 +94,10 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let model_name = common::DEFAULT_MODEL;
 
     // Ensure database exists
-    let is_code = matches!(input_type, InputType::CodeFolder | InputType::SingleCode);
-    let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true, is_code)?;
+    let mut engine = common::ensure_database(&db_path, model.dim(), model_name, true, false)?;
 
-    // Update config: mark as code DB if code input, store input_path
+    // Update config: store input_path
     if let Ok(mut config) = DbConfig::load(&db_path) {
-        if matches!(input_type, InputType::CodeFolder | InputType::SingleCode) {
-            config.code = true;
-        }
         if let Ok(canonical) = input_path.canonicalize() {
             config.input_path = Some(canonical.to_string_lossy().into_owned());
         }
@@ -133,12 +111,6 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         }
         InputType::SingleMarkdown => {
             ingest::process_markdown_files(&db_path, std::slice::from_ref(&input_path), &model, &mut engine)?
-        }
-        InputType::CodeFolder => {
-            ingest::process_code_folder(&db_path, &input_path, &model, &mut engine, exclude)?
-        }
-        InputType::SingleCode => {
-            ingest::process_code_files(&db_path, std::slice::from_ref(&input_path), &model, &mut engine)?
         }
         InputType::Jsonl => {
             ingest::process_jsonl(&db_path, &input_path, &model, &mut engine)?

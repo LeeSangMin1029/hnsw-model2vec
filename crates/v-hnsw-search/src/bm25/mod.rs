@@ -5,7 +5,7 @@
 
 pub(crate) mod bigram;
 pub(crate) mod fieldnorm;
-pub(crate) mod fst_storage;
+pub mod fst_storage;
 mod index;
 mod maxscore;
 mod scorer;

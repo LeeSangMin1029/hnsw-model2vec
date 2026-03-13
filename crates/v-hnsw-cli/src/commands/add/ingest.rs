@@ -12,7 +12,6 @@ use crate::commands::pipeline::process_records;
 use crate::commands::common;
 use crate::commands::common::IngestRecord;
 use crate::commands::file_index;
-pub use crate::commands::ingest::{CodeChunkEntry, code_chunk_to_record, entries_to_records};
 use crate::is_interrupted;
 
 /// Result of an ingest operation.
@@ -109,7 +108,7 @@ pub fn process_markdown_files(
 
 /// Process records and update the file metadata index.
 ///
-/// Shared tail logic for `process_markdown_files` and `process_code_files`.
+/// Shared tail logic for `process_markdown_files`.
 /// Returns `(inserted, errors, added_ids, removed_ids)`.
 pub(crate) fn finalize_ingest(
     db_path: &Path,
@@ -156,137 +155,53 @@ pub(crate) fn finalize_ingest(
     })
 }
 
-/// Chunk a single file (code or markdown) into [`IngestRecord`]s.
+/// Chunk a single markdown file into [`IngestRecord`]s.
 ///
-/// Returns `(records, chunk_ids)`. For code files without `called_by` data
-/// (e.g., incremental update), pass empty slice.
-///
-/// Returns `Err` only for I/O errors; parse failures return empty results.
+/// Returns `(records, chunk_ids)`.
+/// Returns empty results for parse failures (does not propagate errors).
 pub(crate) fn chunk_single_file(
     file_path: &std::path::Path,
     source: &str,
     mtime: u64,
     chunker: &crate::chunk::MarkdownChunker,
 ) -> (Vec<IngestRecord>, Vec<u64>) {
-    let is_code = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(crate::chunk_code::is_supported_code_file)
-        .unwrap_or(false);
-
     let mut records = Vec::new();
     let mut chunk_ids = Vec::new();
 
-    if is_code {
-        let source_code = match std::fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading {}: {e}", file_path.display());
-                return (records, chunk_ids);
-            }
-        };
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let chunks = crate::chunk_code::chunk_for_language(ext, &source_code)
-            .unwrap_or_default();
-        let file_path_str = file_path.to_string_lossy().to_string();
-        let chunk_total = chunks.len();
-        let lang = crate::chunk_code::lang_for_extension(ext).unwrap_or("unknown");
-
-        for chunk in &chunks {
-            let id = common::generate_id(source, chunk.chunk_index);
-            chunk_ids.push(id);
-            records.push(code_chunk_to_record(
-                chunk, source, &file_path_str, lang, mtime, chunk_total, &[],
-            ));
+    let (frontmatter, chunks) = match chunker.chunk_file(file_path) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Error processing {}: {e}", file_path.display());
+            return (records, chunk_ids);
         }
-    } else {
-        let (frontmatter, chunks) = match chunker.chunk_file(file_path) {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("Error processing {}: {e}", file_path.display());
-                return (records, chunk_ids);
-            }
-        };
+    };
 
-        let title = frontmatter.as_ref().and_then(|f| f.title.clone());
-        let tags = frontmatter
-            .as_ref()
-            .map(|f| f.tags.clone())
-            .unwrap_or_default();
-        let chunk_total = chunks.len();
+    let title = frontmatter.as_ref().and_then(|f| f.title.clone());
+    let tags = frontmatter
+        .as_ref()
+        .map(|f| f.tags.clone())
+        .unwrap_or_default();
+    let chunk_total = chunks.len();
 
-        for chunk in chunks {
-            let id = common::generate_id(source, chunk.chunk_index);
-            chunk_ids.push(id);
-            records.push(IngestRecord {
-                id,
-                text: chunk.text,
-                source: source.to_owned(),
-                title: title.clone(),
-                tags: tags.clone(),
-                chunk_index: chunk.chunk_index,
-                chunk_total,
-                source_modified_at: mtime,
-                custom: HashMap::new(),
-            });
-        }
+    for chunk in chunks {
+        let id = common::generate_id(source, chunk.chunk_index);
+        chunk_ids.push(id);
+        records.push(IngestRecord {
+            id,
+            text: chunk.text,
+            source: source.to_owned(),
+            title: title.clone(),
+            tags: tags.clone(),
+            chunk_index: chunk.chunk_index,
+            chunk_total,
+            source_modified_at: mtime,
+            custom: HashMap::new(),
+        });
     }
 
     (records, chunk_ids)
 }
 
-
-/// Process code folder: chunk .rs files via tree-sitter, embed, insert.
-///
-/// Two-pass approach:
-/// 1. Chunk all files and collect `calls` data
-/// 2. Build `called_by` reverse index, then generate embed text with it
-pub fn process_code_folder(
-    db_path: &Path,
-    input_path: &Path,
-    model: &Model2VecModel,
-    engine: &mut StorageEngine,
-    exclude: &[String],
-) -> Result<IngestResult> {
-    let code_files = common::scan_files(input_path, exclude, crate::chunk_code::is_supported_code_file);
-
-    if code_files.is_empty() {
-        anyhow::bail!("No supported code files found in {}", input_path.display());
-    }
-
-    process_code_files(db_path, &code_files, model, engine)
-}
-
-/// Process a list of code files: chunk via tree-sitter, embed, insert.
-///
-/// Shared implementation for both folder and single-file ingestion.
-pub fn process_code_files(
-    db_path: &Path,
-    code_files: &[PathBuf],
-    model: &Model2VecModel,
-    engine: &mut StorageEngine,
-) -> Result<IngestResult> {
-    println!("Files: {} code", code_files.len());
-
-    // === Pass 1: Chunk all files, collect CodeChunk + metadata ===
-    let mut entries: Vec<CodeChunkEntry> = Vec::new();
-    let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
-    crate::commands::ingest::chunk_code_files(
-        code_files,
-        is_interrupted,
-        &mut entries,
-        &mut file_metadata_map,
-    );
-
-    // === Pass 2+3: Build called_by index + generate IngestRecords ===
-    let records = entries_to_records(&entries);
-    println!("Symbols: {}", records.len());
-
-    finalize_ingest(db_path, records, model, engine, file_metadata_map)
-}
 
 /// Process JSONL file: parse records, embed, insert.
 pub fn process_jsonl(
