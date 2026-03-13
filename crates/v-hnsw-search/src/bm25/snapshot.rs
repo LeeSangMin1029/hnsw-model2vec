@@ -18,6 +18,9 @@ use super::index::PostingList;
 use super::scorer::{Bm25Params, PostingView, ScoringCtx};
 use crate::Tokenizer;
 
+/// Resolved posting entries with pre-computed IDF weights.
+type TermWeights<'a> = Vec<(&'a [PostingEntry], f32)>;
+
 const MAGIC: u64 = 0x424D_3235_534E_4150; // "BM25SNAP"
 const VERSION: u64 = 1;
 const HEADER_SLOTS: usize = 8; // 8 × 8 = 64 bytes
@@ -228,7 +231,7 @@ impl Bm25Snapshot {
     /// Tokenize query, generate bigrams, resolve terms, and build scoring context.
     fn prepare_query<T: Tokenizer>(
         &self, tokenizer: &T, query: &str,
-    ) -> Option<(ScoringCtx<'_>, Vec<(&[PostingEntry], f32)>)> {
+    ) -> Option<(ScoringCtx<'_>, TermWeights<'_>)> {
         let mut tokens = tokenizer.tokenize(query);
         let bigrams = super::bigram::generate(&tokens);
         tokens.extend(bigrams);

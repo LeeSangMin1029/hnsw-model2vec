@@ -284,6 +284,7 @@ pub fn run_trace(
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 /// Shared runner for chunk-filter commands (symbols, def).
+#[expect(clippy::too_many_arguments)]
 fn run_chunk_query(
     db: &std::path::Path,
     format: OutputFormat,
