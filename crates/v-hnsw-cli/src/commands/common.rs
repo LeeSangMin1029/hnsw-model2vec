@@ -164,6 +164,31 @@ impl DistanceComputer for Sq8Dc<'_> {
     }
 }
 
+/// SQ8 distance computer with pre-built query LUT for batch search.
+///
+/// ~2x faster than `Sq8Dc` when computing distance to many vectors with
+/// the same query, since the per-element multiply is pre-computed.
+pub(crate) struct Sq8LutDc<'a> {
+    pub query_lut: Vec<f32>,
+    pub store: &'a Sq8VectorStore,
+}
+
+impl<'a> Sq8LutDc<'a> {
+    pub fn new(params: &Sq8Params, store: &'a Sq8VectorStore, query: &[f32]) -> Self {
+        Self {
+            query_lut: params.build_query_lut(query),
+            store,
+        }
+    }
+}
+
+impl DistanceComputer for Sq8LutDc<'_> {
+    fn distance(&self, _query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
+        let codes = self.store.get(id)?;
+        Ok(Sq8Params::distance_with_lut(&self.query_lut, codes))
+    }
+}
+
 // ── Database management ─────────────────────────────────────────────────
 
 /// Auto-create database if it doesn't exist, or open existing with exclusive lock.

@@ -246,3 +246,27 @@ fn constant_dimension_handled() {
     // Non-constant dimension should work normally
     assert!((q[1] as i16 - 128).unsigned_abs() <= 1);
 }
+
+#[test]
+fn query_lut_matches_asymmetric_distance() {
+    let dim = 256;
+    let mut vectors = make_random_vectors(50, dim, 42);
+    for v in &mut vectors {
+        normalize(v);
+    }
+    let refs: Vec<&[f32]> = vectors.iter().map(|v| v.as_slice()).collect();
+    let params = Sq8Params::train(dim, &refs).unwrap();
+
+    let query = &vectors[0];
+    let lut = params.build_query_lut(query);
+
+    for target in &vectors[1..] {
+        let quantized = params.quantize(target);
+        let d_direct = params.asymmetric_distance(query, &quantized);
+        let d_lut = Sq8Params::distance_with_lut(&lut, &quantized);
+        assert!(
+            (d_direct - d_lut).abs() < 1e-6,
+            "LUT distance {d_lut} != direct {d_direct}"
+        );
+    }
+}

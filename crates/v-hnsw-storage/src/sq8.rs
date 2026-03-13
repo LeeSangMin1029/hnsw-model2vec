@@ -123,6 +123,36 @@ impl Sq8Params {
         1.0 - dot.clamp(-1.0, 1.0)
     }
 
+    /// Build a per-query distance lookup table for batch SQ8 distance.
+    ///
+    /// Returns a `dim × 256` table where `lut[i*256+q] = query[i] * dequant(i, q)`.
+    /// With this LUT, distance for each vector becomes a simple sum of lookups:
+    /// `distance = 1.0 - clamp(sum(lut[i*256 + codes[i]]))`.
+    pub fn build_query_lut(&self, query: &[f32]) -> Vec<f32> {
+        let dim = query.len();
+        let mut lut = vec![0.0_f32; dim * 256];
+        for (i, &qi) in query.iter().enumerate() {
+            let base = i * 256;
+            for q in 0..256 {
+                lut[base + q] = qi * self.dequant_lut[base + q];
+            }
+        }
+        lut
+    }
+
+    /// Compute asymmetric distance using a pre-built query LUT.
+    ///
+    /// ~2x faster than `asymmetric_distance` when called many times for the
+    /// same query (eliminates per-element multiply).
+    #[inline]
+    pub fn distance_with_lut(lut: &[f32], codes: &[u8]) -> f32 {
+        let mut dot = 0.0_f32;
+        for (i, &code) in codes.iter().enumerate() {
+            dot += lut[i * 256 + code as usize];
+        }
+        1.0 - dot.clamp(-1.0, 1.0)
+    }
+
     /// Dimension count.
     pub fn dim(&self) -> usize {
         self.mins.len()

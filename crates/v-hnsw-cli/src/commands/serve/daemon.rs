@@ -21,7 +21,7 @@ use v_hnsw_storage::sq8::Sq8Params;
 use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
-use crate::commands::common::{self, F32Dc, QueryCache, SearchResultItem, Sq8Dc};
+use crate::commands::common::{self, F32Dc, QueryCache, SearchResultItem, Sq8LutDc};
 use crate::commands::db_config::DbConfig;
 
 /// Seconds of idle time before unloading the embedding model.
@@ -53,7 +53,7 @@ impl DenseIndex {
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         // Use SQ8 two-stage search if available
         if let Some(sq8) = sq8 {
-            let approx = Sq8Dc { params: &sq8.params, store: &sq8.store };
+            let approx = Sq8LutDc::new(&sq8.params, &sq8.store, query);
             let exact = F32Dc { store };
             return match self {
                 Self::Snapshot(s) => s.search_two_stage(&approx, &exact, query, k, ef),
