@@ -333,8 +333,24 @@ fn find_sub_block_clones(
     pstore: &impl PayloadStore,
     candidate_ids: &[u64],
 ) -> Vec<SubBlockClone> {
-    let mut hash_groups: HashMap<u64, Vec<(u64, usize, usize)>> = HashMap::new();
+    // Pre-compute chunk line ranges for containment checks
+    let chunk_ranges: HashMap<u64, (String, i64, i64)> = candidate_ids
+        .iter()
+        .filter_map(|&id| {
+            let p = pstore.get_payload(id).ok()??;
+            let s = match p.custom.get("start_line") {
+                Some(PayloadValue::Integer(v)) => *v,
+                _ => return None,
+            };
+            let e = match p.custom.get("end_line") {
+                Some(PayloadValue::Integer(v)) => *v,
+                _ => return None,
+            };
+            Some((id, (p.source.clone(), s, e)))
+        })
+        .collect();
 
+    let mut hash_groups: HashMap<u64, Vec<(u64, usize, usize)>> = HashMap::new();
     for &id in candidate_ids {
         for (ast_hash, start, end) in parse_sub_block_entries(pstore, id) {
             hash_groups
@@ -342,6 +358,13 @@ fn find_sub_block_clones(
                 .or_default()
                 .push((id, start, end));
         }
+    }
+
+    // Deduplicate: for each hash group, keep only the smallest (most specific)
+    // chunk per file+block combination. This removes entries from parent chunks
+    // (e.g. full impl block) when a child chunk (e.g. individual method) exists.
+    for entries in hash_groups.values_mut() {
+        deduplicate_contained_entries(entries, &chunk_ranges);
     }
 
     let mut clones = Vec::new();
@@ -356,7 +379,15 @@ fn find_sub_block_clones(
                 if id_a == id_b {
                     continue;
                 }
+                // Skip very small blocks (< 5 lines) — too noisy
+                if ea.saturating_sub(sa) < 5 || eb.saturating_sub(sb) < 5 {
+                    continue;
+                }
                 if same_file(pstore, id_a, id_b) && ranges_overlap(sa, ea, sb, eb) {
+                    continue;
+                }
+                // Skip if one chunk fully contains the other in the same file
+                if chunk_contains(&chunk_ranges, id_a, id_b) {
                     continue;
                 }
                 clones.push(SubBlockClone {
@@ -379,6 +410,66 @@ fn find_sub_block_clones(
     });
     clones.truncate(50);
     clones
+}
+
+/// Remove entries from parent chunks when a more specific child chunk exists.
+///
+/// For each hash group, if two entries are in the same file and one chunk's
+/// line range fully contains the other, keep only the smaller (more specific) one.
+fn deduplicate_contained_entries(
+    entries: &mut Vec<(u64, usize, usize)>,
+    ranges: &HashMap<u64, (String, i64, i64)>,
+) {
+    if entries.len() < 2 {
+        return;
+    }
+    let mut to_remove = Vec::new();
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            let (id_a, _, _) = entries[i];
+            let (id_b, _, _) = entries[j];
+            if id_a == id_b {
+                continue;
+            }
+            if let (Some(a), Some(b)) = (ranges.get(&id_a), ranges.get(&id_b)) {
+                if a.0 == b.0 {
+                    // Same file: remove the larger (parent) chunk entry
+                    let a_size = a.2 - a.1;
+                    let b_size = b.2 - b.1;
+                    if a.1 <= b.1 && a.2 >= b.2 {
+                        to_remove.push(i); // A contains B, remove A
+                    } else if b.1 <= a.1 && b.2 >= a.2 {
+                        to_remove.push(j); // B contains A, remove B
+                    } else if a_size > b_size && a.1 <= b.1 {
+                        to_remove.push(i);
+                    } else if b_size > a_size && b.1 <= a.1 {
+                        to_remove.push(j);
+                    }
+                }
+            }
+        }
+    }
+    to_remove.sort_unstable();
+    to_remove.dedup();
+    for &idx in to_remove.iter().rev() {
+        entries.swap_remove(idx);
+    }
+}
+
+/// Check if one chunk fully contains the other (same file, line range containment).
+fn chunk_contains(
+    ranges: &HashMap<u64, (String, i64, i64)>,
+    id_a: u64,
+    id_b: u64,
+) -> bool {
+    let (Some(a), Some(b)) = (ranges.get(&id_a), ranges.get(&id_b)) else {
+        return false;
+    };
+    if a.0 != b.0 {
+        return false;
+    }
+    // A contains B, or B contains A
+    (a.1 <= b.1 && a.2 >= b.2) || (b.1 <= a.1 && b.2 >= a.2)
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────
