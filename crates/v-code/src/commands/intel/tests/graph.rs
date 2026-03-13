@@ -1,18 +1,6 @@
 use crate::commands::intel::graph::CallGraph;
-use crate::commands::intel::parse::CodeChunk;
 
-fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
-        kind: "function".to_owned(),
-        name: name.to_owned(),
-        file: file.to_owned(),
-        lines: Some((1, 10)),
-        signature: Some(format!("fn {name}()")),
-        calls: calls.iter().map(|s| s.to_string()).collect(),
-        types: vec![],
-        imports: vec![],
-    }
-}
+use super::helpers::chunk;
 
 // ── CallGraph::build ─────────────────────────────────────────────────
 

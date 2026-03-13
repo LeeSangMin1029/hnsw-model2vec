@@ -2,14 +2,7 @@
 
 use serde_json::Value;
 
-/// Mirror of the private ExportRecord for testing serialization shape.
-#[derive(Debug, serde::Serialize)]
-struct ExportRecord {
-    id: u64,
-    vector: Vec<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-}
+use crate::commands::export::ExportRecord;
 
 #[test]
 fn export_record_serialize_with_text() {

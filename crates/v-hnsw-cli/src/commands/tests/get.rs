@@ -2,14 +2,7 @@
 
 use serde_json::Value;
 
-/// Mirror of the private PointOutput for testing serialization shape.
-#[derive(Debug, serde::Serialize)]
-struct PointOutput {
-    id: u64,
-    text: Option<String>,
-    vector_preview: Vec<f32>,
-    vector_dim: usize,
-}
+use crate::commands::get::PointOutput;
 
 #[test]
 fn point_output_serialize_with_text() {

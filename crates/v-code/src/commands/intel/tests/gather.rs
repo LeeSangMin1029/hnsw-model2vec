@@ -4,7 +4,8 @@ use crate::commands::intel::gather::{
 use crate::commands::intel::{format_lines_opt as format_lines, format_lines_str_opt as format_lines_str};
 use crate::commands::intel::gather::Direction::{Forward, Reverse};
 use crate::commands::intel::graph::CallGraph;
-use crate::commands::intel::parse::CodeChunk;
+
+use super::helpers::{chunk, test_chunk};
 
 /// Convenience wrapper for tests: forward BFS.
 fn bfs_forward(graph: &CallGraph, seeds: &[u32], depth: u32, include_tests: bool) -> Vec<GatherEntry> {
@@ -14,32 +15,6 @@ fn bfs_forward(graph: &CallGraph, seeds: &[u32], depth: u32, include_tests: bool
 /// Convenience wrapper for tests: reverse BFS.
 fn bfs_reverse(graph: &CallGraph, seeds: &[u32], depth: u32, include_tests: bool) -> Vec<GatherEntry> {
     bfs_directed(graph, seeds, depth, include_tests, Direction::Reverse)
-}
-
-fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
-        kind: "function".to_owned(),
-        name: name.to_owned(),
-        file: file.to_owned(),
-        lines: Some((1, 10)),
-        signature: Some(format!("fn {name}()")),
-        calls: calls.iter().map(|s| s.to_string()).collect(),
-        types: vec![],
-        imports: vec![],
-    }
-}
-
-fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
-        kind: "function".to_owned(),
-        name: name.to_owned(),
-        file: format!("src/tests/{file}"),
-        lines: Some((1, 10)),
-        signature: Some(format!("fn {name}()")),
-        calls: calls.iter().map(|s| s.to_string()).collect(),
-        types: vec![],
-        imports: vec![],
-    }
 }
 
 // ── Direction::label ────────────────────────────────────────────────

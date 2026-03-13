@@ -1,19 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 use crate::bm25::index::{Bm25Index, PostingList};
-use crate::Tokenizer;
-
-/// Simple whitespace tokenizer for testing.
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
-struct WhitespaceTokenizer;
-
-impl Tokenizer for WhitespaceTokenizer {
-    fn tokenize(&self, text: &str) -> Vec<String> {
-        text.split_whitespace()
-            .map(|s| s.to_lowercase())
-            .collect()
-    }
-}
+use crate::WhitespaceTokenizer;
 
 #[test]
 fn test_empty_index() {
@@ -94,11 +80,7 @@ fn test_posting_list() {
     assert_eq!(pl.df(), 1);
 }
 
-fn make_temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(name);
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
+use super::make_temp_dir;
 
 fn cleanup_dir(dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(dir);

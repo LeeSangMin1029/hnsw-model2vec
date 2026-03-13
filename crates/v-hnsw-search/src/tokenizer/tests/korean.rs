@@ -1,18 +1,9 @@
-use std::path::PathBuf;
-
 use crate::tokenizer::korean::{
     KoreanTokenizer, KoreanTokenizerConfig, Token, TokenKind, Tokenizer, TokenizerMode,
     WhitespaceTokenizer,
 };
 
-/// Resolve ko-dic path for tests.
-/// Uses LINDERA_KO_DIC_PATH env var, falls back to ~/.v-hnsw/dict/ko-dic/
-fn test_dict_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LINDERA_KO_DIC_PATH") {
-        return PathBuf::from(path);
-    }
-    v_hnsw_core::ko_dic_dir()
-}
+use super::test_dict_path;
 
 #[test]
 fn test_token_kind_from_pos() {

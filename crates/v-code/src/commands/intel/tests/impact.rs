@@ -1,33 +1,8 @@
 use crate::commands::intel::impact::bfs_reverse;
 use crate::commands::intel::{format_lines_opt as format_lines, format_lines_str_opt as format_lines_str};
 use crate::commands::intel::graph::CallGraph;
-use crate::commands::intel::parse::CodeChunk;
 
-fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
-        kind: "function".to_owned(),
-        name: name.to_owned(),
-        file: file.to_owned(),
-        lines: Some((1, 10)),
-        signature: Some(format!("fn {name}()")),
-        calls: calls.iter().map(|s| s.to_string()).collect(),
-        types: vec![],
-        imports: vec![],
-    }
-}
-
-fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
-        kind: "function".to_owned(),
-        name: name.to_owned(),
-        file: format!("src/tests/{file}"),
-        lines: Some((1, 10)),
-        signature: Some(format!("fn {name}()")),
-        calls: calls.iter().map(|s| s.to_string()).collect(),
-        types: vec![],
-        imports: vec![],
-    }
-}
+use super::helpers::{chunk, test_chunk};
 
 // ── bfs_reverse ─────────────────────────────────────────────────────
 

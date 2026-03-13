@@ -1,11 +1,7 @@
 use crate::bm25::snapshot::Bm25Snapshot;
 use crate::{Bm25Index, WhitespaceTokenizer};
 
-fn make_temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(name);
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
+use super::make_temp_dir;
 
 #[test]
 fn test_bm25_snapshot_roundtrip() {

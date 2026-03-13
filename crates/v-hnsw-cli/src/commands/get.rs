@@ -8,11 +8,11 @@ use v_hnsw_storage::StorageEngine;
 
 /// Point details for JSON output.
 #[derive(Debug, Serialize)]
-struct PointOutput {
-    id: u64,
-    text: Option<String>,
-    vector_preview: Vec<f32>,
-    vector_dim: usize,
+pub(crate) struct PointOutput {
+    pub(crate) id: u64,
+    pub(crate) text: Option<String>,
+    pub(crate) vector_preview: Vec<f32>,
+    pub(crate) vector_dim: usize,
 }
 
 /// Run the get command.

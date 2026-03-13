@@ -15,11 +15,11 @@ use crate::is_interrupted;
 
 /// Export record for JSONL output.
 #[derive(Debug, Serialize)]
-struct ExportRecord {
-    id: u64,
-    vector: Vec<f32>,
+pub(crate) struct ExportRecord {
+    pub(crate) id: u64,
+    pub(crate) vector: Vec<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
+    pub(crate) text: Option<String>,
 }
 
 /// Run the export command.

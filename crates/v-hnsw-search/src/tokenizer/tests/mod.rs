@@ -13,7 +13,7 @@ use super::korean::{KoreanTokenizer, Tokenizer, WhitespaceTokenizer};
 use super::user_dict::{DictionaryEntry, UserDictionary};
 
 /// Resolve ko-dic path for tests.
-fn test_dict_path() -> PathBuf {
+pub(super) fn test_dict_path() -> PathBuf {
     if let Ok(path) = std::env::var("LINDERA_KO_DIC_PATH") {
         return PathBuf::from(path);
     }
