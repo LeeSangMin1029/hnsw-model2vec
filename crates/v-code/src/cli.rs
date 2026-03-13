@@ -223,6 +223,9 @@ pub enum Commands {
         /// Skip functions shorter than N lines.
         #[arg(long, default_value = "5")]
         min_lines: usize,
+        /// Minimum sub-block size (lines) for intra-function clone detection.
+        #[arg(long, default_value = "5")]
+        min_sub_lines: usize,
     },
     /// Show per-crate code statistics (functions, structs, enums).
     Stats {

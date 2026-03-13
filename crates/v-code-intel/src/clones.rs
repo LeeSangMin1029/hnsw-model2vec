@@ -163,6 +163,7 @@ pub fn run_unified_pipeline(
     threshold: f32,
     k: usize,
     stages: &RunStages,
+    min_sub_lines: usize,
 ) -> Result<(Vec<UnifiedDupePair>, Vec<SubBlockClone>)> {
     // Stage 1: Filter (collect candidate pairs)
     let mut candidates: HashSet<(u64, u64)> = HashSet::new();
@@ -238,7 +239,7 @@ pub fn run_unified_pipeline(
     pairs.truncate(k);
 
     // Sub-block clone detection
-    let sub_clones = find_sub_block_clones(pstore, candidate_ids);
+    let sub_clones = find_sub_block_clones(pstore, candidate_ids, min_sub_lines);
 
     Ok((pairs, sub_clones))
 }
@@ -332,6 +333,7 @@ fn parse_sub_block_entries(pstore: &impl PayloadStore, id: u64) -> Vec<(u64, usi
 fn find_sub_block_clones(
     pstore: &impl PayloadStore,
     candidate_ids: &[u64],
+    min_sub_lines: usize,
 ) -> Vec<SubBlockClone> {
     // Pre-compute chunk line ranges for containment checks
     let chunk_ranges: HashMap<u64, (String, i64, i64)> = candidate_ids
@@ -379,8 +381,8 @@ fn find_sub_block_clones(
                 if id_a == id_b {
                     continue;
                 }
-                // Skip very small blocks (< 5 lines) — too noisy
-                if ea.saturating_sub(sa) < 5 || eb.saturating_sub(sb) < 5 {
+                // Skip very small blocks — too noisy
+                if ea.saturating_sub(sa) < min_sub_lines || eb.saturating_sub(sb) < min_sub_lines {
                     continue;
                 }
                 if same_file(pstore, id_a, id_b) && ranges_overlap(sa, ea, sb, eb) {

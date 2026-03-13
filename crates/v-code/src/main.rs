@@ -62,9 +62,9 @@ fn run() -> anyhow::Result<()> {
             failure, fix, root_cause, reject_reason, reject_condition,
             resolve, invalidate, show_all: all, delete, file_path, line_range, relate,
         }),
-        Commands::Dupes { db, threshold, exclude_tests, k, json, ast, all, min_lines } => {
+        Commands::Dupes { db, threshold, exclude_tests, k, json, ast, all, min_lines, min_sub_lines } => {
             commands::dupes::run(commands::dupes::DupesConfig {
-                db, threshold, exclude_tests, k, json, ast_mode: ast, all_mode: all, min_lines,
+                db, threshold, exclude_tests, k, json, ast_mode: ast, all_mode: all, min_lines, min_sub_lines,
             })
         }
         Commands::Stats { db, format } => intel::run_stats(db, format),

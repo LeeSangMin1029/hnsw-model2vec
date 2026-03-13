@@ -89,13 +89,14 @@ pub struct DupesConfig {
     pub ast_mode: bool,
     pub all_mode: bool,
     pub min_lines: usize,
+    pub min_sub_lines: usize,
 }
 
 /// Run the dupes command.
 pub fn run(cfg: DupesConfig) -> Result<()> {
     let DupesConfig {
         db, threshold, exclude_tests, k, json,
-        ast_mode, all_mode, min_lines,
+        ast_mode, all_mode, min_lines, min_sub_lines,
     } = cfg;
     let engine = StorageEngine::open(&db)
         .with_context(|| format!("failed to open database at {}", db.display()))?;
@@ -145,7 +146,7 @@ pub fn run(cfg: DupesConfig) -> Result<()> {
     eprintln!("Unified pipeline: {n} chunks");
 
     let (unified_pairs, sub_clones) =
-        clones::run_unified_pipeline(&engine, pstore, &candidate_ids, threshold, k, &stages)?;
+        clones::run_unified_pipeline(&engine, pstore, &candidate_ids, threshold, k, &stages, min_sub_lines)?;
 
     if unified_pairs.is_empty() {
         println!("No duplicates found.");
