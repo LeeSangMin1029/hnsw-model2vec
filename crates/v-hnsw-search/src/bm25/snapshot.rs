@@ -204,12 +204,10 @@ impl Bm25Snapshot {
         &self, tokenizer: &T, query: &str, limit: usize,
     ) -> Vec<(PointId, f32)> {
         if self.total_docs == 0 { return Vec::new(); }
-        let mut tokens = tokenizer.tokenize(query);
-        let bigrams = super::bigram::generate(&tokens);
-        tokens.extend(bigrams);
-        let terms = self.resolve_terms(&tokens);
-        if terms.is_empty() { return Vec::new(); }
-        let ctx = self.scoring_ctx();
+        let (ctx, terms) = match self.prepare_query(tokenizer, query) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
         super::scorer::accumulate_and_rank(&ctx, &terms, self.max_doc_id, limit)
     }
 
@@ -218,16 +216,26 @@ impl Bm25Snapshot {
         &self, tokenizer: &T, query: &str, doc_ids: &[PointId],
     ) -> Vec<(PointId, f32)> {
         if self.total_docs == 0 || doc_ids.is_empty() { return Vec::new(); }
-        let mut tokens = tokenizer.tokenize(query);
-        let bigrams = super::bigram::generate(&tokens);
-        tokens.extend(bigrams);
-        let terms = self.resolve_terms(&tokens);
-        if terms.is_empty() { return Vec::new(); }
-        let ctx = self.scoring_ctx();
+        let (ctx, terms) = match self.prepare_query(tokenizer, query) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
         super::scorer::score_documents_common(&ctx, &terms, doc_ids)
     }
 
     // -- Internal helpers --
+
+    /// Tokenize query, generate bigrams, resolve terms, and build scoring context.
+    fn prepare_query<T: Tokenizer>(
+        &self, tokenizer: &T, query: &str,
+    ) -> Option<(ScoringCtx<'_>, Vec<(&[PostingEntry], f32)>)> {
+        let mut tokens = tokenizer.tokenize(query);
+        let bigrams = super::bigram::generate(&tokens);
+        tokens.extend(bigrams);
+        let terms = self.resolve_terms(&tokens);
+        if terms.is_empty() { return None; }
+        Some((self.scoring_ctx(), terms))
+    }
 
     fn resolve_terms<'a>(&'a self, tokens: &[String]) -> Vec<(&'a [PostingEntry], f32)> {
         tokens

@@ -25,16 +25,15 @@ fn random_float(state: &mut u64) -> f64 {
     (xorshift64(state) as f64) / (u64::MAX as f64)
 }
 
-/// Insert a point into the HNSW graph, storing the vector in the internal store.
-pub(crate) fn insert<D: DistanceMetric>(
-    graph: &mut HnswGraph<D>,
-    id: PointId,
-    vector: &[f32],
+/// Validate dimension and capacity before insertion.
+fn validate_insert<D: DistanceMetric>(
+    graph: &HnswGraph<D>,
+    vector_len: usize,
 ) -> v_hnsw_core::Result<()> {
-    if vector.len() != graph.config.dim {
+    if vector_len != graph.config.dim {
         return Err(VhnswError::DimensionMismatch {
             expected: graph.config.dim,
-            got: vector.len(),
+            got: vector_len,
         });
     }
     if graph.count >= graph.config.max_elements {
@@ -42,10 +41,18 @@ pub(crate) fn insert<D: DistanceMetric>(
             capacity: graph.config.max_elements,
         });
     }
+    Ok(())
+}
 
+/// Insert a point into the HNSW graph, storing the vector in the internal store.
+pub(crate) fn insert<D: DistanceMetric>(
+    graph: &mut HnswGraph<D>,
+    id: PointId,
+    vector: &[f32],
+) -> v_hnsw_core::Result<()> {
+    validate_insert(graph, vector.len())?;
     graph.store.insert(id, vector)?;
 
-    // Decomposed field access: avoids cloning the entire store
     insert_core(
         &mut graph.nodes, &graph.store, &graph.distance, &graph.config,
         &mut graph.entry_point, &mut graph.max_layer, &mut graph.count,
@@ -63,17 +70,7 @@ pub(crate) fn insert_with_store<D: DistanceMetric>(
     id: PointId,
 ) -> v_hnsw_core::Result<()> {
     let vector = store.get(id)?;
-    if vector.len() != graph.config.dim {
-        return Err(VhnswError::DimensionMismatch {
-            expected: graph.config.dim,
-            got: vector.len(),
-        });
-    }
-    if graph.count >= graph.config.max_elements {
-        return Err(VhnswError::IndexFull {
-            capacity: graph.config.max_elements,
-        });
-    }
+    validate_insert(graph, vector.len())?;
 
     insert_core(
         &mut graph.nodes, store, &graph.distance, &graph.config,
