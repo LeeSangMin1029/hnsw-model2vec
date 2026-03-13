@@ -55,11 +55,10 @@ pub fn load_chunks_from_db(path: &Path) -> Result<Vec<CodeChunk>> {
         if let Ok(Some(text)) = payload_store.get_text(id)
             && let Some(mut chunk) = parse::parse_chunk(&text)
         {
-            if let Ok(Some(payload)) = payload_store.get_payload(id) {
-                if let Some(PayloadValue::StringList(imports)) = payload.custom.get("imports") {
+            if let Ok(Some(payload)) = payload_store.get_payload(id)
+                && let Some(PayloadValue::StringList(imports)) = payload.custom.get("imports") {
                     chunk.imports.clone_from(imports);
                 }
-            }
             chunks.push(chunk);
         }
     }

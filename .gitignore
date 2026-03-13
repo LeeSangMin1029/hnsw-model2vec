@@ -40,6 +40,9 @@ Thumbs.db
 # macOS
 .DS_Store
 
+# SCIP index (generated artifact)
+index.scip
+
 # Scripts (local utilities)
 check-disk.ps1
 

@@ -74,6 +74,11 @@ impl QueryCache {
         self.cache.len()
     }
 
+    /// Whether cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
     /// Save cache to disk.
     pub fn save(&self) -> Result<()> {
         let entries: Vec<CacheEntry> = self.cache.iter()

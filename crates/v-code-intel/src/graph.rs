@@ -397,11 +397,10 @@ fn resolve_with_imports(
     }
 
     // 4. Direct import match: bare name like "HashMap".
-    if let Some(qualified) = imports.get(&lower) {
-        if let Some(&idx) = exact.get(qualified) {
+    if let Some(qualified) = imports.get(&lower)
+        && let Some(&idx) = exact.get(qualified) {
             return Some(idx);
         }
-    }
 
     // 5. Type-reference heuristic for `.method()` calls.
     //    Check source chunk's type refs AND types inferred from `::` calls in the same chunk.
@@ -469,14 +468,14 @@ fn build_import_map(imports: &[String]) -> BTreeMap<String, String> {
             let prefix = s[..brace].trim_end_matches("::");
             if let Some(end) = s.rfind('}') {
                 for part in s[brace + 1..end].split(',') {
-                    let name = part.trim().split_whitespace().next().unwrap_or("");
+                    let name = part.split_whitespace().next().unwrap_or("");
                     if !name.is_empty() && name != "self" {
                         map.insert(name.to_lowercase(), format!("{}::{}", prefix, name).to_lowercase());
                     }
                 }
             }
         } else if let Some(last) = s.rsplit("::").next() {
-            let short = last.trim().split_whitespace().next().unwrap_or("");
+            let short = last.split_whitespace().next().unwrap_or("");
             if !short.is_empty() {
                 map.insert(short.to_lowercase(), s.to_lowercase());
             }

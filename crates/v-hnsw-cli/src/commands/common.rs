@@ -114,7 +114,7 @@ pub const DEFAULT_MODEL: &str = "minishlab/potion-multilingual-128M";
 /// Create embedding model (model2vec).
 pub fn create_model() -> Result<Model2VecModel> {
     tracing::info!(model = DEFAULT_MODEL, "Loading model2vec model");
-    println!("Model: {} (dim={})", DEFAULT_MODEL, "loading...");
+    println!("Model: {DEFAULT_MODEL} (dim=loading...)");
 
     let model = Model2VecModel::from_pretrained(DEFAULT_MODEL)
         .context("Failed to load model2vec model")?;

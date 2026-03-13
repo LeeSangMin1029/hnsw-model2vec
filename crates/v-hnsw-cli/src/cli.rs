@@ -14,7 +14,6 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
-#[expect(clippy::large_enum_variant, reason = "clap derive enums are parsed once, size is irrelevant")]
 pub enum Commands {
     /// Create a new database.
     Create {

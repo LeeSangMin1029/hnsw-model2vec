@@ -251,7 +251,7 @@ fn extract_lines(text: &str) -> Option<&str> {
             let rest = rest.trim();
             if let Some(colon_pos) = rest.rfind(':') {
                 let range = &rest[colon_pos + 1..];
-                if range.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                if range.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                     return Some(range);
                 }
             }

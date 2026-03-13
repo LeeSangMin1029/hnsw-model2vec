@@ -188,8 +188,8 @@ impl LspCallResolver {
             for call in &chunk.calls {
                 // We need the line/col of each call site.
                 // For now, use the chunk's start line + search within the chunk text.
-                if let Some((line, col)) = find_call_position_in_chunk(chunk, call) {
-                    if let Ok(Some(loc)) = self.definition(&fpath, line, col) {
+                if let Some((line, col)) = find_call_position_in_chunk(chunk, call)
+                    && let Ok(Some(loc)) = self.definition(&fpath, line, col) {
                         // Convert definition location back to a chunk name
                         if let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
                             call_map
@@ -198,7 +198,6 @@ impl LspCallResolver {
                                 .push(callee);
                         }
                     }
-                }
             }
 
             // Deduplicate callees
@@ -311,11 +310,10 @@ fn read_lsp_messages(stdout: std::process::ChildStdout, tx: Sender<serde_json::V
             return;
         }
 
-        if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) {
-            if tx.send(msg).is_err() {
+        if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body)
+            && tx.send(msg).is_err() {
                 return; // receiver dropped
             }
-        }
     }
 }
 
@@ -415,7 +413,7 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let path_str = uri
         .strip_prefix("file:///")
         .or_else(|| uri.strip_prefix("file://"))?;
-    Some(PathBuf::from(path_str.replace('/', &std::path::MAIN_SEPARATOR.to_string())))
+    Some(PathBuf::from(path_str.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }
 
 // ── Result Parsing ───────────────────────────────────────────────────
@@ -503,25 +501,23 @@ fn location_to_chunk_name(
     // Find the chunk that contains this definition
     for chunk in chunks {
         let chunk_file = chunk.file.replace('\\', "/");
-        if let Some((start, end)) = chunk.lines {
-            if chunk_file == rel_str && target_line >= start && target_line <= end {
+        if let Some((start, end)) = chunk.lines
+            && chunk_file == rel_str && target_line >= start && target_line <= end {
                 return Some(normalize_chunk_name(&chunk.name));
             }
-        }
     }
 
     // Fallback: match by file only, find closest chunk
     let mut best: Option<(&CodeChunk, usize)> = None;
     for chunk in chunks {
         let chunk_file = chunk.file.replace('\\', "/");
-        if let Some((start, _)) = chunk.lines {
-            if chunk_file == rel_str && target_line >= start {
+        if let Some((start, _)) = chunk.lines
+            && chunk_file == rel_str && target_line >= start {
                 let dist = target_line - start;
                 if best.as_ref().is_none_or(|(_, d)| dist < *d) {
                     best = Some((chunk, dist));
                 }
             }
-        }
     }
 
     best.map(|(c, _)| normalize_chunk_name(&c.name))
