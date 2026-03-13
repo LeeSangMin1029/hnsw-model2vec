@@ -124,17 +124,8 @@ pub struct Bm25Index<T: Tokenizer> {
 impl<T: Tokenizer> Bm25Index<T> {
     /// Create a new BM25 index with the given tokenizer.
     pub fn new(tokenizer: T) -> Self {
-        Self {
-            tokenizer,
-            storage: TermStorage::HashMap(HashMap::new()),
-            doc_lengths: HashMap::new(),
-            total_length: 0,
-            total_docs: 0,
-            params: Bm25Params::default(),
-            max_doc_id: 0,
-            fieldnorm_codes: HashMap::new(),
-            fieldnorm_lut: None,
-        }
+        let params = Bm25Params::default();
+        Self::with_params(tokenizer, params.k1, params.b)
     }
 
     /// Create a new BM25 index with custom scoring parameters.

@@ -69,9 +69,7 @@ where
         k: usize,
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         let dense = self.dense_index.search(query_vector, self.config.dense_limit, self.config.ef_search)?;
-        let sparse = self.sparse_index.search(query_text, self.config.sparse_limit);
-        let all_sparse = enrich_sparse(&dense, sparse, |ids| self.sparse_index.score_documents(query_text, ids));
-        Ok(self.fusion.fuse(&dense, &all_sparse, k))
+        self.fuse_with_sparse(dense, query_text, k)
     }
 
     /// Perform hybrid search reading vectors from an external store.
@@ -83,6 +81,16 @@ where
         k: usize,
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         let dense = self.dense_index.search_ext(store, query_vector, self.config.dense_limit, self.config.ef_search)?;
+        self.fuse_with_sparse(dense, query_text, k)
+    }
+
+    /// Combine dense results with sparse BM25 scores via fusion.
+    fn fuse_with_sparse(
+        &self,
+        dense: Vec<(PointId, f32)>,
+        query_text: &str,
+        k: usize,
+    ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         let sparse = self.sparse_index.search(query_text, self.config.sparse_limit);
         let all_sparse = enrich_sparse(&dense, sparse, |ids| self.sparse_index.score_documents(query_text, ids));
         Ok(self.fusion.fuse(&dense, &all_sparse, k))
