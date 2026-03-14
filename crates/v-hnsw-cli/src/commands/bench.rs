@@ -75,26 +75,16 @@ pub fn run(path: PathBuf, queries: usize, k: usize) -> Result<()> {
 
     if snap_path.exists() {
         let snap = HnswSnapshot::open(&snap_path).context("Failed to open snapshot")?;
-        for ef in ef_values {
-            let (recall, qps, latency) = bench_f32_snapshot(
-                &snap, vector_store, &query_vectors, &ground_truth, k, ef,
-            );
-            println!(
-                "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
-            );
-        }
+        bench_ef_sweep(&ef_values, k, &query_vectors, &ground_truth, |q, ef| {
+            snap.search_ext(&NormalizedCosineDistance, vector_store, q, k, ef).ok()
+        });
     } else if bin_path.exists() {
         let hnsw: HnswGraph<NormalizedCosineDistance> =
             HnswGraph::load(&bin_path, NormalizedCosineDistance)
                 .context("Failed to load HNSW")?;
-        for ef in ef_values {
-            let (recall, qps, latency) = bench_f32_heap(
-                &hnsw, vector_store, &query_vectors, &ground_truth, k, ef,
-            );
-            println!(
-                "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
-            );
-        }
+        bench_ef_sweep(&ef_values, k, &query_vectors, &ground_truth, |q, ef| {
+            hnsw.search_ext(vector_store, q, k, ef).ok()
+        });
     } else {
         println!("  (no HNSW index found, skipping)");
     }
@@ -120,28 +110,21 @@ pub fn run(path: PathBuf, queries: usize, k: usize) -> Result<()> {
             f32_size as f64 / sq8_size as f64,
         );
 
+        let approx = Sq8Dc { params: &params, store: &sq8_store };
+        let exact = F32Dc { store: vector_store };
+
         if snap_path.exists() {
             let snap = HnswSnapshot::open(&snap_path).context("Failed to open snapshot")?;
-            for ef in ef_values {
-                let (recall, qps, latency) = bench_sq8_snapshot(
-                    &snap, vector_store, &params, &sq8_store, &query_vectors, &ground_truth, k, ef,
-                );
-                println!(
-                    "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
-                );
-            }
+            bench_ef_sweep(&ef_values, k, &query_vectors, &ground_truth, |q, ef| {
+                snap.search_two_stage(&approx, &exact, q, k, ef).ok()
+            });
         } else if bin_path.exists() {
             let hnsw: HnswGraph<NormalizedCosineDistance> =
                 HnswGraph::load(&bin_path, NormalizedCosineDistance)
                     .context("Failed to load HNSW")?;
-            for ef in ef_values {
-                let (recall, qps, latency) = bench_sq8_heap(
-                    &hnsw, vector_store, &params, &sq8_store, &query_vectors, &ground_truth, k, ef,
-                );
-                println!(
-                    "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
-                );
-            }
+            bench_ef_sweep(&ef_values, k, &query_vectors, &ground_truth, |q, ef| {
+                hnsw.search_two_stage(&approx, &exact, q, k, ef).ok()
+            });
         }
     } else {
         println!();
@@ -204,83 +187,31 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// f32 benchmarks
-// ---------------------------------------------------------------------------
-
-fn bench_f32_snapshot(
-    snap: &HnswSnapshot,
-    store: &dyn VectorStore,
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<PointId>],
-    k: usize,
-    ef: usize,
-) -> (f64, f64, f64) {
-    bench_search(
-        |q| snap.search_ext(&NormalizedCosineDistance, store, q, k, ef).ok(),
-        queries,
-        ground_truth,
-    )
-}
-
-fn bench_f32_heap(
-    hnsw: &HnswGraph<NormalizedCosineDistance>,
-    store: &dyn VectorStore,
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<PointId>],
-    k: usize,
-    ef: usize,
-) -> (f64, f64, f64) {
-    bench_search(
-        |q| hnsw.search_ext(store, q, k, ef).ok(),
-        queries,
-        ground_truth,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// SQ8 benchmarks
+// EF-sweep harness: run bench_search for each ef value and print results.
 // ---------------------------------------------------------------------------
 
 use super::common::{F32Dc, Sq8Dc};
 
-#[expect(clippy::too_many_arguments)]
-fn bench_sq8_snapshot(
-    snap: &HnswSnapshot,
-    f32_store: &dyn VectorStore,
-    params: &Sq8Params,
-    sq8_store: &Sq8VectorStore,
+fn bench_ef_sweep<F>(
+    ef_values: &[usize],
+    k: usize,
     queries: &[Vec<f32>],
     ground_truth: &[Vec<PointId>],
-    k: usize,
-    ef: usize,
-) -> (f64, f64, f64) {
-    let approx = Sq8Dc { params, store: sq8_store };
-    let exact = F32Dc { store: f32_store };
-    bench_search(
-        |q| snap.search_two_stage(&approx, &exact, q, k, ef).ok(),
-        queries,
-        ground_truth,
-    )
-}
-
-#[expect(clippy::too_many_arguments)]
-fn bench_sq8_heap(
-    hnsw: &HnswGraph<NormalizedCosineDistance>,
-    f32_store: &dyn VectorStore,
-    params: &Sq8Params,
-    sq8_store: &Sq8VectorStore,
-    queries: &[Vec<f32>],
-    ground_truth: &[Vec<PointId>],
-    k: usize,
-    ef: usize,
-) -> (f64, f64, f64) {
-    let approx = Sq8Dc { params, store: sq8_store };
-    let exact = F32Dc { store: f32_store };
-    bench_search(
-        |q| hnsw.search_two_stage(&approx, &exact, q, k, ef).ok(),
-        queries,
-        ground_truth,
-    )
+    search_fn: F,
+)
+where
+    F: Fn(&[f32], usize) -> Option<Vec<(PointId, f32)>>,
+{
+    for &ef in ef_values {
+        let (recall, qps, latency) = bench_search(
+            |q| search_fn(q, ef),
+            queries,
+            ground_truth,
+        );
+        println!(
+            "  ef={ef:3}: recall@{k}={recall:.4}  {qps:8.1} QPS  {latency:7.1}us/q",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

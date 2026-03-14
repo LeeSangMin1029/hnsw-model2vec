@@ -117,32 +117,35 @@ fn run_show_filtered(db: &std::path::Path, symbol: &str, show_all: bool) -> Resu
     Ok(())
 }
 
-/// Mark the last unresolved failure as resolved.
-fn run_resolve(db: &std::path::Path, symbol: &str) -> Result<()> {
+/// Load an entry, apply a failure-state mutation, save if changed, and print the result.
+fn update_failure_status(
+    db: &std::path::Path,
+    symbol: &str,
+    action_label: &str,
+    mutate: impl FnOnce(&mut ReasonEntry) -> bool,
+) -> Result<()> {
     let mut entry = reason::load_reason(db, symbol)?
         .ok_or_else(|| anyhow::anyhow!("No reasoning found for \"{symbol}\""))?;
 
-    if reason::resolve_last_failure(&mut entry) {
+    if mutate(&mut entry) {
         reason::save_reason(db, &entry)?;
-        println!("Resolved last failure for \"{symbol}\".");
+        println!("{action_label} last failure for \"{symbol}\".");
     } else {
         println!("No unresolved failure found for \"{symbol}\".");
     }
     Ok(())
 }
 
+/// Mark the last unresolved failure as resolved.
+fn run_resolve(db: &std::path::Path, symbol: &str) -> Result<()> {
+    update_failure_status(db, symbol, "Resolved", reason::resolve_last_failure)
+}
+
 /// Invalidate the last unresolved failure with a reason.
 fn run_invalidate(db: &std::path::Path, symbol: &str, inv_reason: &str) -> Result<()> {
-    let mut entry = reason::load_reason(db, symbol)?
-        .ok_or_else(|| anyhow::anyhow!("No reasoning found for \"{symbol}\""))?;
-
-    if reason::invalidate_last_failure(&mut entry, inv_reason) {
-        reason::save_reason(db, &entry)?;
-        println!("Invalidated last failure for \"{symbol}\".");
-    } else {
-        println!("No unresolved failure found for \"{symbol}\".");
-    }
-    Ok(())
+    update_failure_status(db, symbol, "Invalidated", |entry| {
+        reason::invalidate_last_failure(entry, inv_reason)
+    })
 }
 
 /// Delete reasoning for a symbol.
