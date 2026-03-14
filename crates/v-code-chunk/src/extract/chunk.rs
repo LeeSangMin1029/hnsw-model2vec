@@ -4,6 +4,26 @@ use crate::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 use super::ParsedSource;
 use super::common::{extract_function_signature, extract_struct_fields, collect_sorted_unique, walk_for_calls_with_lines, walk_for_type_ids, extract_name};
 
+/// Walk calls with line info and deduplicate, preserving first occurrence's line.
+fn extract_calls_deduped(
+    node: &tree_sitter::Node,
+    src: &[u8],
+) -> (Vec<String>, Vec<u32>) {
+    let mut raw_calls = Vec::new();
+    let mut raw_lines = Vec::new();
+    walk_for_calls_with_lines(node, src, &mut raw_calls, &mut raw_lines);
+    let mut seen = std::collections::HashSet::new();
+    let mut calls = Vec::new();
+    let mut lines = Vec::new();
+    for (c, l) in raw_calls.into_iter().zip(raw_lines) {
+        if seen.insert(c.clone()) {
+            calls.push(c);
+            lines.push(l);
+        }
+    }
+    (calls, lines)
+}
+
 pub fn simple_type_chunk(
     node: &tree_sitter::Node,
     src: &[u8],
@@ -124,20 +144,7 @@ pub fn build_chunk(
         None
     };
     let (calls, call_lines) = if config.extract_calls && is_func {
-        let mut raw_calls: Vec<String> = Vec::new();
-        let mut raw_lines: Vec<u32> = Vec::new();
-        walk_for_calls_with_lines(node, src, &mut raw_calls, &mut raw_lines);
-        // Deduplicate while preserving first occurrence's line.
-        let mut seen = std::collections::HashSet::new();
-        let mut deduped_calls = Vec::new();
-        let mut deduped_lines = Vec::new();
-        for (c, l) in raw_calls.into_iter().zip(raw_lines) {
-            if seen.insert(c.clone()) {
-                deduped_calls.push(c);
-                deduped_lines.push(l);
-            }
-        }
-        (deduped_calls, deduped_lines)
+        extract_calls_deduped(node, src)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -226,19 +233,7 @@ pub fn extract_methods(
         let visibility = (lang.extract_vis_fn)(&actual_child, src);
         let signature = extract_function_signature(&actual_child, src);
         let (calls, call_lines) = if config.extract_calls {
-            let mut raw_calls: Vec<String> = Vec::new();
-            let mut raw_lines: Vec<u32> = Vec::new();
-            walk_for_calls_with_lines(&actual_child, src, &mut raw_calls, &mut raw_lines);
-            let mut seen = std::collections::HashSet::new();
-            let mut dc = Vec::new();
-            let mut dl = Vec::new();
-            for (c, l) in raw_calls.into_iter().zip(raw_lines) {
-                if seen.insert(c.clone()) {
-                    dc.push(c);
-                    dl.push(l);
-                }
-            }
-            (dc, dl)
+            extract_calls_deduped(&actual_child, src)
         } else {
             (Vec::new(), Vec::new())
         };

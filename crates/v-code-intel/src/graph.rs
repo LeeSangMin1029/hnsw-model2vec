@@ -50,22 +50,30 @@ pub struct CallGraph {
     pub call_sites: Vec<Vec<(u32, u32)>>,
 }
 
-impl CallGraph {
-    /// Build the call graph from parsed code chunks.
-    ///
-    /// Resolution strategy: exact match on lowercase name first, then
-    /// short name (last `::` segment) fallback.
-    pub fn build(chunks: &[CodeChunk]) -> Self {
+/// Shared chunk metadata collected during graph construction.
+struct ChunkMeta {
+    names: Vec<String>,
+    files: Vec<String>,
+    kinds: Vec<String>,
+    lines: Vec<Option<(usize, usize)>>,
+    signatures: Vec<Option<String>>,
+    is_test: Vec<bool>,
+    name_index: Vec<(String, u32)>,
+    /// Single-value name → index map (tree-sitter resolution).
+    exact: BTreeMap<String, u32>,
+    /// Short (last `::` segment) → index map.
+    short: BTreeMap<String, u32>,
+}
+
+impl ChunkMeta {
+    fn collect(chunks: &[CodeChunk]) -> Self {
         let len = chunks.len();
-
-        // Build name -> index maps for call resolution.
-        let mut exact: BTreeMap<String, u32> = BTreeMap::new();
-        let mut short: BTreeMap<String, u32> = BTreeMap::new();
-
+        let mut exact = BTreeMap::new();
+        let mut short = BTreeMap::new();
         let mut names = Vec::with_capacity(len);
         let mut files = Vec::with_capacity(len);
         let mut kinds = Vec::with_capacity(len);
-        let mut lines_vec = Vec::with_capacity(len);
+        let mut lines = Vec::with_capacity(len);
         let mut signatures = Vec::with_capacity(len);
         let mut is_test = Vec::with_capacity(len);
         let mut name_index = Vec::with_capacity(len);
@@ -83,129 +91,114 @@ impl CallGraph {
             names.push(c.name.clone());
             files.push(c.file.clone());
             kinds.push(c.kind.clone());
-            lines_vec.push(c.lines);
+            lines.push(c.lines);
             signatures.push(c.signature.clone());
             is_test.push(is_test_chunk(c));
         }
 
         name_index.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Build adjacency lists + call site info.
-        let mut callees: Vec<Vec<u32>> = vec![Vec::new(); len];
-        let mut callers: Vec<Vec<u32>> = vec![Vec::new(); len];
-        let mut call_sites: Vec<Vec<(u32, u32)>> = vec![Vec::new(); len];
+        Self { names, files, kinds, lines, signatures, is_test, name_index, exact, short }
+    }
+}
+
+/// Mutable adjacency state accumulated during edge resolution.
+struct AdjState {
+    callees: Vec<Vec<u32>>,
+    callers: Vec<Vec<u32>>,
+    call_sites: Vec<Vec<(u32, u32)>>,
+}
+
+impl AdjState {
+    fn new(len: usize) -> Self {
+        Self {
+            callees: vec![Vec::new(); len],
+            callers: vec![Vec::new(); len],
+            call_sites: vec![Vec::new(); len],
+        }
+    }
+
+    /// Add a directed edge from `src` to `tgt` with the given call line.
+    fn add_edge(&mut self, src: usize, tgt: u32, call_line: u32) {
+        let tgt_usize = tgt as usize;
+        if tgt_usize != src {
+            self.callees[src].push(tgt);
+            self.callers[tgt_usize].push(src as u32);
+            self.call_sites[src].push((tgt, call_line));
+        }
+    }
+
+    /// Deduplicate all adjacency lists and call sites.
+    fn dedup(&mut self) {
+        for list in &mut self.callees {
+            list.sort_unstable();
+            list.dedup();
+        }
+        for list in &mut self.callers {
+            list.sort_unstable();
+            list.dedup();
+        }
+        for sites in &mut self.call_sites {
+            sites.sort_by_key(|&(tgt, _)| tgt);
+            sites.dedup_by_key(|e| e.0);
+        }
+    }
+}
+
+impl CallGraph {
+    /// Build the call graph from parsed code chunks.
+    ///
+    /// Resolution strategy: exact match on lowercase name first, then
+    /// short name (last `::` segment) fallback.
+    pub fn build(chunks: &[CodeChunk]) -> Self {
+        let meta = ChunkMeta::collect(chunks);
+        let mut adj = AdjState::new(chunks.len());
 
         for (src, c) in chunks.iter().enumerate() {
             let imports = build_import_map(&c.imports);
             let self_type = owning_type(&c.name);
             let call_types = extract_call_types(&c.calls);
             for (call_idx, call) in c.calls.iter().enumerate() {
-                if let Some(tgt) = resolve_with_imports(call, &exact, &short, &imports, self_type.as_deref(), &c.types, &call_types) {
-                    let tgt_usize = tgt as usize;
-                    if tgt_usize != src {
-                        let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
-                        callees[src].push(tgt);
-                        callers[tgt_usize].push(src as u32);
-                        call_sites[src].push((tgt, call_line));
-                    }
+                if let Some(tgt) = resolve_with_imports(call, &meta.exact, &meta.short, &imports, self_type.as_deref(), &c.types, &call_types) {
+                    let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
+                    adj.add_edge(src, tgt, call_line);
                 }
             }
-            // Resolve type references as edges (struct/enum/trait usage).
-            resolve_type_ref_edges(src, &c.types, &exact, &short, &imports, &mut callees, &mut callers);
+            resolve_type_ref_edges(src, &c.types, &meta.exact, &meta.short, &imports, &mut adj.callees, &mut adj.callers);
         }
 
-        // Deduplicate callees/callers. For call_sites, keep first occurrence per callee.
-        for i in 0..len {
-            callees[i].sort_unstable();
-            callees[i].dedup();
-            callers[i].sort_unstable();
-            callers[i].dedup();
-            call_sites[i].sort_by_key(|&(tgt, _)| tgt);
-            call_sites[i].dedup_by_key(|e| e.0);
-        }
-
-        // Build trait → impl mapping from impl chunk names like "VectorIndex for HnswGraph<D>".
-        let trait_impls = build_trait_impls(&names, &kinds, &exact, &short);
-
-        Self {
-            version: CACHE_VERSION,
-            names,
-            files,
-            kinds,
-            lines: lines_vec,
-            signatures,
-            name_index,
-            callees,
-            callers,
-            is_test,
-            trait_impls,
-            call_sites,
-        }
+        adj.dedup();
+        Self::from_parts(meta, adj)
     }
 
     /// Build the call graph using language-resolved calls (LSP definition, etc.)
     /// when available, falling back to tree-sitter heuristics for unmatched calls.
     pub fn build_with_resolved_calls(chunks: &[CodeChunk], resolved_calls: &CallMap) -> Self {
+        let meta = ChunkMeta::collect(chunks);
         let len = chunks.len();
 
-        // Multi-map: name → all chunk indices with that name (for resolved call matching).
-        let mut exact: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        // Single-value maps for tree-sitter fallback (non-Rust files).
-        let mut exact_single: BTreeMap<String, u32> = BTreeMap::new();
-        let mut short: BTreeMap<String, u32> = BTreeMap::new();
-
-        let mut names = Vec::with_capacity(len);
-        let mut files = Vec::with_capacity(len);
-        let mut kinds = Vec::with_capacity(len);
-        let mut lines_vec = Vec::with_capacity(len);
-        let mut signatures = Vec::with_capacity(len);
-        let mut is_test = Vec::with_capacity(len);
-        let mut name_index = Vec::with_capacity(len);
-
+        // Multi-map: name → all chunk indices (for LSP resolved call matching).
+        let mut exact_multi: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for (i, c) in chunks.iter().enumerate() {
             let idx = i as u32;
             let lower = c.name.to_lowercase();
-
-            exact.entry(lower.clone()).or_default().push(idx);
-            exact_single.insert(lower.clone(), idx);
-            // Also index with generic params stripped: `hnswgraph<d>::insert` → `hnswgraph::insert`.
+            exact_multi.entry(lower.clone()).or_default().push(idx);
             let stripped = strip_chunk_generics(&lower);
             if stripped != lower {
-                exact.entry(stripped.clone()).or_default().push(idx);
-                exact_single.insert(stripped, idx);
+                exact_multi.entry(stripped.clone()).or_default().push(idx);
+                // Also add stripped to single-value map (meta.exact doesn't have it).
             }
-            if let Some(s) = c.name.rsplit("::").next() {
-                short.entry(s.to_lowercase()).or_insert(idx);
-            }
-
-            name_index.push((lower, idx));
-            names.push(c.name.clone());
-            files.push(c.file.clone());
-            kinds.push(c.kind.clone());
-            lines_vec.push(c.lines);
-            signatures.push(c.signature.clone());
-            is_test.push(is_test_chunk(c));
         }
 
-        name_index.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let mut callees: Vec<Vec<u32>> = vec![Vec::new(); len];
-        let mut callers: Vec<Vec<u32>> = vec![Vec::new(); len];
-        let mut call_sites: Vec<Vec<(u32, u32)>> = vec![Vec::new(); len];
+        let mut adj = AdjState::new(len);
 
         // Build chunk-index → resolved callee list lookup.
-        // Each resolved function maps to exactly one chunk (by name + module/file match).
         let resolved_for_chunk: Vec<Option<Vec<String>>> = {
             let mut per_chunk: Vec<Option<Vec<String>>> = vec![None; len];
             for (fn_name, callees_list) in resolved_calls {
                 let fn_lower = fn_name.to_lowercase();
                 let fn_module = fn_lower.rsplit_once("::").map(|(prefix, _)| prefix);
-
-                // Find the best matching chunk for this resolved function.
-                let matched_idx = find_best_chunk_match(
-                    &fn_lower, fn_module, &exact, chunks,
-                );
-                if let Some(idx) = matched_idx {
+                if let Some(idx) = find_best_chunk_match(&fn_lower, fn_module, &exact_multi, chunks) {
                     per_chunk[idx as usize]
                         .get_or_insert_with(Vec::new)
                         .extend(callees_list.iter().cloned());
@@ -214,8 +207,17 @@ impl CallGraph {
             per_chunk
         };
 
+        // Also build exact_single with stripped generics for tree-sitter fallback.
+        let mut exact_single = meta.exact.clone();
+        for (i, c) in chunks.iter().enumerate() {
+            let lower = c.name.to_lowercase();
+            let stripped = strip_chunk_generics(&lower);
+            if stripped != lower {
+                exact_single.insert(stripped, i as u32);
+            }
+        }
+
         for (src, c) in chunks.iter().enumerate() {
-            // Collect resolved callee names (lowercased) for dedup with tree-sitter fallback.
             let mut resolved_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
             // Build a short-name → call_line lookup from tree-sitter data.
@@ -230,20 +232,11 @@ impl CallGraph {
                 for callee_name in resolved_callees {
                     let callee_lower = callee_name.to_lowercase();
                     let callee_module = callee_lower.rsplit_once("::").map(|(p, _)| p);
-                    if let Some(tgt) = find_best_chunk_match(
-                        &callee_lower, callee_module, &exact, chunks,
-                    ) {
-                        let tgt_usize = tgt as usize;
-                        if tgt_usize != src {
-                            // Try to recover call-line from tree-sitter data
-                            let short_name = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
-                            let call_line = ts_call_lines.get(short_name).copied().unwrap_or(0);
-                            callees[src].push(tgt);
-                            callers[tgt_usize].push(src as u32);
-                            call_sites[src].push((tgt, call_line));
-                        }
+                    if let Some(tgt) = find_best_chunk_match(&callee_lower, callee_module, &exact_multi, chunks) {
+                        let short_name = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
+                        let call_line = ts_call_lines.get(short_name).copied().unwrap_or(0);
+                        adj.add_edge(src, tgt, call_line);
                     }
-                    // Track the short name so tree-sitter doesn't duplicate it.
                     let short_name = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
                     resolved_names.insert(short_name.to_owned());
                 }
@@ -256,55 +249,40 @@ impl CallGraph {
             for (call_idx, call) in c.calls.iter().enumerate() {
                 let call_short = call.to_lowercase();
                 let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
-                // Skip if LSP already resolved this call.
                 if resolved_names.contains(call_leaf) {
                     continue;
                 }
                 if let Some(tgt) = resolve_with_imports(
-                    call, &exact_single, &short, &imports,
+                    call, &exact_single, &meta.short, &imports,
                     self_type.as_deref(), &c.types, &call_types,
                 ) {
-                    let tgt_usize = tgt as usize;
-                    if tgt_usize != src {
-                        let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
-                        callees[src].push(tgt);
-                        callers[tgt_usize].push(src as u32);
-                        call_sites[src].push((tgt, call_line));
-                    }
+                    let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
+                    adj.add_edge(src, tgt, call_line);
                 }
             }
-            // Resolve type references as edges (struct/enum/trait usage).
-            resolve_type_ref_edges(src, &c.types, &exact_single, &short, &imports, &mut callees, &mut callers);
+            resolve_type_ref_edges(src, &c.types, &exact_single, &meta.short, &imports, &mut adj.callees, &mut adj.callers);
         }
 
-        for list in &mut callees {
-            list.sort_unstable();
-            list.dedup();
-        }
-        for list in &mut callers {
-            list.sort_unstable();
-            list.dedup();
-        }
-        for sites in &mut call_sites {
-            sites.sort_by_key(|&(tgt, _)| tgt);
-            sites.dedup_by_key(|e| e.0);
-        }
+        adj.dedup();
+        Self::from_parts(meta, adj)
+    }
 
-        let trait_impls = build_trait_impls(&names, &kinds, &exact_single, &short);
-
+    /// Assemble a `CallGraph` from pre-built metadata and adjacency state.
+    fn from_parts(meta: ChunkMeta, adj: AdjState) -> Self {
+        let trait_impls = build_trait_impls(&meta.names, &meta.kinds, &meta.exact, &meta.short);
         Self {
             version: CACHE_VERSION,
-            names,
-            files,
-            kinds,
-            lines: lines_vec,
-            signatures,
-            name_index,
-            callees,
-            callers,
-            is_test,
+            names: meta.names,
+            files: meta.files,
+            kinds: meta.kinds,
+            lines: meta.lines,
+            signatures: meta.signatures,
+            name_index: meta.name_index,
+            callees: adj.callees,
+            callers: adj.callers,
+            is_test: meta.is_test,
             trait_impls,
-            call_sites,
+            call_sites: adj.call_sites,
         }
     }
 
@@ -696,7 +674,10 @@ fn strip_chunk_generics(name: &str) -> String {
 pub fn is_test_chunk(c: &CodeChunk) -> bool {
     c.file.contains("/tests/")
         || c.file.contains("\\tests\\")
+        || c.file.contains("/test/")
+        || c.file.contains("\\test\\")
         || c.file.ends_with("_test.rs")
+        || c.file.ends_with("_test.go")
         || c.name.starts_with("test_")
         || c.file.contains("/test_")
 }

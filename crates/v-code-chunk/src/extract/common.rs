@@ -69,49 +69,15 @@ pub fn collect_sorted_unique(
     items
 }
 
-/// Recursively walk to find call nodes across languages.
+/// Recursively walk to find call nodes across languages (without line info).
 ///
-/// Handles:
-/// - `call_expression` (Rust, TypeScript, Go, C, C++)
-/// - `call` (Python)
-/// - `method_invocation` (Java)
+/// Thin wrapper over `walk_for_calls_with_lines` — discards line data.
 pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<String>) {
-    match node.kind() {
-        "call_expression" => {
-            if let Some(func) = node.child_by_field_name("function")
-                && let Ok(text) = func.utf8_text(src) {
-                    calls.push(text.to_owned());
-                }
-        }
-        "call" => {
-            // Python: call node has a "function" field
-            if let Some(func) = node.child_by_field_name("function")
-                && let Ok(text) = func.utf8_text(src) {
-                    calls.push(text.to_owned());
-                }
-        }
-        "method_invocation" => {
-            // Java: method_invocation has "name" field and optional "object" field
-            if let Some(name_node) = node.child_by_field_name("name")
-                && let Ok(name) = name_node.utf8_text(src) {
-                    if let Some(obj) = node.child_by_field_name("object")
-                        && let Ok(obj_text) = obj.utf8_text(src) {
-                            calls.push(format!("{obj_text}.{name}"));
-                        } else {
-                            calls.push(name.to_owned());
-                        }
-                }
-        }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_for_calls(&child, src, calls);
-    }
+    let mut lines = Vec::new();
+    walk_for_calls_with_lines(node, src, calls, &mut lines);
 }
 
-/// Like `walk_for_calls`, but also records the 0-based source line of each call.
+/// Recursively walk to find call nodes, recording the 0-based source line of each call.
 pub fn walk_for_calls_with_lines(
     node: &tree_sitter::Node,
     src: &[u8],

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::graph::is_test_chunk;
 use crate::helpers::extract_crate_name;
 use crate::parse::CodeChunk;
 
@@ -16,7 +17,7 @@ pub fn build_stats(chunks: &[CodeChunk]) -> BTreeMap<String, [usize; 4]> {
     for c in chunks {
         let crate_name = extract_crate_name(&c.file);
         let row = stats.entry(crate_name).or_insert([0; 4]);
-        let is_test = c.file.contains("/tests/") || c.name.starts_with("test_");
+        let is_test = is_test_chunk(c);
         match (c.kind.as_str(), is_test) {
             ("function", false) => row[0] += 1,
             ("function", true) => row[1] += 1,

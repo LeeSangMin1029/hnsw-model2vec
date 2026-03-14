@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 
-use crate::blast;
 use crate::graph::CallGraph;
 use crate::impact;
 
@@ -75,12 +74,7 @@ pub fn analyze_pair(graph: &CallGraph, idx_a: u32, idx_b: u32) -> DupeAnalysis {
         }
     }
 
-    // Merge both entry lists for summarize_blast (union).
-    let mut combined = entries_a;
-    combined.extend(entries_b);
-    let summary = blast::summarize_blast(graph, &combined);
-
-    // Recount from union indices to avoid double-counting.
+    // Count prod/test from union indices.
     let mut blast_prod = 0usize;
     let mut blast_test = 0usize;
     for &idx in &all_indices {
@@ -91,9 +85,6 @@ pub fn analyze_pair(graph: &CallGraph, idx_a: u32, idx_b: u32) -> DupeAnalysis {
         }
     }
     let blast_total = blast_prod + blast_test;
-
-    // Drop summary to avoid unused warning — we used it for validation.
-    let _ = summary;
 
     let verdict = if (callee_match_pct - 1.0).abs() < f32::EPSILON {
         Verdict::SafeToMerge
