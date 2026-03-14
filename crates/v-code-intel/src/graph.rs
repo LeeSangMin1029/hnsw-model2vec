@@ -129,10 +129,10 @@ impl CallGraph {
 
     /// Build the call graph using language-resolved calls (LSP definition, etc.)
     /// when available, falling back to tree-sitter heuristics for unmatched calls.
-    pub fn build_with_resolved_calls(chunks: &[CodeChunk], mir_calls: &CallMap) -> Self {
+    pub fn build_with_resolved_calls(chunks: &[CodeChunk], resolved_calls: &CallMap) -> Self {
         let len = chunks.len();
 
-        // Multi-map: name → all chunk indices with that name (for MIR matching).
+        // Multi-map: name → all chunk indices with that name (for resolved call matching).
         let mut exact: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         // Single-value maps for tree-sitter fallback (non-Rust files).
         let mut exact_single: BTreeMap<String, u32> = BTreeMap::new();
@@ -176,17 +176,17 @@ impl CallGraph {
         let mut callees: Vec<Vec<u32>> = vec![Vec::new(); len];
         let mut callers: Vec<Vec<u32>> = vec![Vec::new(); len];
 
-        // Build chunk-index → MIR callee list lookup.
-        // Each MIR function maps to exactly one chunk (by name + module/file match).
-        let mir_for_chunk: Vec<Option<Vec<String>>> = {
+        // Build chunk-index → resolved callee list lookup.
+        // Each resolved function maps to exactly one chunk (by name + module/file match).
+        let resolved_for_chunk: Vec<Option<Vec<String>>> = {
             let mut per_chunk: Vec<Option<Vec<String>>> = vec![None; len];
-            for (mir_name, callees_list) in mir_calls {
-                let mir_lower = mir_name.to_lowercase();
-                let mir_module = mir_lower.rsplit_once("::").map(|(prefix, _)| prefix);
+            for (fn_name, callees_list) in resolved_calls {
+                let fn_lower = fn_name.to_lowercase();
+                let fn_module = fn_lower.rsplit_once("::").map(|(prefix, _)| prefix);
 
-                // Find the best matching chunk for this MIR function.
+                // Find the best matching chunk for this resolved function.
                 let matched_idx = find_best_chunk_match(
-                    &mir_lower, mir_module, &exact, chunks,
+                    &fn_lower, fn_module, &exact, chunks,
                 );
                 if let Some(idx) = matched_idx {
                     per_chunk[idx as usize]
@@ -198,12 +198,12 @@ impl CallGraph {
         };
 
         for (src, c) in chunks.iter().enumerate() {
-            // Try MIR-resolved calls first.
-            // MIR callees are fully qualified — match by exact name or qualified suffix.
-            let mut mir_used = false;
-            if let Some(mir_callees) = mir_for_chunk[src].as_ref() {
-                mir_used = true;
-                for callee_name in mir_callees {
+            // Try LSP-resolved calls first.
+            // Resolved callees are fully qualified — match by exact name or qualified suffix.
+            let mut resolved_used = false;
+            if let Some(resolved_callees) = resolved_for_chunk[src].as_ref() {
+                resolved_used = true;
+                for callee_name in resolved_callees {
                     let callee_lower = callee_name.to_lowercase();
                     let callee_module = callee_lower.rsplit_once("::").map(|(p, _)| p);
                     // Resolve callee to a chunk index.
@@ -220,9 +220,7 @@ impl CallGraph {
             }
 
             // Fallback to tree-sitter heuristics if resolved calls had no data for this chunk.
-            // Skip fallback for Rust files — MIR is authoritative for those.
-            let is_rust = c.file.ends_with(".rs");
-            if !mir_used && !is_rust {
+            if !resolved_used {
                 let imports = build_import_map(&c.imports);
                 let self_type = owning_type(&c.name);
                 let call_types = extract_call_types(&c.calls);
@@ -485,24 +483,24 @@ fn build_import_map(imports: &[String]) -> BTreeMap<String, String> {
 }
 
 /// Determine if a chunk is test code based on file path and name.
-/// Find the best chunk match for a MIR function name.
+/// Find the best chunk match for a resolved function name.
 ///
 /// Tries exact match first, then suffix match with module-to-file disambiguation.
 /// Returns `None` if no match found.
 fn find_best_chunk_match(
-    mir_lower: &str,
-    mir_module: Option<&str>,
+    fn_lower: &str,
+    fn_module: Option<&str>,
     exact: &BTreeMap<String, Vec<u32>>,
     chunks: &[CodeChunk],
 ) -> Option<u32> {
-    // Exact match: MIR name == chunk name.
-    if let Some(indices) = exact.get(mir_lower) {
+    // Exact match: resolved name == chunk name.
+    if let Some(indices) = exact.get(fn_lower) {
         if indices.len() == 1 {
             return Some(indices[0]);
         }
         // Multiple chunks with same name — disambiguate by module/file.
         // Prefer .rs files over non-Rust files.
-        if let Some(mod_prefix) = mir_module {
+        if let Some(mod_prefix) = fn_module {
             let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
             let last_mod_no_us = last_mod.replace('_', "");
             let mut fallback: Option<u32> = None;
@@ -525,19 +523,19 @@ fn find_best_chunk_match(
         return Some(indices[0]);
     }
 
-    // Suffix match: MIR "graph::CallGraph::build" → chunk "CallGraph::build".
+    // Suffix match: "graph::CallGraph::build" → chunk "CallGraph::build".
     // Only match qualified chunk names (containing "::") to avoid bare method ambiguity.
     // E.g., callee "HashMap::insert" must NOT match bare chunk "insert".
     let mut best: Option<u32> = None;
     for (chunk_name, indices) in exact {
         if !chunk_name.contains("::") {
             // Bare names require module-to-file disambiguation.
-            if let Some(mod_prefix) = mir_module {
+            if let Some(mod_prefix) = fn_module {
                 let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
                 let last_mod_no_us = last_mod.replace('_', "");
-                if mir_lower.ends_with(chunk_name.as_str()) {
-                    let prefix_len = mir_lower.len() - chunk_name.len();
-                    if prefix_len == 0 || mir_lower.as_bytes()[prefix_len - 1] == b':' {
+                if fn_lower.ends_with(chunk_name.as_str()) {
+                    let prefix_len = fn_lower.len() - chunk_name.len();
+                    if prefix_len == 0 || fn_lower.as_bytes()[prefix_len - 1] == b':' {
                         // Prefer .rs files (Rust sources) over non-Rust files.
                         let mut fallback: Option<u32> = None;
                         for &idx in indices {
@@ -560,10 +558,10 @@ fn find_best_chunk_match(
             }
             continue;
         }
-        if mir_lower.ends_with(chunk_name.as_str()) {
-            let prefix_len = mir_lower.len() - chunk_name.len();
-            if prefix_len == 0 || mir_lower.as_bytes()[prefix_len - 1] == b':' {
-                if let Some(mod_prefix) = mir_module {
+        if fn_lower.ends_with(chunk_name.as_str()) {
+            let prefix_len = fn_lower.len() - chunk_name.len();
+            if prefix_len == 0 || fn_lower.as_bytes()[prefix_len - 1] == b':' {
+                if let Some(mod_prefix) = fn_module {
                     let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
                     let last_mod_no_us = last_mod.replace('_', "");
                     for &idx in indices {

@@ -35,6 +35,8 @@ pub mod bm25;
 pub mod config;
 pub mod fusion;
 pub mod hybrid;
+pub mod query_cache;
+pub mod search_result;
 #[cfg(feature = "korean")]
 pub mod korean_tokenizer;
 #[cfg(feature = "korean")]
@@ -49,6 +51,8 @@ pub use bm25::fst_storage::fst_exists as bm25_fst_exists;
 pub use config::{HybridSearchConfig, HybridSearchConfigBuilder};
 pub use fusion::ConvexFusion;
 pub use hybrid::{SimpleHybridSearcher, enrich_sparse};
+pub use query_cache::QueryCache;
+pub use search_result::{SearchResultItem, build_results, fusion_alpha};
 #[cfg(feature = "korean")]
 pub use korean_tokenizer::{KoreanBm25Tokenizer, init_korean_tokenizer};
 

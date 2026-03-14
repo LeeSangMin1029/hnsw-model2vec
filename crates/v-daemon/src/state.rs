@@ -21,8 +21,9 @@ use v_hnsw_storage::sq8::Sq8Params;
 use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::StorageEngine;
 
-use crate::commands::common::{self, F32Dc, QueryCache, SearchResultItem, Sq8LutDc};
-use crate::commands::db_config::DbConfig;
+use v_hnsw_search::{QueryCache, SearchResultItem, fusion_alpha, build_results};
+use v_hnsw_storage::db_config::DbConfig;
+use v_hnsw_storage::distance::{F32Dc, Sq8LutDc};
 
 /// Seconds of idle time before unloading the embedding model.
 const MODEL_IDLE_SECS: u64 = 300;
@@ -51,7 +52,6 @@ impl DenseIndex {
         k: usize,
         ef: usize,
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-        // Use SQ8 two-stage search if available
         if let Some(sq8) = sq8 {
             let approx = Sq8LutDc::new(&sq8.params, &sq8.store, query);
             let exact = F32Dc { store };
@@ -60,7 +60,6 @@ impl DenseIndex {
                 Self::Heap(h) => h.search_two_stage(&approx, &exact, query, k, ef),
             };
         }
-        // Fallback to f32-only search
         match self {
             Self::Snapshot(s) => s.search_ext(&NormalizedCosineDistance, store, query, k, ef),
             Self::Heap(h) => h.search_ext(store, query, k, ef),
@@ -70,19 +69,11 @@ impl DenseIndex {
 
 /// Sparse index: mmap snapshot or heap index, with content-type-aware tokenizer.
 enum SparseIndex {
-    /// mmap snapshot (shared by both document and code DBs — tokenizer passed at query time)
     Snapshot(Bm25Snapshot, bool),
-    /// Heap-loaded document index (Korean tokenizer)
     HeapDoc(Bm25Index<KoreanBm25Tokenizer>),
-    /// Heap-loaded code index (code tokenizer)
     HeapCode(Bm25Index<CodeTokenizer>),
 }
 
-/// Dispatch a BM25 operation across `SparseIndex` variants.
-///
-/// The snapshot branch needs monomorphization over two tokenizer types,
-/// which prevents using a simple closure-based helper. This macro eliminates
-/// the duplicated 4-arm match without runtime overhead.
 macro_rules! sparse_dispatch {
     ($self:expr, $method:ident, $($arg:expr),* $(,)?) => {
         match $self {
@@ -114,7 +105,6 @@ struct DbIndexes {
 }
 
 impl DbIndexes {
-    /// Run hybrid search (dense + sparse fusion) with a precomputed embedding.
     fn search(&mut self, embedding: &[f32], query: &str, k: usize, tags: Vec<String>) -> Result<Vec<SearchResultItem>> {
         let store = self.engine.vector_store();
         let dense_limit = k * 2;
@@ -129,7 +119,7 @@ impl DbIndexes {
             self.sparse.score_documents(query, ids)
         });
 
-        let alpha = common::fusion_alpha(query);
+        let alpha = fusion_alpha(query);
         let fusion = ConvexFusion::with_alpha(alpha);
         let fetch_k = if tags.is_empty() { k } else { k * 10 };
         let mut results = fusion.fuse(&dense_results, &all_sparse, fetch_k);
@@ -141,7 +131,7 @@ impl DbIndexes {
             results.truncate(k);
         }
 
-        Ok(common::build_results(&results, self.engine.payload_store()))
+        Ok(build_results(&results, self.engine.payload_store()))
     }
 }
 
@@ -153,11 +143,9 @@ pub struct SearchResponse {
 }
 
 /// Seconds of idle time before shutting down an LSP server.
-#[cfg(feature = "code-intel")]
 const LSP_IDLE_SECS: u64 = 600;
 
 /// LSP server entry with idle tracking.
-#[cfg(feature = "code-intel")]
 struct LspEntry {
     resolver: v_code_intel::lsp::LspCallResolver,
     last_used: Instant,
@@ -171,14 +159,12 @@ pub struct DaemonState {
     last_embed_at: Instant,
     databases: HashMap<PathBuf, DbIndexes>,
     query_cache: QueryCache,
-    #[cfg(feature = "code-intel")]
     lsp_servers: HashMap<PathBuf, LspEntry>,
 }
 
 impl DaemonState {
-    /// Create a new daemon state, optionally preloading one database.
     pub fn new(initial_db: Option<&Path>) -> Result<Self> {
-        common::ensure_korean_dict()?;
+        ensure_korean_dict()?;
 
         let mut state = Self {
             model: None,
@@ -187,7 +173,6 @@ impl DaemonState {
             last_embed_at: Instant::now(),
             databases: HashMap::new(),
             query_cache: QueryCache::global(),
-            #[cfg(feature = "code-intel")]
             lsp_servers: HashMap::new(),
         };
 
@@ -199,7 +184,6 @@ impl DaemonState {
         Ok(state)
     }
 
-    /// Load (or reload) a DB into the map. `key` must be canonicalized.
     fn register_db(&mut self, key: &Path) -> Result<()> {
         let indexes = load_db(key)?;
         if self.model_name.is_none() {
@@ -214,7 +198,6 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Ensure a database is loaded on-demand, return mutable ref.
     fn ensure_db(&mut self, db_path: &Path) -> Result<&mut DbIndexes> {
         let key = canonicalize(db_path)?;
         if !self.databases.contains_key(&key) {
@@ -226,7 +209,6 @@ impl DaemonState {
         Ok(db)
     }
 
-    /// Ensure model is loaded, return reference.
     fn ensure_model(&mut self) -> Result<&Model2VecModel> {
         if self.model.is_none() {
             let name = self.model_name.as_deref()
@@ -246,7 +228,6 @@ impl DaemonState {
         self.model.as_ref().context("model not loaded after ensure")
     }
 
-    /// Resolve query → embedding (cache hit or model inference).
     fn resolve_embedding(&mut self, query: &str) -> Result<Vec<f32>> {
         if let Some(cached) = self.query_cache.get(query) {
             return Ok(cached.clone());
@@ -258,7 +239,6 @@ impl DaemonState {
         Ok(emb)
     }
 
-    /// Unload model if idle longer than threshold.
     pub fn maybe_unload_model(&mut self) {
         if self.model.is_some() && self.last_embed_at.elapsed().as_secs() > MODEL_IDLE_SECS {
             self.model = None;
@@ -267,7 +247,6 @@ impl DaemonState {
         }
     }
 
-    /// Evict databases idle longer than DB_IDLE_SECS.
     pub fn maybe_evict_databases(&mut self) {
         let before = self.databases.len();
         self.databases.retain(|path, db| {
@@ -284,13 +263,11 @@ impl DaemonState {
         }
     }
 
-    /// Embed texts using the lazy-loaded model.
     pub fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let model = self.ensure_model()?;
         model.embed(texts).context("Failed to embed")
     }
 
-    /// Reload indexes for a specific database.
     pub fn reload(&mut self, db_path: &Path) -> Result<()> {
         let t0 = Instant::now();
         let key = canonicalize(db_path)?;
@@ -301,8 +278,6 @@ impl DaemonState {
 
     pub fn save_cache(&self) -> Result<()> { self.query_cache.save() }
 
-    /// Get or start an LSP server for the given project root.
-    #[cfg(feature = "code-intel")]
     pub fn ensure_lsp(
         &mut self,
         project_root: &Path,
@@ -330,8 +305,6 @@ impl DaemonState {
         Ok(&mut entry.resolver)
     }
 
-    /// Shut down LSP servers idle longer than `LSP_IDLE_SECS`.
-    #[cfg(feature = "code-intel")]
     pub fn maybe_evict_lsp(&mut self) {
         let before = self.lsp_servers.len();
         let to_remove: Vec<PathBuf> = self
@@ -352,19 +325,16 @@ impl DaemonState {
         }
     }
 
-    /// Evict a database from cache (for exclusive access by external update).
     pub fn evict_db(&mut self, db_path: &Path) -> Result<PathBuf> {
         let key = canonicalize(db_path)?;
         self.databases.remove(&key);
         Ok(key)
     }
 
-    /// Ensure the embedding model is loaded and return a reference.
     pub fn model(&mut self) -> Result<&Model2VecModel> {
         self.ensure_model()
     }
 
-    /// Search: resolve embedding → delegate to DbIndexes::search.
     pub fn search(&mut self, db_path: &Path, query: &str, k: usize, tags: Vec<String>) -> Result<SearchResponse> {
         let start = Instant::now();
         let embedding = self.resolve_embedding(query)?;
@@ -374,7 +344,6 @@ impl DaemonState {
     }
 }
 
-/// Load all indexes + storage for a database.
 fn load_db(db_path: &Path) -> Result<DbIndexes> {
     let config = DbConfig::load(db_path)?;
     let engine = StorageEngine::open(db_path)
@@ -385,8 +354,7 @@ fn load_db(db_path: &Path) -> Result<DbIndexes> {
     Ok(DbIndexes { dense, sparse, sq8, engine, last_used: Instant::now() })
 }
 
-/// Check if `a` is newer than `b` by file modification time.
-pub(crate) fn is_newer(a: &Path, b: &Path) -> bool {
+pub fn is_newer(a: &Path, b: &Path) -> bool {
     let Ok(ma) = std::fs::metadata(a) else { return false };
     let Ok(mb) = std::fs::metadata(b) else { return true };
     let Ok(ta) = ma.modified() else { return false };
@@ -394,12 +362,10 @@ pub(crate) fn is_newer(a: &Path, b: &Path) -> bool {
     ta > tb
 }
 
-/// Load dense index: prefer the freshest source (snapshot vs heap).
 fn load_dense(db_path: &Path) -> Result<DenseIndex> {
     let snap_path = db_path.join("hnsw.snap");
     let bin_path = db_path.join("hnsw.bin");
 
-    // Use snapshot only if it exists AND is not stale vs .bin
     if snap_path.exists() && !is_newer(&bin_path, &snap_path) {
         let snap = HnswSnapshot::open(&snap_path).context("Failed to open HNSW snapshot")?;
         eprintln!("[daemon] HNSW snapshot loaded: {} vectors (mmap)", snap.len());
@@ -411,13 +377,11 @@ fn load_dense(db_path: &Path) -> Result<DenseIndex> {
     Ok(DenseIndex::Heap(hnsw))
 }
 
-/// Load sparse index: prefer the freshest source (snapshot vs heap).
 fn load_sparse(db_path: &Path, code: bool) -> Result<SparseIndex> {
     let snap_path = db_path.join("bm25.snap");
     let bin_path = db_path.join("bm25.bin");
     let fst_path = db_path.join("bm25_terms.fst");
 
-    // Use snapshot only if it exists AND is not stale vs .bin
     if snap_path.exists() && fst_path.exists() && !is_newer(&bin_path, &snap_path) {
         let snap = Bm25Snapshot::open(db_path).context("Failed to open BM25 snapshot")?;
         eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap, code={})", snap.total_docs(), code);
@@ -434,7 +398,6 @@ fn load_sparse(db_path: &Path, code: bool) -> Result<SparseIndex> {
     }
 }
 
-/// Load SQ8 quantization data if available. Returns `None` on any error.
 fn load_sq8(db_path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> Option<Sq8Data> {
     let params_path = db_path.join("sq8_params.bin");
     let store_path = db_path.join("sq8_vectors.bin");
@@ -456,13 +419,24 @@ fn load_sq8(db_path: &Path, vector_store: &v_hnsw_storage::MmapVectorStore) -> O
     Some(Sq8Data { params, store })
 }
 
-/// Canonicalize path with a context message.
+/// Initialize Korean tokenizer if the dictionary is already available.
+///
+/// Unlike the CLI version, the daemon does not download the dictionary;
+/// it simply initializes the tokenizer when the dict exists on disk.
+fn ensure_korean_dict() -> Result<()> {
+    let dict_path = v_hnsw_core::ko_dic_dir();
+    if dict_path.join("dict.da").exists() {
+        v_hnsw_search::init_korean_tokenizer(&dict_path)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize Korean tokenizer: {e}"))?;
+    }
+    Ok(())
+}
+
 fn canonicalize(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("Database not found: {}", path.display()))
 }
 
-/// Ask the OS to trim the process working set, releasing unmapped pages.
 #[cfg(windows)]
 fn trim_working_set() {
     #[allow(unsafe_code)]

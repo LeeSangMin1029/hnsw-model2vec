@@ -81,55 +81,6 @@ pub fn run_doc() -> anyhow::Result<()> {
                 min_score,
             })
         }
-        Commands::Serve {
-            db,
-            port,
-            timeout,
-            background,
-        } => commands::serve::run(db, port, timeout, background, Some(doc_method_handler)),
     }
-}
-
-/// Extension handler for v-hnsw daemon: handles "update" RPC method.
-fn doc_method_handler(
-    method: &str,
-    params: serde_json::Value,
-    state: &mut commands::serve::daemon::DaemonState,
-) -> Option<anyhow::Result<serde_json::Value>> {
-    match method {
-        "update" => Some(handle_daemon_update(params, state)),
-        _ => None,
-    }
-}
-
-fn handle_daemon_update(
-    params: serde_json::Value,
-    state: &mut commands::serve::daemon::DaemonState,
-) -> anyhow::Result<serde_json::Value> {
-    use std::path::PathBuf;
-
-    #[derive(serde::Deserialize)]
-    struct UpdateParams { db: String, input: String, #[serde(default)] exclude: Vec<String> }
-
-    let p: UpdateParams = serde_json::from_value(params)
-        .map_err(|e| anyhow::anyhow!("Invalid update params: {e}"))?;
-    let db_path = PathBuf::from(&p.db);
-    let input_path = PathBuf::from(&p.input);
-    let t0 = std::time::Instant::now();
-
-    let key = state.evict_db(&db_path)?;
-    let model = state.model()?;
-
-    let stats = commands::update::run_core(&key, &input_path, Some(model), &p.exclude)?;
-
-    state.reload(&key)?;
-
-    eprintln!(
-        "[daemon] Update complete: new={} mod={} del={} unchanged={} ({:.0}ms)",
-        stats.new, stats.modified, stats.deleted, stats.unchanged,
-        t0.elapsed().as_millis()
-    );
-
-    Ok(serde_json::to_value(stats)?)
 }
 

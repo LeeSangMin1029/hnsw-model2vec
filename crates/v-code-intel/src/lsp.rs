@@ -40,6 +40,8 @@ pub struct LspCallResolver {
     next_id: AtomicU64,
     #[expect(dead_code)]
     root_uri: String,
+    /// Whether the server has completed initial indexing.
+    ready: bool,
 }
 
 impl LspCallResolver {
@@ -78,6 +80,7 @@ impl LspCallResolver {
             responses: rx,
             next_id: AtomicU64::new(1),
             root_uri: root_uri.clone(),
+            ready: false,
         };
 
         // LSP initialize handshake
@@ -88,6 +91,9 @@ impl LspCallResolver {
                 "capabilities": {
                     "textDocument": {
                         "definition": { "dynamicRegistration": false }
+                    },
+                    "window": {
+                        "workDoneProgress": true
                     }
                 },
                 "rootUri": root_uri,
@@ -101,10 +107,91 @@ impl LspCallResolver {
 
         client.notify("initialized", serde_json::json!({}))?;
 
-        // Give server time to index
-        thread::sleep(Duration::from_secs(2));
+        // Wait for server to become ready (progress-based or timeout fallback).
+        client.wait_for_ready();
 
         Ok(client)
+    }
+
+    /// Wait for the LSP server to finish initial indexing.
+    ///
+    /// Monitors `$/progress` notifications for "end" tokens. Falls back
+    /// to a short timeout if no progress is received.
+    fn wait_for_ready(&mut self) {
+        let start = std::time::Instant::now();
+        let deadline = start + Duration::from_secs(120);
+        let mut saw_progress = false;
+        let mut completed_sequences = 0u32;
+        let mut active_tokens: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Grace period: after all tokens drain, wait for new progress to start.
+        // rust-analyzer emits multiple sequences: Fetching → Loading → Indexing.
+        let grace = Duration::from_millis(2000);
+
+        eprintln!("[lsp] Waiting for server readiness...");
+
+        while std::time::Instant::now() < deadline {
+            let timeout = if active_tokens.is_empty() && saw_progress {
+                grace // Short wait for next progress sequence
+            } else {
+                Duration::from_millis(500)
+            };
+
+            match self.responses.recv_timeout(timeout) {
+                Ok(msg) => {
+                    if msg.get("method").and_then(|m| m.as_str()) == Some("$/progress") {
+                        if let Some(params) = msg.get("params") {
+                            let token = params
+                                .get("token")
+                                .and_then(|t| t.as_str().map(String::from)
+                                    .or_else(|| t.as_u64().map(|n| n.to_string())))
+                                .unwrap_or_default();
+                            let value = params.get("value");
+
+                            if let Some(kind) = value.and_then(|v| v.get("kind")).and_then(|k| k.as_str()) {
+                                match kind {
+                                    "begin" => {
+                                        saw_progress = true;
+                                        active_tokens.insert(token);
+                                        if let Some(title) = value.and_then(|v| v.get("title")).and_then(|t| t.as_str()) {
+                                            eprintln!("[lsp] {title}...");
+                                        }
+                                    }
+                                    "end" => {
+                                        active_tokens.remove(&token);
+                                        if active_tokens.is_empty() {
+                                            completed_sequences += 1;
+                                            eprintln!("[lsp] Progress sequence {completed_sequences} done ({:.1}s)",
+                                                start.elapsed().as_secs_f64());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if saw_progress && active_tokens.is_empty() {
+                        // Grace period expired, no new progress — server is ready.
+                        eprintln!("[lsp] Server ready ({:.1}s, {} sequences)",
+                            start.elapsed().as_secs_f64(), completed_sequences);
+                        self.ready = true;
+                        return;
+                    }
+                    // No progress seen after 5s — server might not support it.
+                    if !saw_progress && start.elapsed() > Duration::from_secs(5) {
+                        eprintln!("[lsp] No progress support, using 5s fallback");
+                        self.ready = true;
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        eprintln!("[lsp] Readiness timeout ({:.1}s) — proceeding anyway",
+            start.elapsed().as_secs_f64());
+        self.ready = true;
     }
 
     /// Send `textDocument/didOpen` for a file.
@@ -136,36 +223,32 @@ impl LspCallResolver {
         )
     }
 
-    /// Query `textDocument/definition` at a specific position.
-    /// Returns `(file_path, line_0indexed)` if resolved.
-    fn definition(&mut self, path: &Path, line: u32, col: u32) -> Result<Option<Location>> {
-        let uri = path_to_uri(path);
-        let resp = self.request(
-            "textDocument/definition",
-            serde_json::json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": col },
-            }),
-        )?;
-
-        let result = match resp {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        parse_definition_result(&result)
-    }
-
     /// Resolve all call sites in the given chunks to a `CallMap`.
     ///
     /// Opens each unique source file, then queries `textDocument/definition`
     /// for each call site found by tree-sitter in the chunks.
     pub fn resolve_calls(&mut self, chunks: &[CodeChunk], project_root: &Path) -> Result<CallMap> {
-        // Open all unique source files and cache their contents for position lookup
+        let all_files: std::collections::HashSet<&str> =
+            chunks.iter().map(|c| c.file.as_str()).collect();
+        self.resolve_calls_for_files(chunks, project_root, &all_files)
+    }
+
+    /// Resolve call sites only for chunks whose files are in `target_files`.
+    ///
+    /// All chunks are still needed for callee name resolution, but only
+    /// chunks in `target_files` will have their calls queried via LSP.
+    pub fn resolve_calls_for_files(
+        &mut self,
+        chunks: &[CodeChunk],
+        project_root: &Path,
+        target_files: &std::collections::HashSet<&str>,
+    ) -> Result<CallMap> {
+        let t0 = std::time::Instant::now();
+        // Open target source files and cache their contents for position lookup
         let mut file_cache: std::collections::HashMap<PathBuf, Vec<String>> =
             std::collections::HashMap::new();
-        for chunk in chunks {
-            let fpath = project_root.join(&chunk.file);
+        for file in target_files {
+            let fpath = project_root.join(file);
             if file_cache.contains_key(&fpath) {
                 continue;
             }
@@ -176,12 +259,18 @@ impl LspCallResolver {
             }
         }
 
-        // Wait for server to process opened files
-        thread::sleep(Duration::from_secs(2));
-
+        eprintln!("[lsp] didOpen {} files in {:.1}s", file_cache.len(), t0.elapsed().as_secs_f64());
+        let t1 = std::time::Instant::now();
+        // Sequential definition resolution.
         let mut call_map: CallMap = BTreeMap::new();
+        let mut total = 0u32;
+        let mut received = 0u32;
 
         for chunk in chunks {
+            if !target_files.contains(chunk.file.as_str()) {
+                continue;
+            }
+
             let fpath = project_root.join(&chunk.file);
             let caller_name = normalize_chunk_name(&chunk.name);
             let file_lines = file_cache.get(&fpath);
@@ -189,23 +278,46 @@ impl LspCallResolver {
             for call in &chunk.calls {
                 if let Some((line, col)) =
                     find_call_position_in_chunk(chunk, call, file_lines.map(Vec::as_slice))
-                    && let Ok(Some(loc)) = self.definition(&fpath, line, col)
-                    && let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
-                        call_map
-                            .entry(caller_name.clone())
-                            .or_default()
-                            .push(callee);
+                {
+                    total += 1;
+                    if let Some(loc) = self.definition(&fpath, line, col) {
+                        if let Some(callee) = location_to_chunk_name(&loc, chunks, project_root) {
+                            received += 1;
+                            call_map
+                                .entry(caller_name.clone())
+                                .or_default()
+                                .push(callee);
+                        }
                     }
-            }
-
-            // Deduplicate callees
-            if let Some(callees) = call_map.get_mut(&caller_name) {
-                callees.sort();
-                callees.dedup();
+                }
             }
         }
 
+        // Deduplicate callees.
+        for callees in call_map.values_mut() {
+            callees.sort();
+            callees.dedup();
+        }
+
+        eprintln!("[lsp] definitions resolved in {:.1}s", t1.elapsed().as_secs_f64());
+        eprintln!("[graph] LSP resolved {} caller entries ({} files, {}/{} queries answered)",
+            call_map.len(), target_files.len(), received, total);
         Ok(call_map)
+    }
+
+    /// Send a `textDocument/definition` request and parse the result.
+    fn definition(&mut self, path: &Path, line: u32, col: u32) -> Option<Location> {
+        let uri = path_to_uri(path);
+        let result = self
+            .request(
+                "textDocument/definition",
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": col },
+                }),
+            )
+            .ok()??;
+        parse_definition_result(&result).ok().flatten()
     }
 
     /// Gracefully shut down the LSP server.
@@ -389,7 +501,11 @@ fn path_to_uri(path: &Path) -> String {
     let abs = path
         .canonicalize()
         .unwrap_or_else(|_| path.to_path_buf());
-    let s = abs.to_string_lossy().replace('\\', "/");
+    let mut s = abs.to_string_lossy().replace('\\', "/");
+    // Strip Windows extended-length prefix (\\?\)
+    if let Some(stripped) = s.strip_prefix("//?/") {
+        s = stripped.to_string();
+    }
     if s.starts_with('/') {
         format!("file://{s}")
     } else {
@@ -461,8 +577,12 @@ fn find_call_position_in_chunk(
 
     if let Some(lines) = file_lines {
         // Search within chunk's line range (1-indexed → 0-indexed)
-        let from = start.saturating_sub(1);
+        let from = start.saturating_sub(1).min(lines.len());
         let to = end.min(lines.len());
+
+        if from >= to {
+            return Some((start.saturating_sub(1) as u32, 0));
+        }
 
         for (i, line) in lines[from..to].iter().enumerate() {
             for pat in &patterns {
@@ -500,12 +620,16 @@ fn location_to_chunk_name(
             canon_file.strip_prefix(canon_root).ok().map(|p| p.to_path_buf())
         })?;
 
-    let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+    let mut rel_str = rel_path.to_string_lossy().replace('\\', "/");
+    // Strip leading "./" prefix if present
+    if let Some(stripped) = rel_str.strip_prefix("./") {
+        rel_str = stripped.to_string();
+    }
     let target_line = (loc.line + 1) as usize; // LSP is 0-indexed, chunks are 1-indexed
 
     // Find the chunk that contains this definition
     for chunk in chunks {
-        let chunk_file = chunk.file.replace('\\', "/");
+        let chunk_file = chunk.file.replace('\\', "/").trim_start_matches("./").to_string();
         if let Some((start, end)) = chunk.lines
             && chunk_file == rel_str && target_line >= start && target_line <= end {
                 return Some(normalize_chunk_name(&chunk.name));
@@ -515,7 +639,7 @@ fn location_to_chunk_name(
     // Fallback: match by file only, find closest chunk
     let mut best: Option<(&CodeChunk, usize)> = None;
     for chunk in chunks {
-        let chunk_file = chunk.file.replace('\\', "/");
+        let chunk_file = chunk.file.replace('\\', "/").trim_start_matches("./").to_string();
         if let Some((start, _)) = chunk.lines
             && chunk_file == rel_str && target_line >= start {
                 let dist = target_line - start;

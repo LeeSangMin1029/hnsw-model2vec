@@ -34,7 +34,36 @@ pub use v_code_intel::gather;
 pub use v_code_intel::graph;
 pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path, grouped_json};
 pub use v_code_intel::impact;
-pub use v_code_intel::loader::{load_chunks, load_or_build_graph};
+pub use v_code_intel::loader::load_chunks;
+use v_code_intel::loader::DaemonHooks;
+
+/// Load or build call graph with daemon support.
+pub fn load_or_build_graph(
+    db: &std::path::Path,
+    lsp: Option<&mut v_code_intel::lsp::LspCallResolver>,
+) -> anyhow::Result<v_code_intel::graph::CallGraph> {
+    let hooks = DaemonHooks {
+        try_graph_build: daemon_try_graph_build,
+        spawn: v_daemon::spawn_daemon,
+    };
+    v_code_intel::loader::load_or_build_graph(db, lsp, Some(&hooks))
+}
+
+fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::CallGraph> {
+    let canonical = db.canonicalize().ok()?;
+    let db_str = canonical.to_str()?;
+
+    let params = serde_json::json!({"db": db_str});
+    let result = v_daemon::daemon_rpc("graph/build", params, 120).ok()?;
+
+    if result.get("status").and_then(|s| s.as_str()) == Some("ok") {
+        eprintln!("[graph] Built via daemon (LSP entries: {})",
+            result.get("lsp_entries").and_then(|v| v.as_u64()).unwrap_or(0));
+        v_code_intel::graph::CallGraph::load(db)
+    } else {
+        None
+    }
+}
 pub use v_code_intel::parse::CodeChunk;
 #[cfg(test)]
 pub use v_code_intel::parse;

@@ -9,8 +9,13 @@ license.workspace = true
 [dependencies]
 v-hnsw-core.workspace = true
 v-hnsw-graph.workspace = true
+v-hnsw-storage.workspace = true
 serde = { workspace = true, features = ["derive"] }
 bincode.workspace = true
+anyhow = "1"
+lru.workspace = true
+serde_json = "1"
+tracing.workspace = true
 bytemuck.workspace = true
 memmap2.workspace = true
 fst = "0.4"

@@ -3803,6 +3803,7 @@ dependencies = [
  "tracing-subscriber",
  "v-code-chunk",
  "v-code-intel",
+ "v-daemon",
  "v-hnsw-cli",
  "v-hnsw-core",
  "v-hnsw-embed",
@@ -3844,6 +3845,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "v-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "v-code-intel",
+ "v-hnsw-core",
+ "v-hnsw-embed",
+ "v-hnsw-graph",
+ "v-hnsw-search",
+ "v-hnsw-storage",
+]
+
+[[package]]
 name = "v-hnsw"
 version = "0.1.0"
 dependencies = [
@@ -3880,6 +3900,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "v-code-intel",
+ "v-daemon",
  "v-hnsw-core",
  "v-hnsw-embed",
  "v-hnsw-graph",
@@ -3945,24 +3966,29 @@ dependencies = [
 name = "v-hnsw-search"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bincode",
  "bytemuck",
  "fst",
  "lindera",
+ "lru",
  "memmap2",
  "proptest",
  "rustc-hash",
  "serde",
  "serde_json",
+ "tracing",
  "unicode-normalization",
  "v-hnsw-core",
  "v-hnsw-graph",
+ "v-hnsw-storage",
 ]
 
 [[package]]
 name = "v-hnsw-storage"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bincode",
  "crc32fast",
  "fs2",
@@ -3974,6 +4000,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "v-hnsw-core",
+ "v-hnsw-graph",
  "zstd",
 ]
 

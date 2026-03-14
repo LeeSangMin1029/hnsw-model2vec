@@ -10,11 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use v_hnsw_core::{DistanceMetric, PointId, VectorStore};
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
-use v_hnsw_graph::{DistanceComputer, NormalizedCosineDistance};
-use v_hnsw_storage::sq8::Sq8Params;
-use v_hnsw_storage::sq8_store::Sq8VectorStore;
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 use super::db_config::DbConfig;
@@ -75,27 +71,6 @@ pub fn require_db(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// ── Process management ──────────────────────────────────────────────────
-
-/// Spawn a detached background process with stdin/stdout/stderr suppressed.
-pub fn spawn_detached(args: &[&str]) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x00000200 | 0x08000000);
-    }
-
-    cmd.spawn().context("Failed to spawn detached process")?;
-    Ok(())
-}
-
 // ── Model / Korean dict ─────────────────────────────────────────────────
 
 /// Ensure Korean dictionary is available and initialize the tokenizer.
@@ -137,57 +112,9 @@ pub fn make_progress_bar(total: u64) -> Result<ProgressBar> {
     Ok(pb)
 }
 
-// ── Distance computers ──────────────────────────────────────────────────
+// ── Distance computers (re-exported from v-hnsw-storage) ────────────────
 
-/// f32 distance computer for exact rescore.
-pub(crate) struct F32Dc<'a> {
-    pub store: &'a dyn VectorStore,
-}
-
-impl DistanceComputer for F32Dc<'_> {
-    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let vec = self.store.get(id)?;
-        Ok(NormalizedCosineDistance.distance(query, vec))
-    }
-}
-
-/// SQ8 distance computer for approximate traversal.
-pub(crate) struct Sq8Dc<'a> {
-    pub params: &'a Sq8Params,
-    pub store: &'a Sq8VectorStore,
-}
-
-impl DistanceComputer for Sq8Dc<'_> {
-    fn distance(&self, query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let codes = self.store.get(id)?;
-        Ok(self.params.asymmetric_distance(query, codes))
-    }
-}
-
-/// SQ8 distance computer with pre-built query LUT for batch search.
-///
-/// ~2x faster than `Sq8Dc` when computing distance to many vectors with
-/// the same query, since the per-element multiply is pre-computed.
-pub(crate) struct Sq8LutDc<'a> {
-    pub query_lut: Vec<f32>,
-    pub store: &'a Sq8VectorStore,
-}
-
-impl<'a> Sq8LutDc<'a> {
-    pub fn new(params: &Sq8Params, store: &'a Sq8VectorStore, query: &[f32]) -> Self {
-        Self {
-            query_lut: params.build_query_lut(query),
-            store,
-        }
-    }
-}
-
-impl DistanceComputer for Sq8LutDc<'_> {
-    fn distance(&self, _query: &[f32], id: PointId) -> v_hnsw_core::Result<f32> {
-        let codes = self.store.get(id)?;
-        Ok(Sq8Params::distance_with_lut(&self.query_lut, codes))
-    }
-}
+pub use v_hnsw_storage::{F32Dc, Sq8Dc, Sq8LutDc};
 
 // ── Database management ─────────────────────────────────────────────────
 

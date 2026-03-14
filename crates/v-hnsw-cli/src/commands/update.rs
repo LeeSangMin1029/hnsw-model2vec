@@ -25,7 +25,7 @@ struct ChangeSet {
 
 /// Statistics for the update operation.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct UpdateStats {
+pub struct UpdateStats {
     pub new: usize,
     pub modified: usize,
     pub deleted: usize,
@@ -85,7 +85,7 @@ pub fn run(db_path: PathBuf, input_path: Option<PathBuf>, exclude: &[String]) ->
     let stats = run_core(&db_path, &input_path, None, exclude)?;
 
     // Notify daemon to reload if running
-    if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {
+    if let Ok(()) = v_daemon::notify_reload(&db_path) {
         println!("Daemon notified to reload indexes.");
     }
 
@@ -97,7 +97,7 @@ pub fn run(db_path: PathBuf, input_path: Option<PathBuf>, exclude: &[String]) ->
 ///
 /// Pass `shared_model` to reuse an existing model (daemon path).
 /// Pass `None` to load a fresh model on demand (CLI fallback path).
-pub(crate) fn run_core(
+pub fn run_core(
     db_path: &Path,
     input_path: &Path,
     shared_model: Option<&Model2VecModel>,
@@ -299,7 +299,7 @@ fn try_daemon_update(db_path: &Path, input_path: &Path, exclude: &[String]) -> R
     });
 
     // Update can take a long time — generous read timeout (300s)
-    let result = super::serve::daemon_rpc("update", params, 300)?;
+    let result = v_daemon::daemon_rpc("update", params, 300)?;
 
     let stats: UpdateStats = serde_json::from_value(result)
         .context("Failed to parse update stats")?;

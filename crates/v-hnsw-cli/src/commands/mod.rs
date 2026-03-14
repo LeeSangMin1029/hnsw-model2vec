@@ -17,8 +17,6 @@ pub mod query_cache;
 pub mod readers;
 pub mod search_context;
 pub mod search_result;
-pub mod serve;
-
 // ── Document commands (v-hnsw) ──────────────────────────────────────
 pub mod add;
 pub mod buildindex;

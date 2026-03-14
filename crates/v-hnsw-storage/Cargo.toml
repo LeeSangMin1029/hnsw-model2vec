@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 v-hnsw-core.workspace = true
+v-hnsw-graph.workspace = true
+anyhow.workspace = true
 memmap2.workspace = true
 serde.workspace = true
 bincode.workspace = true

@@ -120,15 +120,6 @@ fn parse_build_index_command() {
     assert!(matches!(cli.command, Commands::BuildIndex { .. }));
 }
 
-#[test]
-fn parse_serve_command() {
-    let cli = Cli::try_parse_from(["v-hnsw", "serve", "--port", "8080"]).unwrap();
-    match cli.command {
-        Commands::Serve { port, .. } => assert_eq!(port, 8080),
-        _ => panic!("expected Serve command"),
-    }
-}
-
 // ── Error cases ──
 
 #[test]

@@ -11,6 +11,7 @@ members = [
     "crates/v-hnsw-cli",
     "crates/v-hnsw",
     "crates/v-code",
+    "crates/v-daemon",
 ]
 resolver = "2"
 
@@ -32,8 +33,10 @@ v-code-chunk = { path = "crates/v-code-chunk" }
 v-code-intel = { path = "crates/v-code-intel" }
 v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 v-hnsw-cli = { path = "crates/v-hnsw-cli" }
+v-daemon = { path = "crates/v-daemon" }
 
 # Error handling
+anyhow = "1"
 thiserror = "2"
 
 # Serialization

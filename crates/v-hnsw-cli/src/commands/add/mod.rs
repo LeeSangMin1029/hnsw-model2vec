@@ -136,7 +136,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     common::update_indexes_incremental(&db_path, &engine, &config, &result.added_ids, &result.removed_ids)?;
 
     // Notify daemon to reload if running
-    if let Ok(()) = super::serve::notify_daemon_reload(&db_path) {
+    if let Ok(()) = v_daemon::notify_reload(&db_path) {
         println!("Daemon notified to reload indexes.");
     }
 

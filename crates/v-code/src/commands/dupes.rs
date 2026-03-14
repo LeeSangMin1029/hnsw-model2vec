@@ -529,7 +529,7 @@ fn print_sub_block_json(clones: &[SubBlockClone], pstore: &impl PayloadStore) {
 
 fn run_analyze(db: &Path, pair_names: &[(String, String)]) -> Result<()> {
     use v_code_intel::dupe_analyze;
-    use v_code_intel::loader::load_or_build_graph;
+    use super::intel::load_or_build_graph;
 
     let graph = load_or_build_graph(db, None)?;
 
