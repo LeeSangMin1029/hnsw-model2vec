@@ -111,6 +111,45 @@ pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<Stri
     }
 }
 
+/// Like `walk_for_calls`, but also records the 0-based source line of each call.
+pub fn walk_for_calls_with_lines(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    calls: &mut Vec<String>,
+    lines: &mut Vec<u32>,
+) {
+    let call_name = match node.kind() {
+        "call_expression" | "call" => {
+            node.child_by_field_name("function")
+                .and_then(|f| f.utf8_text(src).ok())
+                .map(|t| t.to_owned())
+        }
+        "method_invocation" => {
+            node.child_by_field_name("name").and_then(|n| {
+                n.utf8_text(src).ok().map(|name| {
+                    if let Some(obj) = node.child_by_field_name("object")
+                        && let Ok(obj_text) = obj.utf8_text(src) {
+                            format!("{obj_text}.{name}")
+                        } else {
+                            name.to_owned()
+                        }
+                })
+            })
+        }
+        _ => None,
+    };
+
+    if let Some(name) = call_name {
+        lines.push(node.start_position().row as u32);
+        calls.push(name);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_calls_with_lines(&child, src, calls, lines);
+    }
+}
+
 /// Extract doc comments (`///` or `//!`) preceding a node.
 /// Collect doc-comment lines immediately before `target` under `root`.
 ///
@@ -173,6 +212,35 @@ pub fn walk_for_type_ids(node: &tree_sitter::Node, src: &[u8], refs: &mut Vec<St
     for child in node.children(&mut cursor) {
         walk_for_type_ids(&child, src, refs);
     }
+}
+
+/// Extract struct/class field declarations as a compact signature string.
+///
+/// For Rust structs, returns `"field1: Type1, field2: Type2"`.
+/// Returns `None` if the node has no `field_declaration_list` body.
+pub fn extract_struct_fields(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    // Rust: "field_declaration_list", Go/TS: "body"
+    let body = node.child_by_field_name("body")
+        .or_else(|| {
+            let mut c = node.walk();
+            node.children(&mut c).find(|n| n.kind() == "field_declaration_list")
+        })?;
+    let mut fields = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() == "field_declaration" {
+            let name = child.child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+                .unwrap_or_default();
+            let ty = child.child_by_field_name("type")
+                .and_then(|n| n.utf8_text(src).ok())
+                .unwrap_or_default();
+            if !name.is_empty() && !ty.is_empty() {
+                fields.push(format!("{name}: {ty}"));
+            }
+        }
+    }
+    if fields.is_empty() { None } else { Some(fields.join(", ")) }
 }
 
 /// Generic helper: extract parameter name-type pairs from a node's `parameters` field.

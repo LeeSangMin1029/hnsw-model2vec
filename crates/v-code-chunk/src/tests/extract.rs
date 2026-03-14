@@ -97,6 +97,19 @@ fn extract_name_struct() {
 }
 
 #[test]
+fn extract_struct_fields_basic() {
+    let src = "pub struct Wal {\n    dir: PathBuf,\n    writer: BufWriter<File>,\n    count: usize,\n}";
+    let (tree, bytes) = parse_rust(src);
+    let root = tree.root_node();
+    let node = find_first(&root, "struct_item").expect("no struct_item");
+    let fields = extract::extract_struct_fields(&node, &bytes);
+    assert!(fields.is_some(), "should extract fields, got None");
+    let fields = fields.unwrap();
+    assert!(fields.contains("dir: PathBuf"), "missing dir field: {fields}");
+    assert!(fields.contains("count: usize"), "missing count field: {fields}");
+}
+
+#[test]
 fn extract_name_impl_block() {
     let src = "impl MyStruct { fn foo(&self) {} }";
     let (tree, bytes) = parse_rust(src);

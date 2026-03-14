@@ -405,6 +405,12 @@ fn trait_impl_has_qualified_name() {
         names.iter().any(|n| n.contains("Display") && n.contains("Outer")),
         "trait impl should have qualified name with trait and type, got: {names:?}"
     );
+
+    // Generic trait impl: impl<T: Clone> MyTrait for Vec<T>
+    assert!(
+        names.iter().any(|n| n.contains("MyTrait") && n.contains("Vec")),
+        "generic trait impl should have qualified name, got: {names:?}"
+    );
 }
 
 #[test]
@@ -449,6 +455,16 @@ fn struct_visibility_is_pub() {
     let chunks = chunker.chunk(SAMPLE_RUST);
     let s = chunks.iter().find(|c| c.name == "PaymentIntent").unwrap();
     assert_eq!(s.visibility, "pub", "PaymentIntent should have pub visibility");
+}
+
+#[test]
+fn struct_signature_contains_fields() {
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(SAMPLE_RUST);
+    let s = chunks.iter().find(|c| c.name == "PaymentIntent").unwrap();
+    let sig = s.signature.as_deref().unwrap_or("");
+    assert!(!sig.is_empty(), "struct signature should contain fields, got empty. kind={:?}", s.kind);
+    assert!(sig.contains("amount"), "should contain 'amount' field: {sig}");
 }
 
 #[test]

@@ -5,14 +5,22 @@
 //! Supports incremental resolution — only re-queries LSP for changed files.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::state::DaemonState;
 use v_code_intel::call_map_cache::CallMapCache;
+
+/// Serializes concurrent `graph/build` requests so only one runs at a time.
+static GRAPH_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn handle_graph_build(
     params: serde_json::Value,
     state: &mut DaemonState,
 ) -> anyhow::Result<serde_json::Value> {
+    let _guard = GRAPH_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("graph lock poisoned: {e}"))?;
+
     #[derive(serde::Deserialize)]
     struct GraphBuildParams {
         db: String,

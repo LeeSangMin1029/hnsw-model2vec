@@ -115,6 +115,8 @@ pub struct CodeChunk {
     pub imports: Vec<String>,
     /// Function calls within the body.
     pub calls: Vec<String>,
+    /// Source line (0-based) of each call in `calls` (parallel array).
+    pub call_lines: Vec<u32>,
     /// Type names referenced in signature and body.
     pub type_refs: Vec<String>,
     /// Parameter name-type pairs (e.g., `[("amount", "f64")]`).
@@ -177,9 +179,16 @@ impl CodeChunk {
             parts.push(format!("Types: {}", self.type_refs.join(", ")));
         }
 
-        // Calls
+        // Calls (with source line annotations: name@line, 1-based)
         if !self.calls.is_empty() {
-            parts.push(format!("Calls: {}", self.calls.join(", ")));
+            let annotated: Vec<String> = self.calls.iter().enumerate().map(|(i, c)| {
+                if let Some(&line) = self.call_lines.get(i) {
+                    format!("{c}@{}", line + 1) // 0-based → 1-based
+                } else {
+                    c.clone()
+                }
+            }).collect();
+            parts.push(format!("Calls: {}", annotated.join(", ")));
         }
 
         // Called by (reverse references)

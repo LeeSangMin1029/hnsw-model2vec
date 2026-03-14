@@ -14,7 +14,9 @@ use crate::parse::{self, CodeChunk};
 /// Load all code chunks from the database, using a bincode cache.
 pub fn load_chunks(path: &Path) -> Result<Vec<CodeChunk>> {
     let cache = cache_path(path);
-    let db_mtime = fs::metadata(path)
+    // Use payload.dat mtime (not directory mtime) — directory mtime
+    // doesn't update on Windows when files inside are modified.
+    let db_mtime = fs::metadata(path.join("payload.dat"))
         .and_then(|m| m.modified())
         .ok();
 
@@ -177,7 +179,7 @@ fn resolve_incremental(
     new_cache.to_call_map()
 }
 
-/// Auto-start an LSP server, incrementally resolve calls, then shut it down.
+/// Check cache; if stale, require daemon for LSP resolution instead of spawning directly.
 fn auto_resolve_incremental(
     db: &Path,
     chunks: &[parse::CodeChunk],
@@ -190,20 +192,18 @@ fn auto_resolve_incremental(
             eprintln!("[graph] All files unchanged — using cached CallMap (no LSP needed)");
             return cache.to_call_map();
         }
+        eprintln!(
+            "[graph] {}/{} files changed — daemon required for LSP resolution",
+            changed.len(),
+            chunks
+                .iter()
+                .map(|c| c.file.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
     }
 
-    let mut resolver = match LspCallResolver::start(project_root) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[graph] LSP not available: {e}");
-            return CallMap::new();
-        }
-    };
-
-    eprintln!("[graph] LSP started for: {}", project_root.display());
-
-    let result = resolve_incremental(db, chunks, project_root, &mut resolver);
-
-    let _ = resolver.shutdown();
-    result
+    // No daemon available and no complete cache — fall back to tree-sitter only.
+    eprintln!("[graph] No daemon available — using tree-sitter heuristic (run v-daemon for accurate results)");
+    CallMap::new()
 }

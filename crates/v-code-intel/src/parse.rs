@@ -12,6 +12,8 @@ pub struct CodeChunk {
     pub lines: Option<(usize, usize)>,
     pub signature: Option<String>,
     pub calls: Vec<String>,
+    /// Source line (1-based) of each call in `calls` (parallel array).
+    pub call_lines: Vec<u32>,
     pub types: Vec<String>,
     /// File-level import statements (loaded from payload custom fields).
     #[serde(default)]
@@ -40,13 +42,25 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
     let kind = first[1..bracket_end].to_owned();
     let rest = first[bracket_end + 1..].trim();
 
-    // Name is the last token (may have "pub" prefix)
-    let name = rest.split_whitespace().last().unwrap_or(rest).to_owned();
+    // Name extraction: for impl/trait, take everything after optional visibility
+    // prefix (e.g. "pub"); for others, take the last token.
+    // "[impl] VectorIndex for HnswGraph<D>" → "VectorIndex for HnswGraph<D>"
+    // "[function] pub StorageEngine::insert" → "StorageEngine::insert"
+    let name = if kind == "impl" || kind == "trait" {
+        // Strip leading "pub"/"pub(crate)" prefix if present
+        let stripped = rest.strip_prefix("pub(crate) ")
+            .or_else(|| rest.strip_prefix("pub "))
+            .unwrap_or(rest);
+        stripped.to_owned()
+    } else {
+        rest.split_whitespace().last().unwrap_or(rest).to_owned()
+    };
 
     let mut file = String::new();
     let mut line_range = None;
     let mut signature = None;
     let mut calls = Vec::new();
+    let mut call_lines: Vec<u32> = Vec::new();
     let mut types = Vec::new();
 
     for line in lines_iter {
@@ -71,7 +85,19 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         } else if let Some(s) = line.strip_prefix("Signature: ") {
             signature = Some(s.trim().to_owned());
         } else if let Some(c) = line.strip_prefix("Calls: ") {
-            calls = c.split(", ").map(|s| s.trim().to_owned()).collect();
+            // Parse "name@line" annotations: split off @N suffix
+            for token in c.split(", ") {
+                let token = token.trim();
+                if let Some(at) = token.rfind('@') {
+                    if let Ok(line_num) = token[at + 1..].parse::<u32>() {
+                        calls.push(token[..at].to_owned());
+                        call_lines.push(line_num);
+                        continue;
+                    }
+                }
+                calls.push(token.to_owned());
+                call_lines.push(0);
+            }
         } else if let Some(t) = line.strip_prefix("Types: ") {
             types = t.split(", ").map(|s| s.trim().to_owned()).collect();
         }
@@ -88,6 +114,7 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         lines: line_range,
         signature,
         calls,
+        call_lines,
         types,
         imports: Vec::new(),
     })

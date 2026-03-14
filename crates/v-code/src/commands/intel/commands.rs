@@ -86,7 +86,42 @@ pub fn run_symbols(
         |n| format!("{n} symbols found:\n"),
         limit,
         compact,
-    )
+    )?;
+
+    // Show trait implementations if any trait was in the results.
+    if !matches!(format, OutputFormat::Json) {
+        print_trait_impls_if_relevant(&db, name.as_deref())?;
+    }
+    Ok(())
+}
+
+/// If the symbol search matched any trait, print its implementations.
+fn print_trait_impls_if_relevant(db: &std::path::Path, name: Option<&str>) -> Result<()> {
+    let name = match name {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+    let graph = load_or_build_graph(db, None)?;
+    let indices = graph.resolve(name);
+    for idx in indices {
+        let i = idx as usize;
+        if graph.kinds[i] != "trait" {
+            continue;
+        }
+        let impls = &graph.trait_impls[i];
+        if impls.is_empty() {
+            continue;
+        }
+        println!("  implementations of {}:", graph.names[i]);
+        for &impl_idx in impls {
+            let ii = impl_idx as usize;
+            let file = super::relative_path(&graph.files[ii]);
+            let lines = format_lines_opt(graph.lines[ii]);
+            println!("    {file}{lines}  [{}] {}", graph.kinds[ii], graph.names[ii]);
+        }
+        println!();
+    }
+    Ok(())
 }
 
 /// `v-code context <db> <symbol> --depth N`
@@ -116,29 +151,45 @@ pub fn run_context(
     // Build tagged entries for file-grouped output
     let mut entries: Vec<TaggedEntry> = Vec::new();
     for &idx in &result.seeds {
-        entries.push(TaggedEntry { idx, tag: "def", sig: true });
+        entries.push(TaggedEntry { idx, tag: "def", sig: true, call_line: 0 });
     }
     for e in &result.callers {
-        entries.push(TaggedEntry { idx: e.idx, tag: "caller", sig: false });
+        // Caller calls the seed — look up call site line
+        let cl = result.seeds.first().map_or(0, |&seed| graph.call_site_line(e.idx, seed));
+        entries.push(TaggedEntry { idx: e.idx, tag: "caller", sig: false, call_line: cl });
     }
     for e in &result.callees {
-        entries.push(TaggedEntry { idx: e.idx, tag: "callee", sig: false });
+        // Seed calls this callee — look up call site line from seed
+        let cl = result.seeds.first().map_or(0, |&seed| graph.call_site_line(seed, e.idx));
+        entries.push(TaggedEntry { idx: e.idx, tag: "callee", sig: false, call_line: cl });
     }
     for &idx in &result.types {
-        entries.push(TaggedEntry { idx, tag: "type", sig: false });
+        entries.push(TaggedEntry { idx, tag: "type", sig: false, call_line: 0 });
     }
     for &idx in &result.tests {
-        entries.push(TaggedEntry { idx, tag: "test", sig: false });
+        let cl = result.seeds.first().map_or(0, |&seed| graph.call_site_line(idx, seed));
+        entries.push(TaggedEntry { idx, tag: "test", sig: false, call_line: cl });
     }
 
     // Header with counts
+    let ext_count = result.unresolved_calls.len();
     let counts = format!(
-        "{} caller, {} callee, {} type, {} test",
+        "{} caller, {} callee, {} type, {} test{}",
         result.callers.len(), result.callees.len(),
         result.types.len(), result.tests.len(),
+        if ext_count > 0 { format!(", {} extern", ext_count) } else { String::new() },
     );
     println!("=== context: {symbol} ({counts}) ===\n");
     print_file_grouped(&graph, &entries);
+
+    // Show unresolved/external calls if any.
+    if !result.unresolved_calls.is_empty() {
+        println!("@ [extern]");
+        for call in &result.unresolved_calls {
+            println!("  {call}");
+        }
+        println!();
+    }
 
     Ok(())
 }
@@ -230,7 +281,7 @@ pub fn run_blast(
             2 => "d2",
             _ => "d3+",
         };
-        tagged.push(TaggedEntry { idx: e.idx, tag, sig: false });
+        tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
     }
 
     println!("=== blast: {symbol} ({} affected, {} prod, {} test) ===\n",
@@ -377,6 +428,8 @@ struct TaggedEntry {
     idx: u32,
     tag: &'static str,
     sig: bool,
+    /// Source line where this entry calls/is-called-by the seed (0 = unknown).
+    call_line: u32,
 }
 
 /// Print entries grouped by file, with multi-base path aliases.
@@ -424,7 +477,12 @@ fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry]) {
             let kind = &graph.kinds[i];
             let name = &graph.names[i];
             let test_marker = if graph.is_test[i] { " [test]" } else { "" };
-            println!("  [{}] {lines} {kind} {name}{test_marker}", e.tag);
+            let call_site = if e.call_line > 0 {
+                format!("  → :{}", e.call_line)
+            } else {
+                String::new()
+            };
+            println!("  [{}] {lines} {kind} {name}{test_marker}{call_site}", e.tag);
             if e.sig {
                 if let Some(s) = &graph.signatures[i] {
                     println!("    {s}");

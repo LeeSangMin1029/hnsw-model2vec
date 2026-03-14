@@ -8,6 +8,7 @@ pub fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         lines: Some((1, 10)),
         signature: Some(format!("fn {name}()")),
         calls: calls.iter().map(|s| s.to_string()).collect(),
+        call_lines: vec![],
         types: vec![],
         imports: vec![],
     }
@@ -21,6 +22,7 @@ pub fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         lines: Some((1, 10)),
         signature: Some(format!("fn {name}()")),
         calls: calls.iter().map(|s| s.to_string()).collect(),
+        call_lines: vec![],
         types: vec![],
         imports: vec![],
     }

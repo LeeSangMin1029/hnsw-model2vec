@@ -247,6 +247,7 @@ mod tests {
                 kind: chunk_code::CodeNodeKind::Function,
                 text: String::new(),
                 calls: calls.iter().map(|s| s.to_string()).collect(),
+                call_lines: vec![],
                 type_refs: vec![],
                 signature: None,
                 doc_comment: None,

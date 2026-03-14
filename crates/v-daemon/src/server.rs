@@ -1,10 +1,12 @@
 //! TCP server loop — listens for JSON-RPC connections and dispatches to handlers.
 
+use std::fs::File;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 
 use crate::interrupt::is_interrupted;
 use crate::state::DaemonState;
@@ -16,16 +18,30 @@ pub fn run(
     timeout_secs: u64,
     background: bool,
 ) -> Result<()> {
-    if crate::client::is_running()
-        && let Some(existing_port) = crate::client::read_port()
-    {
-        eprintln!("[daemon] Already running on port {existing_port}");
-        return Ok(());
-    }
-
     if background {
+        // Background mode: check before spawning (no lock needed here,
+        // the spawned process will acquire the lock itself).
+        if crate::client::is_running()
+            && let Some(existing_port) = crate::client::read_port()
+        {
+            eprintln!("[daemon] Already running on port {existing_port}");
+            return Ok(());
+        }
         return spawn_background(db_path.as_deref(), port, timeout_secs);
     }
+
+    // Acquire an exclusive lockfile to prevent multiple daemon instances.
+    // The lock is held for the lifetime of `_lock_file`; the OS releases it on process exit.
+    let lock_path = port_dir().join("v-daemon.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap_or_else(|| Path::new("."))).ok();
+    let lock_file =
+        File::create(&lock_path).with_context(|| format!("Cannot create {}", lock_path.display()))?;
+    if lock_file.try_lock_exclusive().is_err() {
+        eprintln!("[daemon] Already running (lockfile held by another process)");
+        return Ok(());
+    }
+    // Keep `_lock_file` alive so the lock persists until shutdown.
+    let _lock_file = lock_file;
 
     let initial = db_path
         .as_deref()
@@ -125,12 +141,25 @@ fn write_daemon_files(port: u16) -> Result<()> {
             .with_context(|| format!("Failed to write {}", p.display()))
     };
     write("v-daemon.pid", &std::process::id().to_string())?;
-    write("v-daemon.port", &port.to_string())
+    write("v-daemon.port", &port.to_string())?;
+
+    // Store current exe mtime so clients can detect stale binaries.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(meta) = exe.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    let _ = write("v-daemon.mtime", &dur.as_secs().to_string());
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cleanup_files() {
     let dir = port_dir();
-    for name in ["v-daemon.pid", "v-daemon.port"] {
+    for name in ["v-daemon.pid", "v-daemon.port", "v-daemon.mtime", "v-daemon.lock"] {
         let _ = std::fs::remove_file(dir.join(name));
     }
 }

@@ -23,6 +23,8 @@ pub struct ContextResult {
     pub types: Vec<u32>,
     /// Chunk indices of test functions that call the symbol.
     pub tests: Vec<u32>,
+    /// Unresolved call names from seed chunks (external/std dependencies).
+    pub unresolved_calls: Vec<String>,
 }
 
 /// Build unified context for a symbol.
@@ -37,12 +39,14 @@ pub fn build_context(
 ) -> ContextResult {
     let seeds = graph.resolve(symbol);
 
-    // Callers: reverse BFS, exclude seeds themselves.
+    // Callers: reverse BFS, exclude seeds and test chunks (tests shown separately).
     let callers = {
         let all = bfs_generic(graph, &seeds, depth, BfsDirection::Reverse, |idx, d| {
             Some(ContextEntry { idx, depth: d })
         });
-        all.into_iter().filter(|e| e.depth > 0).collect()
+        all.into_iter()
+            .filter(|e| e.depth > 0 && !graph.is_test[e.idx as usize])
+            .collect()
     };
 
     // Callees: forward BFS, exclude seeds themselves.
@@ -59,7 +63,10 @@ pub fn build_context(
     // Tests: find test chunks that call the symbol.
     let tests = collect_tests(graph, &seeds);
 
-    ContextResult { seeds, callers, callees, types, tests }
+    // Unresolved calls: calls from seed chunks that don't map to any graph callee.
+    let unresolved_calls = collect_unresolved(graph, chunks, &seeds);
+
+    ContextResult { seeds, callers, callees, types, tests, unresolved_calls }
 }
 
 /// Resolve type names from seed chunks to chunk indices.
@@ -93,6 +100,54 @@ fn collect_types(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) -> Vec<
     }
 
     type_indices
+}
+
+/// Collect call names from seed chunks that couldn't be resolved to any graph node.
+/// These are typically external crate / std library calls.
+fn collect_unresolved(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) -> Vec<String> {
+    let mut unresolved = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for &seed in seeds {
+        let seed_usize = seed as usize;
+        if seed_usize >= chunks.len() {
+            continue;
+        }
+        // Get the set of resolved callee names for this seed.
+        let resolved_names: std::collections::HashSet<&str> = graph.callees
+            .get(seed_usize)
+            .map(|cs| cs.iter().map(|&idx| graph.names[idx as usize].as_str()).collect())
+            .unwrap_or_default();
+
+        for call in &chunks[seed_usize].calls {
+            // Skip if it resolves to a known callee (by short name match).
+            let short = call.rsplit("::").next().unwrap_or(call);
+            let is_resolved = resolved_names.iter().any(|n| {
+                let n_short = n.rsplit("::").next().unwrap_or(n);
+                n_short.eq_ignore_ascii_case(short)
+            });
+            if !is_resolved && !is_noise(call) && seen.insert(call.clone()) {
+                unresolved.push(call.clone());
+            }
+        }
+    }
+    unresolved
+}
+
+/// Filter out common std/self method noise from unresolved calls.
+fn is_noise(call: &str) -> bool {
+    // self.field calls are usually internal method chains
+    if call.starts_with("self.") { return true; }
+    // Common std traits / methods that are never interesting
+    let leaf = call.rsplit('.').next().unwrap_or(call);
+    matches!(leaf,
+        "clone" | "to_string" | "to_owned" | "to_vec" | "into"
+        | "unwrap" | "expect" | "unwrap_or" | "unwrap_or_default" | "unwrap_or_else"
+        | "map" | "map_err" | "and_then" | "or_else" | "ok" | "err"
+        | "collect" | "iter" | "into_iter" | "push" | "pop" | "len" | "is_empty"
+        | "as_ref" | "as_mut" | "borrow" | "deref"
+        | "fmt" | "write" | "read" | "flush"
+    ) || matches!(call, "Ok" | "Err" | "Some" | "None" | "format" | "println" | "eprintln" | "vec")
 }
 
 /// Find test chunks that directly call any seed.

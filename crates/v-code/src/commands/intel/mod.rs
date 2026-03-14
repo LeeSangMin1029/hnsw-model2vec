@@ -44,12 +44,17 @@ pub fn load_or_build_graph(
 ) -> anyhow::Result<v_code_intel::graph::CallGraph> {
     let hooks = DaemonHooks {
         try_graph_build: daemon_try_graph_build,
-        spawn: v_daemon::spawn_daemon,
+        spawn: daemon_spawn_and_wait,
     };
     v_code_intel::loader::load_or_build_graph(db, lsp, Some(&hooks))
 }
 
 fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::CallGraph> {
+    // Ensure daemon is running with current binary version.
+    if !v_daemon::ensure_daemon(db) {
+        return None;
+    }
+
     let canonical = db.canonicalize().ok()?;
     let db_str = canonical.to_str()?;
 
@@ -64,6 +69,11 @@ fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::C
         None
     }
 }
+
+fn daemon_spawn_and_wait(db: &std::path::Path) {
+    v_daemon::spawn_daemon_and_wait(db);
+}
+
 pub use v_code_intel::parse::CodeChunk;
 #[cfg(test)]
 pub use v_code_intel::parse;

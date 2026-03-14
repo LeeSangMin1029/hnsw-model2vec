@@ -3851,6 +3851,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "fs2",
  "serde",
  "serde_json",
  "tracing",

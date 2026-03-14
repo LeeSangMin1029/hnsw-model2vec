@@ -323,6 +323,16 @@ impl std::fmt::Display for Outer {
         write!(f, "Outer")
     }
 }
+
+trait MyTrait {
+    fn do_thing(&self) -> i32;
+}
+
+impl<T: Clone> MyTrait for Vec<T> {
+    fn do_thing(&self) -> i32 {
+        self.len() as i32
+    }
+}
 "#;
 
 pub const SAMPLE_RUST_SINGLE_LINE_FN: &str = r#"
