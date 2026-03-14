@@ -149,15 +149,8 @@ impl MmapVectorStore {
         })
     }
 
-    /// Get a vector slice from mmap by slot number.
-    ///
-    /// # Safety
-    ///
-    /// This method uses `from_raw_parts` internally. It is safe because:
-    /// - Slot bounds are checked
-    /// - Slot size is always a multiple of 4 (f32 alignment)
-    /// - Mmap guarantees memory validity for the mapped region
-    fn slot_slice(&self, slot: u32) -> Result<&[f32]> {
+    /// Compute the byte range `[offset, end)` for a given slot, with bounds check.
+    fn slot_byte_range(&self, slot: u32) -> Result<std::ops::Range<usize>> {
         let offset = HEADER_SIZE + (slot as usize) * self.slot_size;
         let end = offset + self.slot_size;
 
@@ -168,7 +161,20 @@ impl MmapVectorStore {
             )));
         }
 
-        let bytes = &self.mmap[offset..end];
+        Ok(offset..end)
+    }
+
+    /// Get a vector slice from mmap by slot number.
+    ///
+    /// # Safety
+    ///
+    /// This method uses `from_raw_parts` internally. It is safe because:
+    /// - Slot bounds are checked
+    /// - Slot size is always a multiple of 4 (f32 alignment)
+    /// - Mmap guarantees memory validity for the mapped region
+    fn slot_slice(&self, slot: u32) -> Result<&[f32]> {
+        let range = self.slot_byte_range(slot)?;
+        let bytes = &self.mmap[range];
         // SAFETY: bytes are aligned to f32 (slot_size is always multiple of 4)
         // and mmap guarantees the memory is valid for the mapped region
         let ptr = bytes.as_ptr().cast::<f32>();
@@ -184,17 +190,8 @@ impl MmapVectorStore {
             });
         }
 
-        let offset = HEADER_SIZE + (slot as usize) * self.slot_size;
-        let end = offset + self.slot_size;
-
-        if end > self.mmap.len() {
-            return Err(VhnswError::Storage(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("slot {} out of mmap bounds", slot),
-            )));
-        }
-
-        let bytes = &mut self.mmap[offset..end];
+        let range = self.slot_byte_range(slot)?;
+        let bytes = &mut self.mmap[range];
         let ptr = bytes.as_mut_ptr().cast::<f32>();
         let dest = unsafe { std::slice::from_raw_parts_mut(ptr, self.dim) };
         dest.copy_from_slice(vector);

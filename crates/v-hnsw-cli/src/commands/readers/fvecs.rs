@@ -55,7 +55,7 @@ impl FvecsReader {
 
         let mut f = File::open(path)
             .with_context(|| format!("cannot open {}", path.display()))?;
-        let dim = read_u32_le(&mut f)? as usize;
+        let dim = read_le::<u32>(&mut f)? as usize;
         if dim == 0 {
             anyhow::bail!("dimension is 0");
         }
@@ -123,20 +123,29 @@ impl VectorReader for FvecsReader {
 // Low-level helpers (no unsafe)
 // ---------------------------------------------------------------------------
 
-/// Read a little-endian u32.
-fn read_u32_le(r: &mut impl Read) -> Result<u32> {
+/// Read a little-endian primitive (`u32` or `f32`) from a byte stream.
+fn read_le<T: LeBytesReadable>(r: &mut impl Read) -> Result<T> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)
-        .context("failed to read u32")?;
-    Ok(u32::from_le_bytes(buf))
+        .with_context(|| format!("failed to read {}", std::any::type_name::<T>()))?;
+    Ok(T::from_le_bytes(buf))
 }
 
-/// Read a little-endian f32.
-fn read_f32_le(r: &mut impl Read) -> Result<f32> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)
-        .context("failed to read f32")?;
-    Ok(f32::from_le_bytes(buf))
+/// Trait for 4-byte little-endian primitives.
+trait LeBytesReadable {
+    fn from_le_bytes(bytes: [u8; 4]) -> Self;
+}
+
+impl LeBytesReadable for u32 {
+    fn from_le_bytes(bytes: [u8; 4]) -> Self {
+        u32::from_le_bytes(bytes)
+    }
+}
+
+impl LeBytesReadable for f32 {
+    fn from_le_bytes(bytes: [u8; 4]) -> Self {
+        f32::from_le_bytes(bytes)
+    }
 }
 
 /// Read one complete record (header + vector). Returns `None` on clean EOF.
@@ -154,7 +163,7 @@ fn read_one_record(r: &mut impl Read, variant: Variant) -> Result<Option<Vec<f32
         Variant::Fvecs => {
             let mut vec = Vec::with_capacity(dim);
             for _ in 0..dim {
-                vec.push(read_f32_le(r)?);
+                vec.push(read_le::<f32>(r)?);
             }
             vec
         }

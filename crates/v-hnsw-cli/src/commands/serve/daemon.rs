@@ -78,22 +78,29 @@ enum SparseIndex {
     HeapCode(Bm25Index<CodeTokenizer>),
 }
 
+/// Dispatch a BM25 operation across `SparseIndex` variants.
+///
+/// The snapshot branch needs monomorphization over two tokenizer types,
+/// which prevents using a simple closure-based helper. This macro eliminates
+/// the duplicated 4-arm match without runtime overhead.
+macro_rules! sparse_dispatch {
+    ($self:expr, $method:ident, $($arg:expr),* $(,)?) => {
+        match $self {
+            SparseIndex::Snapshot(s, true) => s.$method(&CodeTokenizer::new(), $($arg),*),
+            SparseIndex::Snapshot(s, false) => s.$method(&KoreanBm25Tokenizer::new(), $($arg),*),
+            SparseIndex::HeapDoc(h) => h.$method($($arg),*),
+            SparseIndex::HeapCode(h) => h.$method($($arg),*),
+        }
+    };
+}
+
 impl SparseIndex {
     fn search(&self, query: &str, limit: usize) -> Vec<(PointId, f32)> {
-        match self {
-            Self::Snapshot(s, true) => s.search(&CodeTokenizer::new(), query, limit),
-            Self::Snapshot(s, false) => s.search(&KoreanBm25Tokenizer::new(), query, limit),
-            Self::HeapDoc(h) => h.search(query, limit),
-            Self::HeapCode(h) => h.search(query, limit),
-        }
+        sparse_dispatch!(self, search, query, limit)
     }
+
     fn score_documents(&self, query: &str, doc_ids: &[PointId]) -> Vec<(PointId, f32)> {
-        match self {
-            Self::Snapshot(s, true) => s.score_documents(&CodeTokenizer::new(), query, doc_ids),
-            Self::Snapshot(s, false) => s.score_documents(&KoreanBm25Tokenizer::new(), query, doc_ids),
-            Self::HeapDoc(h) => h.score_documents(query, doc_ids),
-            Self::HeapCode(h) => h.score_documents(query, doc_ids),
-        }
+        sparse_dispatch!(self, score_documents, query, doc_ids)
     }
 }
 

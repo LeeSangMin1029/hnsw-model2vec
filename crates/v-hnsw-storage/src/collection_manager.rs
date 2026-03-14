@@ -43,22 +43,19 @@ pub struct CollectionManager {
 }
 
 impl CollectionManager {
-    /// Returns error if the collection does not exist in the manifest.
-    fn require_exists(&self, name: &str) -> Result<()> {
-        if self.manifest.get_collection(name).is_none() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{name}' not found"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Returns error if the collection already exists in the manifest.
-    fn require_not_exists(&self, name: &str) -> Result<()> {
-        if self.manifest.get_collection(name).is_some() {
-            return Err(VhnswError::Payload(format!(
-                "Collection '{name}' already exists"
-            )));
+    /// Validates that a collection either exists or does not exist in the manifest.
+    ///
+    /// When `should_exist` is `true`, returns an error if the collection is missing.
+    /// When `should_exist` is `false`, returns an error if the collection already exists.
+    fn check_collection(&self, name: &str, should_exist: bool) -> Result<()> {
+        let exists = self.manifest.get_collection(name).is_some();
+        if exists != should_exist {
+            let msg = if should_exist {
+                format!("Collection '{name}' not found")
+            } else {
+                format!("Collection '{name}' already exists")
+            };
+            return Err(VhnswError::Payload(msg));
         }
         Ok(())
     }
@@ -179,7 +176,7 @@ impl CollectionManager {
     /// - Manifest save fails
     pub fn create_collection(&mut self, name: &str, config: StorageConfig) -> Result<&Collection> {
         // Check if collection already exists
-        self.require_not_exists(name)?;
+        self.check_collection(name, false)?;
 
         // Create collection directory
         let collections_dir = self.collections_dir();
@@ -231,7 +228,7 @@ impl CollectionManager {
 
     /// Check manifest and lazy-load collection if not already open.
     fn ensure_loaded(&mut self, name: &str) -> Result<()> {
-        self.require_exists(name)?;
+        self.check_collection(name, true)?;
         if !self.open_collections.contains_key(name) {
             let collections_dir = self.collections_dir();
             let collection = Collection::open(&collections_dir, name)?;
@@ -261,7 +258,7 @@ impl CollectionManager {
     /// - Manifest save fails
     pub fn delete_collection(&mut self, name: &str) -> Result<()> {
         // Check if collection exists
-        self.require_exists(name)?;
+        self.check_collection(name, true)?;
 
         // Close collection if open
         self.open_collections.remove(name);
@@ -292,10 +289,10 @@ impl CollectionManager {
     /// - Manifest save fails
     pub fn rename_collection(&mut self, old_name: &str, new_name: &str) -> Result<()> {
         // Validate old collection exists
-        self.require_exists(old_name)?;
+        self.check_collection(old_name, true)?;
 
         // Validate new name doesn't exist
-        self.require_not_exists(new_name)?;
+        self.check_collection(new_name, false)?;
 
         // Close collection if open
         self.open_collections.remove(old_name);
