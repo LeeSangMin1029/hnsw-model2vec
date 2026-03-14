@@ -226,21 +226,11 @@ pub enum Commands {
         #[arg(long)]
         background: bool,
     },
-    /// Add code files to the database (auto-embed with jina-code).
+    /// Add/update code files in the database (auto-incremental).
     Add {
         /// Path to the database directory.
         db: PathBuf,
         /// Path to code folder or single file.
-        input: PathBuf,
-        /// Glob patterns to exclude from scanning.
-        #[arg(short, long)]
-        exclude: Vec<String>,
-    },
-    /// Incrementally update code database from source.
-    Update {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Path to source folder.
         input: PathBuf,
         /// Glob patterns to exclude from scanning.
         #[arg(short, long)]

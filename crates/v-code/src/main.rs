@@ -70,9 +70,6 @@ fn run() -> anyhow::Result<()> {
         }
         Commands::Stats { db, format } => intel::run_stats(db, format),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
-        Commands::Update { db, input, exclude } => {
-            commands::add::run_update(db, input, &exclude)
-        }
         Commands::Serve { db, port, timeout, background } => {
             v_hnsw_cli::commands::serve::run(db, port, timeout, background, None)
         }
