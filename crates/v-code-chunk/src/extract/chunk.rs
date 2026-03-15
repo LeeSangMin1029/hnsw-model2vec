@@ -5,7 +5,7 @@ use super::ParsedSource;
 use super::common::{extract_function_signature, extract_struct_fields, collect_sorted_unique, walk_for_calls_with_lines, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
 
 /// Walk calls with line info and deduplicate, preserving first occurrence's line.
-fn extract_calls_deduped(
+pub(crate) fn extract_calls_deduped(
     node: &tree_sitter::Node,
     src: &[u8],
 ) -> (Vec<String>, Vec<u32>) {
@@ -369,7 +369,7 @@ pub fn chunk_standard(
 ///
 /// Returns `(actual_node, visibility_string)`. If no wrapper or no inner match,
 /// returns the original node with empty visibility.
-fn unwrap_wrapper<'a>(
+pub(crate) fn unwrap_wrapper<'a>(
     lang: &LangExtractors,
     child: &tree_sitter::Node<'a>,
     _src: &[u8],
