@@ -209,7 +209,7 @@ impl CallGraph {
             let idx = i as u32;
             let lower = c.name.to_lowercase();
             exact_multi.entry(lower.clone()).or_default().push(idx);
-            let stripped = strip_chunk_generics(&lower);
+            let stripped = strip_generics_from_key(&lower);
             if stripped != lower {
                 exact_multi.entry(stripped.clone()).or_default().push(idx);
                 // Also add stripped to single-value map (meta.exact doesn't have it).
@@ -238,7 +238,7 @@ impl CallGraph {
         let mut exact_single = meta.exact.clone();
         for (i, c) in chunks.iter().enumerate() {
             let lower = c.name.to_lowercase();
-            let stripped = strip_chunk_generics(&lower);
+            let stripped = strip_generics_from_key(&lower);
             if stripped != lower {
                 exact_single.insert(stripped, i as u32);
             }
@@ -772,21 +772,6 @@ fn find_best_chunk_match(
         }
     }
     best
-}
-
-/// Strip generic params from chunk names: `hnswgraph<d>::insert` → `hnswgraph::insert`.
-fn strip_chunk_generics(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
-    let mut depth = 0u32;
-    for c in name.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' => { depth = depth.saturating_sub(1); }
-            _ if depth == 0 => result.push(c),
-            _ => {}
-        }
-    }
-    result
 }
 
 /// Check if a file path looks like a test file.
