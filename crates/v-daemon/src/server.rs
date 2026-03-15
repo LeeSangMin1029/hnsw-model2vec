@@ -90,7 +90,11 @@ pub fn run(
             let db_canon = db.canonicalize().ok()?;
             let project_root = v_code_intel::lsp::find_project_root(&db_canon)?;
             eprintln!("[daemon] Project root: {}", project_root.display());
-            FileWatcher::new(&[project_root], db_canon)
+            // Read input_path from DB config for auto-reindex.
+            let input_path = v_hnsw_storage::DbConfig::load(&db_canon)
+                .ok()
+                .and_then(|c| c.input_path.map(PathBuf::from));
+            FileWatcher::new(&[project_root], db_canon, input_path)
         });
 
     loop {
@@ -108,18 +112,19 @@ pub fn run(
         state.maybe_evict_databases();
         state.maybe_evict_lsp();
 
-        // Poll file watcher for source changes → invalidate graph cache.
+        // Poll file watcher for source changes → invalidate graph cache + auto-reindex.
         if let Some(ref mut w) = watcher {
             let changed = w.poll_changes();
             if !changed.is_empty() {
                 eprintln!(
-                    "[watcher] {} file(s) changed, invalidating graph cache",
+                    "[watcher] {} file(s) changed, invalidating graph cache + auto-reindex",
                     changed.len(),
                 );
                 for f in &changed {
                     tracing::debug!(file = %f.display(), "source file changed");
                 }
                 w.invalidate_graph_cache();
+                w.auto_reindex();
             }
         }
 

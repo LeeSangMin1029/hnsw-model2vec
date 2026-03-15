@@ -2,10 +2,12 @@
 //!
 //! Uses `notify` crate for cross-platform filesystem events.
 //! Debounces rapid changes (2 seconds) and filters to source file extensions only.
+//! On change: invalidates graph cache + triggers automatic re-indexing via `v-code add`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -24,6 +26,9 @@ const IGNORED_DIRS: &[&str] = &[
 /// Debounce window in seconds.
 const DEBOUNCE_SECS: u64 = 2;
 
+/// Guards against concurrent auto-reindex runs.
+static REINDEX_RUNNING: AtomicBool = AtomicBool::new(false);
+
 /// Watches project directories for source file changes.
 pub struct FileWatcher {
     _watcher: RecommendedWatcher,
@@ -31,13 +36,15 @@ pub struct FileWatcher {
     pending: HashSet<PathBuf>,
     last_event: Option<Instant>,
     db_path: PathBuf,
+    input_path: Option<PathBuf>,
 }
 
 impl FileWatcher {
     /// Start watching the given directories recursively.
     ///
+    /// `input_path` is the source root for `v-code add` (read from `DbConfig`).
     /// Returns `None` if watcher creation fails (non-fatal — daemon runs without watching).
-    pub fn new(watch_dirs: &[PathBuf], db_path: PathBuf) -> Option<Self> {
+    pub fn new(watch_dirs: &[PathBuf], db_path: PathBuf, input_path: Option<PathBuf>) -> Option<Self> {
         let (tx, rx) = mpsc::channel();
 
         let sender = tx.clone();
@@ -81,6 +88,7 @@ impl FileWatcher {
             pending: HashSet::new(),
             last_event: None,
             db_path,
+            input_path,
         })
     }
 
@@ -117,6 +125,60 @@ impl FileWatcher {
                 Err(e) => eprintln!("[watcher] Failed to remove graph cache: {e}"),
             }
         }
+    }
+
+    /// Trigger automatic re-indexing via `v-code add` subprocess.
+    ///
+    /// Spawns `v-code add <db> <input>` in the background. Only one reindex
+    /// runs at a time — subsequent requests are skipped until the current one finishes.
+    pub fn auto_reindex(&self) {
+        let Some(ref input) = self.input_path else {
+            eprintln!("[watcher] No input_path configured — skipping auto-reindex");
+            return;
+        };
+
+        // Guard: only one reindex at a time.
+        if REINDEX_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            eprintln!("[watcher] Auto-reindex already in progress, skipping");
+            return;
+        }
+
+        let db = self.db_path.clone();
+        let input = input.clone();
+
+        std::thread::spawn(move || {
+            eprintln!("[watcher] Starting auto-reindex: v-code add {} {}", db.display(), input.display());
+            let result = std::process::Command::new("v-code")
+                .args(["add"])
+                .arg(&db)
+                .arg(&input)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output();
+
+            match result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if output.status.success() {
+                        eprintln!("[watcher] Auto-reindex completed successfully");
+                        for line in stdout.lines().chain(stderr.lines()) {
+                            if !line.is_empty() {
+                                eprintln!("[watcher]   {line}");
+                            }
+                        }
+                    } else {
+                        eprintln!("[watcher] Auto-reindex failed (exit: {})", output.status);
+                        for line in stderr.lines() {
+                            eprintln!("[watcher]   {line}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("[watcher] Failed to spawn v-code: {e}"),
+            }
+
+            REINDEX_RUNNING.store(false, Ordering::SeqCst);
+        });
     }
 }
 
