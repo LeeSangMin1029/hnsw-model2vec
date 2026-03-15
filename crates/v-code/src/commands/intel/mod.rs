@@ -22,7 +22,7 @@ use anyhow::Result;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow};
+pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow, run_untested};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 
@@ -35,7 +35,7 @@ pub use v_code_intel::graph;
 pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path, grouped_json};
 pub use v_code_intel::impact;
 pub use v_code_intel::loader::load_chunks;
-use v_code_intel::loader::DaemonHooks;
+use v_code_intel::loader::{DaemonBuildResult, DaemonHooks};
 
 /// Load or build call graph with daemon support.
 pub fn load_or_build_graph(
@@ -49,21 +49,34 @@ pub fn load_or_build_graph(
     v_code_intel::loader::load_or_build_graph(db, lsp, Some(&hooks))
 }
 
-fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::CallGraph> {
-    // Fire-and-forget: ask daemon to build graph asynchronously.
-    // Always return None so the caller falls through to tree-sitter.
-    // Daemon will save graph.bin when done → next invocation gets cache hit.
+fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
     if !v_hnsw_storage::daemon_client::is_running() {
-        return None;
+        return DaemonBuildResult::Unavailable;
     }
 
-    if let Some(canonical) = db.canonicalize().ok().and_then(|p| p.to_str().map(String::from)) {
-        let params = serde_json::json!({"db": canonical});
-        v_hnsw_storage::daemon_client::daemon_rpc_fire_and_forget("graph/build", params);
-        eprintln!("[graph] Requested daemon build (async) — using tree-sitter for now");
-    }
+    let Some(canonical) = db.canonicalize().ok() else {
+        return DaemonBuildResult::Unavailable;
+    };
+    let Some(db_str) = canonical.to_str() else {
+        return DaemonBuildResult::Unavailable;
+    };
 
-    None
+    let params = serde_json::json!({"db": db_str});
+    eprintln!("[graph] Waiting for daemon LSP graph build...");
+    match v_hnsw_storage::daemon_client::daemon_rpc("graph/build", params, 300) {
+        Ok(result) => {
+            let nodes = result.get("nodes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let lsp = result.get("lsp_entries").and_then(|v| v.as_u64()).unwrap_or(0);
+            eprintln!("[graph] Daemon graph ready: {nodes} nodes, {lsp} LSP entries");
+            v_code_intel::graph::CallGraph::load(&canonical)
+                .map(DaemonBuildResult::Ready)
+                .unwrap_or(DaemonBuildResult::Unavailable)
+        }
+        Err(e) => {
+            eprintln!("[graph] Daemon build failed: {e}");
+            DaemonBuildResult::Unavailable
+        }
+    }
 }
 
 fn daemon_spawn_and_wait(db: &std::path::Path) {

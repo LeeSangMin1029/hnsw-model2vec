@@ -126,12 +126,27 @@ impl LspCallResolver {
         // Grace period: after all tokens drain, wait for new progress to start.
         // rust-analyzer emits multiple sequences: Fetching → Loading → Indexing.
         let grace = Duration::from_millis(2000);
+        // Wall-clock time when all active tokens last drained.
+        let mut drained_at: Option<std::time::Instant> = None;
 
         eprintln!("[lsp] Waiting for server readiness...");
 
         while std::time::Instant::now() < deadline {
+            // If grace period already elapsed (wall-clock), we're ready — even if
+            // non-progress messages kept resetting recv_timeout.
+            if let Some(t) = drained_at {
+                if t.elapsed() >= grace {
+                    eprintln!("[lsp] Server ready ({:.1}s, {} sequences)",
+                        start.elapsed().as_secs_f64(), completed_sequences);
+                    self.ready = true;
+                    return;
+                }
+            }
+
             let timeout = if active_tokens.is_empty() && saw_progress {
-                grace // Short wait for next progress sequence
+                // Only wait for the remaining grace window, not the full grace
+                // duration — non-progress messages no longer reset the clock.
+                drained_at.map_or(grace, |t| grace.saturating_sub(t.elapsed()))
             } else {
                 Duration::from_millis(500)
             };
@@ -152,6 +167,7 @@ impl LspCallResolver {
                                     "begin" => {
                                         saw_progress = true;
                                         active_tokens.insert(token);
+                                        drained_at = None; // new work started
                                         if let Some(title) = value.and_then(|v| v.get("title")).and_then(|t| t.as_str()) {
                                             eprintln!("[lsp] {title}...");
                                         }
@@ -160,6 +176,7 @@ impl LspCallResolver {
                                         active_tokens.remove(&token);
                                         if active_tokens.is_empty() {
                                             completed_sequences += 1;
+                                            drained_at = Some(std::time::Instant::now());
                                             eprintln!("[lsp] Progress sequence {completed_sequences} done ({:.1}s)",
                                                 start.elapsed().as_secs_f64());
                                         }
@@ -169,16 +186,16 @@ impl LspCallResolver {
                             }
                         }
                     }
+                    // Non-progress messages are silently skipped — they no longer
+                    // interfere with the grace-period timer.
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if saw_progress && active_tokens.is_empty() {
-                        // Grace period expired, no new progress — server is ready.
                         eprintln!("[lsp] Server ready ({:.1}s, {} sequences)",
                             start.elapsed().as_secs_f64(), completed_sequences);
                         self.ready = true;
                         return;
                     }
-                    // No progress seen after 5s — server might not support it.
                     if !saw_progress && start.elapsed() > Duration::from_secs(5) {
                         eprintln!("[lsp] No progress support, using 5s fallback");
                         self.ready = true;
@@ -690,7 +707,7 @@ fn location_to_chunk_name(
 }
 
 /// Normalize a chunk name for use as a call map key.
-fn normalize_chunk_name(name: &str) -> String {
+pub(crate) fn normalize_chunk_name(name: &str) -> String {
     name.to_lowercase()
 }
 

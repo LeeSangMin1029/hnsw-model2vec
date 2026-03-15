@@ -407,3 +407,4 @@ pub(crate) fn search_layer<D: DistanceMetric, N: NodeGraph>(
     let dc = StoreDc { store, metric: distance };
     search_layer_dc(nodes, &dc, query, entry_points, ef, layer)
 }
+

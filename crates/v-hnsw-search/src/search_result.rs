@@ -216,7 +216,7 @@ fn print_compact_grouped(output: &FindOutput) {
 }
 
 /// Extract the description line from chunk text (after File: line).
-fn extract_description(text: &str) -> Option<&str> {
+pub(crate) fn extract_description(text: &str) -> Option<&str> {
     // Text format: "[kind] name\nFile: path:lines\nDescription...\nTypes: ..."
     let lines: Vec<&str> = text.lines().collect();
     // Find first line that's not [kind], File:, Signature:, Types:, Calls:, Called by:
@@ -243,7 +243,7 @@ fn extract_description(text: &str) -> Option<&str> {
 }
 
 /// Extract line range from chunk text "File: path:START-END".
-fn extract_lines(text: &str) -> Option<&str> {
+pub(crate) fn extract_lines(text: &str) -> Option<&str> {
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("File:") {

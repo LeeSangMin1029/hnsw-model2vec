@@ -169,7 +169,7 @@ impl Tokenizer for CodeTokenizer {
 }
 
 /// Split an identifier at camelCase, snake_case, and digit boundaries.
-fn split_identifier(s: &str) -> Vec<&str> {
+pub(crate) fn split_identifier(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
 
     // First split on underscores

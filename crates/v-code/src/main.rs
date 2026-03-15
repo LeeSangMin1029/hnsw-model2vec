@@ -3,6 +3,7 @@
 mod cli;
 use v_code::commands;
 
+use anyhow::Context as _;
 use clap::Parser;
 use v_hnsw_cli::error::CliError;
 
@@ -69,8 +70,54 @@ fn run() -> anyhow::Result<()> {
             })
         }
         Commands::Stats { db, format } => intel::run_stats(db, format),
+        Commands::Untested { db, depth, format, file } => intel::run_untested(db, depth, format, file),
         Commands::Strings { db, query, callee } => intel::run_strings(db, query, callee),
         Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
+        Commands::Replace { db, symbol, file, body, body_file } => {
+            let body = read_body(body, body_file)?;
+            commands::edit::replace(db, symbol, file, body)
+        }
+        Commands::InsertAfter { db, symbol, file, body, body_file } => {
+            let body = read_body(body, body_file)?;
+            commands::edit::insert_after(db, symbol, file, body)
+        }
+        Commands::InsertBefore { db, symbol, file, body, body_file } => {
+            let body = read_body(body, body_file)?;
+            commands::edit::insert_before(db, symbol, file, body)
+        }
+        Commands::DeleteSymbol { db, symbol, file } => {
+            commands::edit::delete_symbol(db, symbol, file)
+        }
+        Commands::InsertAt { db, file, line, body, body_file } => {
+            let body = read_body(body, body_file)?;
+            commands::edit::insert_at(db, file, line, body)
+        }
+        Commands::DeleteLines { db, file, start, end } => {
+            commands::edit::delete_lines(db, file, start, end)
+        }
+        Commands::ReplaceLines { db, file, start, end, body, body_file } => {
+            let body = read_body(body, body_file)?;
+            commands::edit::replace_lines(db, file, start, end, body)
+        }
+        Commands::CreateFile { db, file, body, body_file } => {
+            let body = read_body(body, body_file)?;
+            commands::edit::create_file(db, file, body)
+        }
     }
+}
+
+/// Read body from `--body`, `--body-file`, or stdin (in that priority).
+fn read_body(body: Option<String>, body_file: Option<std::path::PathBuf>) -> anyhow::Result<String> {
+    if let Some(b) = body {
+        return Ok(b);
+    }
+    if let Some(path) = body_file {
+        return std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read body file: {}", path.display()));
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    Ok(buf)
 }

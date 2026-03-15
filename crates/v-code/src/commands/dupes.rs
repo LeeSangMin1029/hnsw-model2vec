@@ -283,6 +283,22 @@ fn print_legend(legend: &[(String, String)]) {
 
 // ── File grouping ────────────────────────────────────────────────────────
 
+/// Return the index for `key` in `groups`, creating a new empty group if needed.
+fn get_or_insert_idx<T>(
+    key: String,
+    groups: &mut Vec<(String, Vec<T>)>,
+    index: &mut HashMap<String, usize>,
+) -> usize {
+    if let Some(&i) = index.get(&key) {
+        i
+    } else {
+        let i = groups.len();
+        index.insert(key.clone(), i);
+        groups.push((key, Vec::new()));
+        i
+    }
+}
+
 fn group_by_file(
     ids: &[(u64, u64)],
     pstore: &impl PayloadStore,
@@ -315,14 +331,7 @@ fn group_by_file(
         } else {
             file_a.clone()
         };
-        let idx = if let Some(&j) = file_index.get(&key) {
-            j
-        } else {
-            let j = by_file.len();
-            file_index.insert(key.clone(), j);
-            by_file.push((key, Vec::new()));
-            j
-        };
+        let idx = get_or_insert_idx(key, &mut by_file, &mut file_index);
         by_file[idx].1.push(GroupEntry {
             pair_index: i,
             name_a: labels[i].0.name.clone(),
@@ -439,14 +448,7 @@ fn print_groups_text(groups: &[(u64, Vec<u64>)], pstore: &impl PayloadStore, db:
             } else {
                 apply_alias(&normalized, &alias_map)
             };
-            let idx = if let Some(&i) = file_index.get(&key) {
-                i
-            } else {
-                let i = by_file.len();
-                file_index.insert(key.clone(), i);
-                by_file.push((key, Vec::new()));
-                i
-            };
+            let idx = get_or_insert_idx(key, &mut by_file, &mut file_index);
             by_file[idx].1.push((*group_num, *hash, cl.name.clone()));
         }
     }

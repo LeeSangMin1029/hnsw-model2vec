@@ -98,11 +98,21 @@ pub fn daemon_rpc(
 ///
 /// Spawns a background thread that connects, sends the request, and reads
 /// the response — but the caller returns immediately (fire-and-forget).
+/// Send a JSON-RPC request to the daemon without waiting for a response.
+///
+/// Connects and sends the request on the current thread (so the message
+/// reaches the daemon before the process exits), but does NOT read the
+/// response — the caller returns immediately after flushing.
 pub fn daemon_rpc_fire_and_forget(method: &str, params: serde_json::Value) {
-    let method = method.to_owned();
-    std::thread::spawn(move || {
-        let _ = daemon_rpc(&method, params, 120);
-    });
+    let Some(port) = read_port() else { return };
+    let Ok(addr) = format!("127.0.0.1:{port}").parse() else { return };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else { return };
+
+    let request = serde_json::json!({"id": 0, "method": method, "params": params});
+    let Ok(json) = serde_json::to_string(&request) else { return };
+    let _ = writeln!(stream, "{json}");
+    let _ = stream.flush();
+    // Don't read response — daemon will process asynchronously.
 }
 
 /// Notify the running daemon to reload indexes for a database.

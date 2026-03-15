@@ -693,3 +693,110 @@ fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
     }
     println!();
 }
+
+
+/// `v-code untested <db> [--depth N] [--file <suffix>]`
+///
+/// Find functions not covered by any test (directly or transitively).
+pub fn run_untested(
+    db: PathBuf,
+    depth: u32,
+    format: OutputFormat,
+    file_filter: Option<String>,
+) -> Result<()> {
+    use std::collections::VecDeque;
+
+    let graph = load_or_build_graph(&db, None)?;
+    let n = graph.names.len();
+
+    // BFS from all test nodes, following callees up to `depth` levels.
+    let mut tested = vec![false; n];
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new(); // (idx, current_depth)
+
+    for i in 0..n {
+        if graph.is_test[i] {
+            tested[i] = true;
+            queue.push_back((i as u32, 0));
+        }
+    }
+
+    while let Some((idx, d)) = queue.pop_front() {
+        if d >= depth {
+            continue;
+        }
+        for &callee in &graph.callees[idx as usize] {
+            if !tested[callee as usize] {
+                tested[callee as usize] = true;
+                queue.push_back((callee, d + 1));
+            }
+        }
+    }
+
+    // Collect untested functions (skip tests, non-functions, and filtered files).
+    let mut untested: Vec<u32> = Vec::new();
+    for i in 0..n {
+        if tested[i] || graph.is_test[i] {
+            continue;
+        }
+        if graph.kinds[i] != "function" {
+            continue;
+        }
+        if let Some(ref suffix) = file_filter {
+            if !graph.files[i].ends_with(suffix.as_str()) {
+                continue;
+            }
+        }
+        untested.push(i as u32);
+    }
+
+    if matches!(format, OutputFormat::Json) {
+        let items: Vec<serde_json::Value> = untested
+            .iter()
+            .map(|&i| {
+                let i = i as usize;
+                serde_json::json!({
+                    "name": graph.names[i],
+                    "file": super::relative_path(&graph.files[i]),
+                    "lines": format_lines_opt(graph.lines[i]),
+                    "kind": graph.kinds[i],
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&serde_json::json!({
+            "untested_count": untested.len(),
+            "total_functions": (0..n).filter(|&i| graph.kinds[i] == "function" && !graph.is_test[i]).count(),
+            "functions": items,
+        }))?);
+        return Ok(());
+    }
+
+    let total_fns = (0..n)
+        .filter(|&i| graph.kinds[i] == "function" && !graph.is_test[i])
+        .count();
+
+    println!(
+        "=== untested: {}/{} functions (BFS depth {}) ===\n",
+        untested.len(),
+        total_fns,
+        depth
+    );
+
+    if untested.is_empty() {
+        println!("All functions are covered by tests!");
+        return Ok(());
+    }
+
+    // Group by file for readable output.
+    let tagged: Vec<TaggedEntry> = untested
+        .iter()
+        .map(|&idx| TaggedEntry {
+            idx,
+            tag: "untested",
+            sig: true,
+            call_line: 0,
+        })
+        .collect();
+    print_file_grouped(&graph, &tagged);
+
+    Ok(())
+}

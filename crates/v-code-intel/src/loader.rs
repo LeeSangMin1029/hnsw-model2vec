@@ -72,13 +72,23 @@ fn cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("chunks.bin")
 }
 
+/// Result of a daemon graph build attempt.
+pub enum DaemonBuildResult {
+    /// Daemon returned a completed graph.
+    Ready(crate::graph::CallGraph),
+    /// Daemon is building asynchronously — don't cache the tree-sitter fallback.
+    Building,
+    /// Daemon not available.
+    Unavailable,
+}
+
 /// Optional daemon hooks for graph building.
 ///
 /// Callers that have access to `v-daemon` can provide these to enable
 /// daemon-assisted graph builds (persistent LSP, no cold start).
 pub struct DaemonHooks {
-    /// Try to build graph via running daemon. Returns `None` if unavailable.
-    pub try_graph_build: fn(&Path) -> Option<crate::graph::CallGraph>,
+    /// Try to build graph via running daemon.
+    pub try_graph_build: fn(&Path) -> DaemonBuildResult,
     /// Spawn daemon in background for next invocation.
     pub spawn: fn(&Path),
 }
@@ -102,13 +112,14 @@ pub fn load_or_build_graph(
     }
 
     // Try daemon first (persistent LSP, no cold start).
+    let mut daemon_building = false;
     if lsp.is_none() {
         if let Some(hooks) = daemon {
-            if let Some(g) = (hooks.try_graph_build)(db) {
-                return Ok(g);
+            match (hooks.try_graph_build)(db) {
+                DaemonBuildResult::Ready(g) => return Ok(g),
+                DaemonBuildResult::Building => daemon_building = true,
+                DaemonBuildResult::Unavailable => (hooks.spawn)(db),
             }
-            // Daemon not running — auto-start for next time.
-            (hooks.spawn)(db);
         }
     }
 
@@ -129,7 +140,11 @@ pub fn load_or_build_graph(
         crate::graph::CallGraph::build_with_resolved_calls(&chunks, &resolved_calls)
     };
 
-    let _ = g.save(db);
+    // Don't persist tree-sitter fallback when daemon is building LSP graph —
+    // daemon will save the accurate graph.bin when done.
+    if !daemon_building {
+        let _ = g.save(db);
+    }
     Ok(g)
 }
 

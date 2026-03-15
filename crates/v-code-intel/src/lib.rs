@@ -26,3 +26,6 @@ pub mod parse;
 pub mod reason;
 pub mod stats;
 pub mod trace;
+
+#[cfg(test)]
+mod tests;

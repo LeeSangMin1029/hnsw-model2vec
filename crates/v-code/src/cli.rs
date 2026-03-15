@@ -212,6 +212,21 @@ pub enum Commands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    /// Find functions not covered by any test.
+    #[command(visible_alias = "ut")]
+    Untested {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// BFS depth from test functions (default: 2).
+        #[arg(long, default_value = "2")]
+        depth: u32,
+        /// Output format (text or json).
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+        /// Filter by file path suffix.
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Search string literal arguments across all chunks.
     #[command(visible_alias = "str")]
     Strings {
@@ -243,5 +258,130 @@ pub enum Commands {
         /// Glob patterns to exclude from scanning.
         #[arg(short, long)]
         exclude: Vec<String>,
+    },
+    /// Replace a symbol's body with new content.
+    #[command(visible_alias = "rep")]
+    Replace {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to replace.
+        symbol: String,
+        /// Restrict to file (suffix match).
+        #[arg(long)]
+        file: Option<String>,
+        /// New body content (reads from stdin if omitted).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read body from file (avoids bash quoting issues).
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
+    /// Insert content after a symbol.
+    InsertAfter {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to insert after.
+        symbol: String,
+        /// Restrict to file (suffix match).
+        #[arg(long)]
+        file: Option<String>,
+        /// Content to insert (reads from stdin if omitted).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read body from file (avoids bash quoting issues).
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
+    /// Insert content before a symbol.
+    InsertBefore {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to insert before.
+        symbol: String,
+        /// Restrict to file (suffix match).
+        #[arg(long)]
+        file: Option<String>,
+        /// Content to insert (reads from stdin if omitted).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read body from file (avoids bash quoting issues).
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
+    /// Delete a symbol from its source file.
+    #[command(visible_alias = "del")]
+    DeleteSymbol {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Symbol name to delete.
+        symbol: String,
+        /// Restrict to file (suffix match).
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Insert content at a specific line number (before that line).
+    #[command(visible_alias = "ia")]
+    InsertAt {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// File path relative to project root.
+        file: String,
+        /// 1-based line number to insert before.
+        #[arg(long)]
+        line: usize,
+        /// Content to insert (reads from stdin if omitted).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read body from file (avoids bash quoting issues).
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
+    /// Delete a range of lines from a file.
+    #[command(visible_alias = "dl")]
+    DeleteLines {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// File path relative to project root.
+        file: String,
+        /// 1-based start line (inclusive).
+        #[arg(long)]
+        start: usize,
+        /// 1-based end line (inclusive).
+        #[arg(long)]
+        end: usize,
+    },
+    /// Replace a range of lines with new content.
+    #[command(visible_alias = "rl")]
+    ReplaceLines {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// File path relative to project root.
+        file: String,
+        /// 1-based start line (inclusive).
+        #[arg(long)]
+        start: usize,
+        /// 1-based end line (inclusive).
+        #[arg(long)]
+        end: usize,
+        /// Replacement content (reads from stdin if omitted).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read body from file (avoids bash quoting issues).
+        #[arg(long)]
+        body_file: Option<PathBuf>,
+    },
+    /// Create a new file at a project-relative path.
+    #[command(visible_alias = "cf")]
+    CreateFile {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// File path relative to project root.
+        file: String,
+        /// File content (reads from stdin if omitted).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read body from file (avoids bash quoting issues).
+        #[arg(long)]
+        body_file: Option<PathBuf>,
     },
 }

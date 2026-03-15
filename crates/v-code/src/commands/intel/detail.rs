@@ -129,7 +129,7 @@ fn run_delete(db: &std::path::Path, symbol: &str) -> Result<()> {
 }
 
 /// Parse a line range string "start:end" into `(usize, usize)`.
-fn parse_line_range(s: &str) -> Option<(usize, usize)> {
+pub(crate) fn parse_line_range(s: &str) -> Option<(usize, usize)> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() == 2
         && let (Ok(start), Ok(end)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>())

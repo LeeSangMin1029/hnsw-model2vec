@@ -265,3 +265,46 @@ fn test_fuse_dense_heavy_breaks_ties() {
     // Doc 1 should win because dense weight is 0.9
     assert_eq!(result[0].0, 1, "Dense-heavy fusion should prefer closest vector");
 }
+
+// ── normalize tests ────────────────────────────────────────────────
+
+#[test]
+fn normalize_empty_returns_empty() {
+    let result = normalize(&[], false);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn normalize_single_element_returns_one() {
+    let result = normalize(&[(42, 3.5)], false);
+    assert_eq!(result.len(), 1);
+    assert!((result[&42] - 1.0).abs() < f32::EPSILON, "single element should normalize to 1.0");
+}
+
+#[test]
+fn normalize_two_elements_min_max() {
+    let result = normalize(&[(1, 0.0), (2, 10.0)], false);
+    assert!((result[&1] - 0.0).abs() < f32::EPSILON, "min should normalize to 0.0");
+    assert!((result[&2] - 1.0).abs() < f32::EPSILON, "max should normalize to 1.0");
+}
+
+#[test]
+fn normalize_invert_flips_scores() {
+    let result = normalize(&[(1, 0.0), (2, 10.0)], true);
+    assert!((result[&1] - 1.0).abs() < f32::EPSILON, "min distance should become 1.0 when inverted");
+    assert!((result[&2] - 0.0).abs() < f32::EPSILON, "max distance should become 0.0 when inverted");
+}
+
+#[test]
+fn normalize_equal_scores_all_one() {
+    let result = normalize(&[(1, 5.0), (2, 5.0), (3, 5.0)], false);
+    for &id in &[1, 2, 3] {
+        assert!((result[&id] - 1.0).abs() < f32::EPSILON, "equal scores should all normalize to 1.0");
+    }
+}
+
+#[test]
+fn normalize_midpoint_is_half() {
+    let result = normalize(&[(1, 0.0), (2, 5.0), (3, 10.0)], false);
+    assert!((result[&2] - 0.5).abs() < f32::EPSILON, "midpoint should normalize to 0.5");
+}

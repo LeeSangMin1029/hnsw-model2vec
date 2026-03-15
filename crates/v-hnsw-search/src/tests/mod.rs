@@ -2,6 +2,7 @@
 
 mod config;
 mod hybrid;
+mod search_result;
 #[cfg(feature = "korean")]
 mod korean_tokenizer;
 

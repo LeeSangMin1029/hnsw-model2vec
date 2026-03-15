@@ -658,3 +658,40 @@ fn find_related_reasons_cross_reference() {
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].symbol, "Beta");
 }
+
+// ── parse_line_range tests ─────────────────────────────────────────
+
+#[test]
+fn parse_line_range_valid() {
+    assert_eq!(parse_line_range("10:25"), Some((10, 25)));
+}
+
+#[test]
+fn parse_line_range_single_lines() {
+    assert_eq!(parse_line_range("1:1"), Some((1, 1)));
+}
+
+#[test]
+fn parse_line_range_large_numbers() {
+    assert_eq!(parse_line_range("1000:9999"), Some((1000, 9999)));
+}
+
+#[test]
+fn parse_line_range_missing_colon() {
+    assert_eq!(parse_line_range("1025"), None);
+}
+
+#[test]
+fn parse_line_range_empty_string() {
+    assert_eq!(parse_line_range(""), None);
+}
+
+#[test]
+fn parse_line_range_non_numeric() {
+    assert_eq!(parse_line_range("abc:def"), None);
+}
+
+#[test]
+fn parse_line_range_extra_colons() {
+    assert_eq!(parse_line_range("1:2:3"), None);
+}

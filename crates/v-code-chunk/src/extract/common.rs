@@ -579,35 +579,13 @@ fn collect_param_names(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, u8)
     result
 }
 
-/// Recursive walker that matches call arguments against parameter names.
 fn walk_param_flows_inner(
     node: &tree_sitter::Node,
     src: &[u8],
     params: &[(String, u8)],
     flows: &mut Vec<ParamFlow>,
 ) {
-    let callee = match node.kind() {
-        "call_expression" | "call" => node
-            .child_by_field_name("function")
-            .and_then(|f| extract_callee_name(f, src)),
-        "method_invocation" => node.child_by_field_name("name").and_then(|n| {
-            n.utf8_text(src).ok().map(|name| {
-                if let Some(obj) = node.child_by_field_name("object")
-                    && let Ok(obj_text) = obj.utf8_text(src)
-                {
-                    format!("{obj_text}.{name}")
-                } else {
-                    name.to_owned()
-                }
-            })
-        }),
-        _ => None,
-    };
-
-    if let Some(mut callee_name) = callee {
-        if callee_name.contains('\n') {
-            callee_name = callee_name.split_whitespace().collect::<Vec<_>>().join("");
-        }
+    if let Some(callee_name) = extract_callee_from_node(node, src) {
         if !is_noise_callee(&callee_name) {
             if let Some(args_node) = node.child_by_field_name("arguments") {
                 let mut cursor = args_node.walk();
