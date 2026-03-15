@@ -93,6 +93,19 @@ pub fn daemon_rpc(
         .ok_or_else(|| anyhow::anyhow!("Empty response from daemon"))
 }
 
+/// Send a JSON-RPC request to the daemon without waiting for a response.
+///
+/// Spawns a background thread that connects, sends the request, and reads
+/// the response — but the caller returns immediately (fire-and-forget).
+/// Useful when the daemon should do work asynchronously (e.g. graph/build)
+/// while the CLI proceeds with a tree-sitter fallback.
+pub fn daemon_rpc_fire_and_forget(method: &str, params: serde_json::Value) {
+    let method = method.to_owned();
+    std::thread::spawn(move || {
+        let _ = daemon_rpc(&method, params, 120);
+    });
+}
+
 /// Notify the running daemon to reload indexes for a database.
 pub fn notify_reload(db_path: &Path) -> Result<()> {
     let canonical = db_path

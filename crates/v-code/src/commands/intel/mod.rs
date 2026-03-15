@@ -50,26 +50,20 @@ pub fn load_or_build_graph(
 }
 
 fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::CallGraph> {
-    // Only use daemon if already running — never block waiting for it to start.
+    // Fire-and-forget: ask daemon to build graph asynchronously.
+    // Always return None so the caller falls through to tree-sitter.
+    // Daemon will save graph.bin when done → next invocation gets cache hit.
     if !v_daemon::is_running() {
         return None;
     }
 
-    let canonical = db.canonicalize().ok()?;
-    let db_str = canonical.to_str()?;
-
-    let params = serde_json::json!({"db": db_str});
-    // Short timeout (10s): if daemon has cached CallMap this is fast;
-    // if it needs full LSP resolution, fall back to tree-sitter heuristic.
-    let result = v_daemon::daemon_rpc("graph/build", params, 10).ok()?;
-
-    if result.get("status").and_then(|s| s.as_str()) == Some("ok") {
-        eprintln!("[graph] Built via daemon (LSP entries: {})",
-            result.get("lsp_entries").and_then(|v| v.as_u64()).unwrap_or(0));
-        v_code_intel::graph::CallGraph::load(db)
-    } else {
-        None
+    if let Some(canonical) = db.canonicalize().ok().and_then(|p| p.to_str().map(String::from)) {
+        let params = serde_json::json!({"db": canonical});
+        v_daemon::daemon_rpc_fire_and_forget("graph/build", params);
+        eprintln!("[graph] Requested daemon build (async) — using tree-sitter for now");
     }
+
+    None
 }
 
 fn daemon_spawn_and_wait(db: &std::path::Path) {
