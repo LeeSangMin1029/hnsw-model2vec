@@ -109,7 +109,7 @@ impl GoCodeChunker {
                 call_lines: Vec::new(),
                 type_refs: extract::collect_sorted_unique(&child, src, extract::walk_for_type_ids),
                 param_types: Vec::new(),
-                return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: Vec::new(),
+                return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: Vec::new(), string_args: Vec::new(), param_flows: Vec::new(),
             });
         }
     }

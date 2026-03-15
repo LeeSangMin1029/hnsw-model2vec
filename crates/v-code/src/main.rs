@@ -69,6 +69,8 @@ fn run() -> anyhow::Result<()> {
             })
         }
         Commands::Stats { db, format } => intel::run_stats(db, format),
+        Commands::Strings { db, query, callee } => intel::run_strings(db, query, callee),
+        Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
     }
 }

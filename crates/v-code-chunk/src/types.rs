@@ -129,6 +129,10 @@ pub struct CodeChunk {
     pub body_hash: u64,
     /// Sub-blocks split at control structure boundaries for fine-grained clone detection.
     pub sub_blocks: Vec<SubBlock>,
+    /// String literal arguments found in function calls: `(callee, value, line, arg_pos)`.
+    pub string_args: Vec<(String, String, u32, u8)>,
+    /// Parameter-to-callee argument flows: `(param_name, param_pos, callee, callee_arg, line)`.
+    pub param_flows: Vec<(String, u8, String, u8, u32)>,
 }
 
 impl CodeChunk {
@@ -189,6 +193,24 @@ impl CodeChunk {
                 }
             }).collect();
             parts.push(format!("Calls: {}", annotated.join(", ")));
+        }
+
+        // String args
+        if !self.string_args.is_empty() {
+            let items: Vec<String> = self.string_args.iter()
+                .map(|(callee, value, _, _)| format!("{callee}(\"{value}\")"))
+                .collect();
+            parts.push(format!("Strings: {}", items.join(", ")));
+        }
+
+        // Parameter flows
+        if !self.param_flows.is_empty() {
+            let items: Vec<String> = self
+                .param_flows
+                .iter()
+                .map(|(pname, _, callee, _, _)| format!("{pname}\u{2192}{callee}"))
+                .collect();
+            parts.push(format!("Flows: {}", items.join(", ")));
         }
 
         // Called by (reverse references)
@@ -271,6 +293,32 @@ impl CodeChunk {
             custom.insert(
                 "body_hash".to_owned(),
                 PayloadValue::Integer(self.body_hash as i64),
+            );
+        }
+
+        // String args
+        if !self.string_args.is_empty() {
+            let encoded: Vec<String> = self.string_args.iter()
+                .map(|(callee, value, line, pos)| format!("{callee}\t{value}\t{line}\t{pos}"))
+                .collect();
+            custom.insert(
+                "string_args".to_owned(),
+                PayloadValue::StringList(encoded),
+            );
+        }
+
+        // Parameter flows
+        if !self.param_flows.is_empty() {
+            let encoded: Vec<String> = self
+                .param_flows
+                .iter()
+                .map(|(pname, ppos, callee, carg, line)| {
+                    format!("{pname}\t{ppos}\t{callee}\t{carg}\t{line}")
+                })
+                .collect();
+            custom.insert(
+                "param_flows".to_owned(),
+                PayloadValue::StringList(encoded),
             );
         }
 

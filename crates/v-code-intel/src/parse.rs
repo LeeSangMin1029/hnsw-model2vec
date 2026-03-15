@@ -18,6 +18,12 @@ pub struct CodeChunk {
     /// File-level import statements (loaded from payload custom fields).
     #[serde(default)]
     pub imports: Vec<String>,
+    /// String literal arguments: (callee, value, line_1based, arg_position).
+    #[serde(default)]
+    pub string_args: Vec<(String, String, u32, u8)>,
+    /// Parameter-to-callee argument flows: (param_name, param_pos, callee, callee_arg, line).
+    #[serde(default)]
+    pub param_flows: Vec<(String, u8, String, u8, u32)>,
 }
 
 /// Parse the text field of a code chunk into a [`CodeChunk`].
@@ -62,6 +68,8 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
     let mut calls = Vec::new();
     let mut call_lines: Vec<u32> = Vec::new();
     let mut types = Vec::new();
+    let mut string_args: Vec<(String, String, u32, u8)> = Vec::new();
+    let mut param_flows: Vec<(String, u8, String, u8, u32)> = Vec::new();
 
     for line in lines_iter {
         if let Some(f) = line.strip_prefix("File: ") {
@@ -100,6 +108,28 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
             }
         } else if let Some(t) = line.strip_prefix("Types: ") {
             types = t.split(", ").map(|s| s.trim().to_owned()).collect();
+        } else if let Some(f) = line.strip_prefix("Flows: ") {
+            for token in f.split(", ") {
+                // Format: "param→callee"
+                if let Some(arrow) = token.find('\u{2192}') {
+                    let param = token[..arrow].to_owned();
+                    let callee = token[arrow + '\u{2192}'.len_utf8()..].to_owned();
+                    param_flows.push((param, 0, callee, 0, 0));
+                }
+            }
+        } else if let Some(s) = line.strip_prefix("Strings: ") {
+            // Format: Command::new("claude"), env::var("API_KEY")
+            for token in s.split(", ") {
+                let token = token.trim();
+                if let Some(paren) = token.find('(')
+                    && let Some(end) = token.rfind(')')
+                {
+                    let callee = token[..paren].to_owned();
+                    let inner = &token[paren + 1..end];
+                    let value = inner.trim_matches('"').to_owned();
+                    string_args.push((callee, value, 0, 0));
+                }
+            }
         }
     }
 
@@ -117,6 +147,8 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         call_lines,
         types,
         imports: Vec::new(),
+        string_args,
+        param_flows,
     })
 }
 

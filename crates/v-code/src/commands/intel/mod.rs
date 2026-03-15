@@ -22,7 +22,7 @@ use anyhow::Result;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace};
+pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 

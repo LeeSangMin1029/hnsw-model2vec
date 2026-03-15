@@ -259,6 +259,8 @@ mod tests {
                 ast_hash: 0,
                 body_hash: 0,
                 sub_blocks: vec![],
+                string_args: vec![],
+                param_flows: vec![],
             },
             source: "test.rs".to_string(),
             file_path_str: "test.rs".to_string(),

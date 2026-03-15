@@ -14,6 +14,7 @@ pub mod context;
 pub mod context_cmd;
 pub mod deps;
 pub mod dupe_analyze;
+pub mod flow_cmd;
 pub mod gather;
 pub mod graph;
 pub mod helpers;

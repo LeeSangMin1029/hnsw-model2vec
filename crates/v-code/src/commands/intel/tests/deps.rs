@@ -15,6 +15,8 @@ fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> CodeChunk {
         call_lines: vec![],
         types: types.iter().map(|s| s.to_string()).collect(),
         imports: vec![],
+        string_args: vec![],
+        param_flows: vec![],
     }
 }
 

@@ -191,6 +191,19 @@ pub fn run_context(
         println!();
     }
 
+    // Show string args from seed chunks.
+    let all_string_args: Vec<_> = result.seeds.iter()
+        .flat_map(|&s| graph.string_args.get(s as usize).into_iter().flatten())
+        .collect();
+    if !all_string_args.is_empty() {
+        println!("@ [strings]");
+        for (callee, value, line, pos) in &all_string_args {
+            let line_display = if *line > 0 { format!(":{line}") } else { String::new() };
+            println!("  {callee}(\"{value}\"){line_display}  arg[{pos}]");
+        }
+        println!();
+    }
+
     Ok(())
 }
 
@@ -217,12 +230,19 @@ fn build_context_json(
     graph: &graph::CallGraph,
     result: &v_code_intel::context_cmd::ContextResult,
 ) -> serde_json::Value {
+    let string_args: Vec<_> = result.seeds.iter()
+        .flat_map(|&s| graph.string_args.get(s as usize).into_iter().flatten())
+        .map(|(callee, value, line, pos)| serde_json::json!({
+            "callee": callee, "value": value, "line": line, "pos": pos,
+        }))
+        .collect();
     serde_json::json!({
         "definition": result.seeds.iter().map(|&idx| node_json(graph, idx, None, true)).collect::<Vec<_>>(),
         "callers": result.callers.iter().map(|e| node_json(graph, e.idx, Some(e.depth), false)).collect::<Vec<_>>(),
         "callees": result.callees.iter().map(|e| node_json(graph, e.idx, Some(e.depth), false)).collect::<Vec<_>>(),
         "types": result.types.iter().map(|&idx| node_json(graph, idx, None, false)).collect::<Vec<_>>(),
         "tests": result.tests.iter().map(|&idx| node_json(graph, idx, None, false)).collect::<Vec<_>>(),
+        "string_args": string_args,
     })
 }
 
@@ -366,6 +386,112 @@ pub fn run_trace(
         }
     }
 
+    Ok(())
+}
+
+/// `v-code strings <db> <query> [--callee filter]`
+pub fn run_strings(
+    db: PathBuf,
+    query: String,
+    callee_filter: Option<String>,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+
+    let graph = load_or_build_graph(&db, None)?;
+    let lower = query.to_lowercase();
+    let callee_lower = callee_filter.as_ref().map(|f| f.to_lowercase());
+
+    let mut matches: Vec<(u32, &str, &str, u32, u8)> = Vec::new();
+
+    for (chunk_idx, args) in graph.string_args.iter().enumerate() {
+        for (callee, value, line, pos) in args {
+            if !value.to_lowercase().contains(&lower) {
+                continue;
+            }
+            if let Some(ref filter) = callee_lower {
+                if !callee.to_lowercase().contains(filter) {
+                    continue;
+                }
+            }
+            matches.push((chunk_idx as u32, callee, value, *line, *pos));
+        }
+    }
+
+    if matches.is_empty() {
+        println!("No string arguments matching \"{query}\" found.");
+        return Ok(());
+    }
+
+    println!("=== strings: \"{query}\" ({} matches) ===\n", matches.len());
+
+    let files: Vec<&str> = matches
+        .iter()
+        .map(|(idx, ..)| super::relative_path(&graph.files[*idx as usize]))
+        .collect();
+    let (alias_map, legend) = build_path_aliases(&files);
+
+    let mut groups: BTreeMap<&str, Vec<&(u32, &str, &str, u32, u8)>> = BTreeMap::new();
+    for (m, file) in matches.iter().zip(files.iter()) {
+        groups.entry(file).or_default().push(m);
+    }
+
+    for (file, items) in &groups {
+        let short = apply_alias(file, &alias_map);
+        println!("@ {short}");
+        for (idx, callee, value, line, pos) in items.iter().copied() {
+            let func = &graph.names[*idx as usize];
+            let line_display = if *line > 0 { format!(":{line}") } else { String::new() };
+            println!("  {line_display} {func}  {callee}(\"{value}\")  arg[{pos}]");
+        }
+        println!();
+    }
+
+    if !legend.is_empty() {
+        for (alias, dir) in &legend {
+            println!("{alias} = {dir}");
+        }
+    }
+    Ok(())
+}
+
+/// `v-code flow <db> <query> --depth N`
+pub fn run_flow(
+    db: PathBuf,
+    query: String,
+    depth: u32,
+) -> Result<()> {
+    use v_code_intel::flow_cmd;
+
+    let graph = load_or_build_graph(&db, None)?;
+    let paths = flow_cmd::trace_string_flow(&graph, &query, depth);
+
+    if paths.is_empty() {
+        println!("No string flow matching \"{query}\" found.");
+        return Ok(());
+    }
+
+    println!("=== flow: \"{query}\" ({} path(s)) ===\n", paths.len());
+    for (i, path) in paths.iter().enumerate() {
+        if paths.len() > 1 {
+            println!("  Flow #{}", i + 1);
+        }
+        for (step, entry) in path.iter().enumerate() {
+            let file = super::relative_path(&graph.files[entry.chunk_idx as usize]);
+            let func = &graph.names[entry.chunk_idx as usize];
+            let lines = format_lines_opt(graph.lines[entry.chunk_idx as usize]);
+            let kind = &graph.kinds[entry.chunk_idx as usize];
+            let marker = if entry.is_direct { "direct" } else { "relay" };
+            let indent = "   ".repeat(step);
+            let arrow = if step == 0 { "  " } else { "-> " };
+            println!(
+                "  {indent}{arrow}{file}{lines}  [{kind}] {func}  [{marker}] {callee}(\"{value}\")",
+                callee = entry.callee,
+                value = entry.value,
+            );
+        }
+        println!();
+    }
     Ok(())
 }
 

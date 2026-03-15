@@ -212,6 +212,28 @@ pub enum Commands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    /// Search string literal arguments across all chunks.
+    #[command(visible_alias = "str")]
+    Strings {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// String value to search (substring match, case-insensitive).
+        query: String,
+        /// Filter by callee function name (substring match).
+        #[arg(long)]
+        callee: Option<String>,
+    },
+    /// Trace interprocedural string flow through wrapper functions.
+    #[command(visible_alias = "fl")]
+    Flow {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// String value to trace (substring match, case-insensitive).
+        query: String,
+        /// Max depth to follow parameter flows (default: 3).
+        #[arg(long, default_value = "3")]
+        depth: u32,
+    },
     /// Add/update code files in the database (auto-incremental).
     Add {
         /// Path to the database directory.

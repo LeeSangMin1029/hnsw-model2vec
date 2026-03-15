@@ -57,6 +57,8 @@ fn build_test_graph() -> CallGraph {
             call_lines: vec![],
             types: vec![],
             imports: vec![],
+            string_args: vec![],
+            param_flows: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -68,6 +70,8 @@ fn build_test_graph() -> CallGraph {
             call_lines: vec![],
             types: vec![],
             imports: vec![],
+            string_args: vec![],
+            param_flows: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -79,6 +83,8 @@ fn build_test_graph() -> CallGraph {
             call_lines: vec![],
             types: vec![],
             imports: vec![],
+            string_args: vec![],
+            param_flows: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -90,6 +96,8 @@ fn build_test_graph() -> CallGraph {
             call_lines: vec![],
             types: vec![],
             imports: vec![],
+            string_args: vec![],
+            param_flows: vec![],
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -101,6 +109,8 @@ fn build_test_graph() -> CallGraph {
             call_lines: vec![],
             types: vec![],
             imports: vec![],
+            string_args: vec![],
+            param_flows: vec![],
         },
     ];
     CallGraph::build(&chunks)

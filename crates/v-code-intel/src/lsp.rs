@@ -325,7 +325,7 @@ impl LspCallResolver {
         let _ = self.request("shutdown", serde_json::json!(null));
         let _ = self.notify("exit", serde_json::json!(null));
         thread::sleep(Duration::from_millis(300));
-        let _ = self.proc.kill();
+        kill_process_tree(&mut self.proc);
         Ok(())
     }
 
@@ -385,8 +385,45 @@ impl LspCallResolver {
 
 impl Drop for LspCallResolver {
     fn drop(&mut self) {
-        let _ = self.proc.kill();
+        // Close stdin to signal EOF — LSP servers may exit on their own.
+        drop(self.stdin.take());
+
+        // Try graceful LSP shutdown first.
+        // (Cannot call self.request() because Drop takes &mut self without Result.)
+        // Give the server a moment to notice stdin closed, then force-kill.
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Kill the process tree, not just the parent.
+        // On Windows, Child::kill() only kills the direct process, leaving
+        // grandchildren (e.g. rust-analyzer-proc-macro-srv) alive as orphans.
+        kill_process_tree(&mut self.proc);
     }
+}
+
+/// Kill a process and all its descendants.
+///
+/// On Windows uses `taskkill /T /F /PID` to kill the entire tree.
+/// On Unix falls back to `Child::kill()` (process groups handle cleanup).
+fn kill_process_tree(proc: &mut Child) {
+    let pid = proc.id();
+
+    #[cfg(windows)]
+    {
+        // taskkill /T kills the process tree, /F forces termination
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = pid; // suppress unused warning
+        let _ = proc.kill();
+    }
+
+    let _ = proc.wait();
 }
 
 // ── LSP Message Reader ───────────────────────────────────────────────

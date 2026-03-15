@@ -123,6 +123,183 @@ pub fn walk_for_calls_with_lines(
     }
 }
 
+/// A string literal argument found in a function call.
+#[derive(Debug, Clone)]
+pub struct StringArg {
+    /// Callee name (e.g., `"Command::new"`).
+    pub callee: String,
+    /// String literal value (without quotes).
+    pub value: String,
+    /// 0-based source line.
+    pub line: u32,
+    /// 0-based argument position.
+    pub arg_position: u8,
+}
+
+/// Recursively walk to find string literal arguments in call expressions.
+///
+/// For each call node, inspects arguments and collects those that are string
+/// literals (`string_literal`, `string`, `interpreted_string_literal`,
+/// `raw_string_literal`, `string_fragment`).
+///
+/// Also performs flow-insensitive constant propagation: if an argument is an
+/// identifier bound to a string literal via `let`/`const`/`static`, the bound
+/// value is used.
+pub fn walk_for_string_args(node: &tree_sitter::Node, src: &[u8]) -> Vec<StringArg> {
+    let mut result = Vec::new();
+    let bindings = collect_string_bindings(node, src);
+    walk_for_string_args_inner(node, src, &bindings, &mut result);
+    result
+}
+
+fn walk_for_string_args_inner(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    bindings: &std::collections::HashMap<String, String>,
+    out: &mut Vec<StringArg>,
+) {
+    let callee = match node.kind() {
+        "call_expression" | "call" => {
+            node.child_by_field_name("function")
+                .and_then(|f| f.utf8_text(src).ok())
+                .map(|t| t.to_owned())
+        }
+        "method_invocation" => {
+            node.child_by_field_name("name").and_then(|n| {
+                n.utf8_text(src).ok().map(|name| {
+                    if let Some(obj) = node.child_by_field_name("object")
+                        && let Ok(obj_text) = obj.utf8_text(src) {
+                            format!("{obj_text}.{name}")
+                        } else {
+                            name.to_owned()
+                        }
+                })
+            })
+        }
+        _ => None,
+    };
+
+    if let Some(mut callee_name) = callee {
+        // Normalize multiline call names
+        if callee_name.contains('\n') {
+            callee_name = callee_name.split_whitespace().collect::<Vec<_>>().join("");
+        }
+
+        if let Some(args_node) = node.child_by_field_name("arguments") {
+            let mut cursor = args_node.walk();
+            let mut pos: u8 = 0;
+            for arg in args_node.children(&mut cursor) {
+                if let Some(value) = extract_string_value(&arg, src) {
+                    // Direct string literal
+                    out.push(StringArg {
+                        callee: callee_name.clone(),
+                        value,
+                        line: arg.start_position().row as u32,
+                        arg_position: pos,
+                    });
+                } else if arg.kind() == "identifier"
+                    && let Ok(ident) = arg.utf8_text(src)
+                    && let Some(value) = bindings.get(ident)
+                {
+                    // Flow-insensitive constant propagation: resolve identifier
+                    out.push(StringArg {
+                        callee: callee_name.clone(),
+                        value: value.clone(),
+                        line: arg.start_position().row as u32,
+                        arg_position: pos,
+                    });
+                }
+                // Only count non-punctuation children as argument positions
+                if !arg.kind().contains('(') && !arg.kind().contains(')')
+                    && arg.kind() != "," && arg.kind() != "comment"
+                {
+                    pos = pos.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_for_string_args_inner(&child, src, bindings, out);
+    }
+}
+
+/// Collect `let`/`const`/`static` bindings whose value is a string literal.
+///
+/// Traverses the subtree rooted at `node` and returns a map from variable name
+/// to the unquoted string value. Only the first binding for each name is kept
+/// (re-assignments are ignored for safety).
+fn collect_string_bindings(
+    node: &tree_sitter::Node,
+    src: &[u8],
+) -> std::collections::HashMap<String, String> {
+    let mut bindings = std::collections::HashMap::new();
+    collect_bindings_recursive(node, src, &mut bindings);
+    bindings
+}
+
+fn collect_bindings_recursive(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    bindings: &mut std::collections::HashMap<String, String>,
+) {
+    if matches!(node.kind(), "let_declaration" | "const_item" | "static_item") {
+        let name = node
+            .child_by_field_name("pattern")
+            .or_else(|| node.child_by_field_name("name"))
+            .and_then(|n| n.utf8_text(src).ok())
+            .map(|s| s.to_owned());
+        let value = node
+            .child_by_field_name("value")
+            .and_then(|v| extract_string_value(&v, src));
+
+        if let (Some(name), Some(value)) = (name, value) {
+            // Keep only the first binding for each name
+            bindings.entry(name).or_insert(value);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_bindings_recursive(&child, src, bindings);
+    }
+}
+
+/// Extract the string value from a node if it is a string literal.
+///
+/// Handles `string_literal`, `string`, `interpreted_string_literal`,
+/// `raw_string_literal`, and `template_string` / `string_content` variants.
+/// Returns `None` if the node is not a recognized string type.
+fn extract_string_value(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "string_literal" | "string" | "interpreted_string_literal"
+        | "raw_string_literal" | "string_value" => {
+            let text = node.utf8_text(src).ok()?;
+            Some(strip_string_quotes(text))
+        }
+        _ => None,
+    }
+}
+
+/// Strip surrounding quotes from a string literal.
+///
+/// Handles `"..."`, `'...'`, `` `...` ``, `r"..."`, `r#"..."#` etc.
+fn strip_string_quotes(s: &str) -> String {
+    // Raw strings: r"...", r#"..."#
+    if let Some(rest) = s.strip_prefix('r') {
+        let hashes = rest.chars().take_while(|&c| c == '#').count();
+        let prefix_len = 1 + hashes + 1; // r + #*n + "
+        let suffix_len = 1 + hashes;     // " + #*n
+        if s.len() > prefix_len + suffix_len {
+            return s[prefix_len..s.len() - suffix_len].to_owned();
+        }
+    }
+    // Standard quotes: "...", '...', `...`
+    let trimmed = s.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    trimmed.to_owned()
+}
+
 /// Extract doc comments (`///` or `//!`) preceding a node.
 /// Collect doc-comment lines immediately before `target` under `root`.
 ///
@@ -280,6 +457,122 @@ pub fn extract_param_types(
     extract_params_generic(node, src, &["parameter"], |child, s| {
         field_name_type_pair(child, s, "pattern", "type")
     })
+}
+
+/// A parameter-to-callee argument flow within a function body.
+#[derive(Debug, Clone)]
+pub struct ParamFlow {
+    /// Parameter name in the enclosing function.
+    pub param_name: String,
+    /// 0-based position of this parameter in the function signature.
+    pub param_position: u8,
+    /// Name of the callee receiving this parameter as an argument.
+    pub callee: String,
+    /// 0-based argument position in the callee's argument list.
+    pub callee_arg: u8,
+    /// 0-based source line where the flow occurs.
+    pub line: u32,
+}
+
+/// Walk a function node to find parameter-to-callee argument flows.
+///
+/// For each call expression in the function body, if an argument is an
+/// identifier matching one of the function's parameters, a `ParamFlow` is emitted.
+pub fn walk_for_param_flows(node: &tree_sitter::Node, src: &[u8]) -> Vec<ParamFlow> {
+    let params = collect_param_names(node, src);
+    if params.is_empty() {
+        return Vec::new();
+    }
+    let mut flows = Vec::new();
+    walk_param_flows_inner(node, src, &params, &mut flows);
+    flows
+}
+
+/// Collect parameter names and their 0-based positions from a function node.
+fn collect_param_names(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, u8)> {
+    let Some(params_node) = node.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    let mut cursor = params_node.walk();
+    let mut pos: u8 = 0;
+    for child in params_node.children(&mut cursor) {
+        if child.kind() == "parameter" {
+            if let Some(pattern) = child.child_by_field_name("pattern")
+                && let Ok(name) = pattern.utf8_text(src)
+            {
+                result.push((name.to_owned(), pos));
+            }
+            pos = pos.saturating_add(1);
+        } else if child.kind() == "self_parameter" {
+            pos = pos.saturating_add(1);
+        }
+    }
+    result
+}
+
+/// Recursive walker that matches call arguments against parameter names.
+fn walk_param_flows_inner(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    params: &[(String, u8)],
+    flows: &mut Vec<ParamFlow>,
+) {
+    let callee = match node.kind() {
+        "call_expression" | "call" => node
+            .child_by_field_name("function")
+            .and_then(|f| f.utf8_text(src).ok())
+            .map(|t| t.to_owned()),
+        "method_invocation" => node.child_by_field_name("name").and_then(|n| {
+            n.utf8_text(src).ok().map(|name| {
+                if let Some(obj) = node.child_by_field_name("object")
+                    && let Ok(obj_text) = obj.utf8_text(src)
+                {
+                    format!("{obj_text}.{name}")
+                } else {
+                    name.to_owned()
+                }
+            })
+        }),
+        _ => None,
+    };
+
+    if let Some(mut callee_name) = callee {
+        if callee_name.contains('\n') {
+            callee_name = callee_name.split_whitespace().collect::<Vec<_>>().join("");
+        }
+        if let Some(args_node) = node.child_by_field_name("arguments") {
+            let mut cursor = args_node.walk();
+            let mut arg_pos: u8 = 0;
+            for arg in args_node.children(&mut cursor) {
+                if arg.kind() == "identifier"
+                    && let Ok(ident) = arg.utf8_text(src)
+                    && let Some((_, param_pos)) =
+                        params.iter().find(|(name, _)| name == ident)
+                {
+                    flows.push(ParamFlow {
+                        param_name: ident.to_owned(),
+                        param_position: *param_pos,
+                        callee: callee_name.clone(),
+                        callee_arg: arg_pos,
+                        line: arg.start_position().row as u32,
+                    });
+                }
+                if !arg.kind().contains('(')
+                    && !arg.kind().contains(')')
+                    && arg.kind() != ","
+                    && arg.kind() != "comment"
+                {
+                    arg_pos = arg_pos.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_param_flows_inner(&child, src, params, flows);
+    }
 }
 
 /// Extract the return type string from a function's `return_type` field.

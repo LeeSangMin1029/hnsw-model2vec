@@ -17,7 +17,7 @@ use crate::lsp::CallMap;
 use crate::parse::CodeChunk;
 
 /// Cache format version — bump when struct layout changes.
-const CACHE_VERSION: u8 = 3;
+const CACHE_VERSION: u8 = 5;
 
 /// Pre-built call graph with bidirectional adjacency lists.
 #[derive(bincode::Encode, bincode::Decode)]
@@ -48,6 +48,13 @@ pub struct CallGraph {
     /// caller chunk → list of (callee_idx, call_line).
     /// call_line is 1-based source line where the call occurs.
     pub call_sites: Vec<Vec<(u32, u32)>>,
+    /// chunk index → string literal arguments [(callee, value, line, arg_pos)].
+    pub string_args: Vec<Vec<(String, String, u32, u8)>>,
+    /// Sorted (lowercase_value, [(chunk_idx, line)]) for binary search lookup.
+    pub string_index: Vec<(String, Vec<(u32, u32)>)>,
+    /// chunk index → parameter-to-callee flows [(param_name, param_pos, callee, callee_arg, line)].
+    #[expect(clippy::type_complexity, reason = "tuple layout mirrors string_args")]
+    pub param_flows: Vec<Vec<(String, u8, String, u8, u32)>>,
 }
 
 /// Shared chunk metadata collected during graph construction.
@@ -168,7 +175,7 @@ impl CallGraph {
         }
 
         adj.dedup();
-        Self::from_parts(meta, adj)
+        Self::from_parts(meta, adj, chunks)
     }
 
     /// Build the call graph using language-resolved calls (LSP definition, etc.)
@@ -264,12 +271,17 @@ impl CallGraph {
         }
 
         adj.dedup();
-        Self::from_parts(meta, adj)
+        Self::from_parts(meta, adj, chunks)
     }
 
     /// Assemble a `CallGraph` from pre-built metadata and adjacency state.
-    fn from_parts(meta: ChunkMeta, adj: AdjState) -> Self {
+    fn from_parts(meta: ChunkMeta, adj: AdjState, chunks: &[CodeChunk]) -> Self {
         let trait_impls = build_trait_impls(&meta.names, &meta.kinds, &meta.exact, &meta.short);
+        let string_args = collect_string_args(chunks);
+        let string_index = build_string_index(&string_args);
+        #[expect(clippy::type_complexity, reason = "tuple layout mirrors string_args")]
+        let param_flows: Vec<Vec<(String, u8, String, u8, u32)>> =
+            chunks.iter().map(|c| c.param_flows.clone()).collect();
         Self {
             version: CACHE_VERSION,
             names: meta.names,
@@ -283,6 +295,9 @@ impl CallGraph {
             is_test: meta.is_test,
             trait_impls,
             call_sites: adj.call_sites,
+            string_args,
+            string_index,
+            param_flows,
         }
     }
 
@@ -327,6 +342,15 @@ impl CallGraph {
             }
         }
         0
+    }
+
+    /// Find chunks that use a specific string literal value (exact match, case-insensitive).
+    pub fn find_string(&self, value: &str) -> Vec<(u32, u32)> {
+        let lower = value.to_lowercase();
+        match self.string_index.binary_search_by_key(&&*lower, |(k, _)| k.as_str()) {
+            Ok(i) => self.string_index[i].1.clone(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Save the graph to `<db>/cache/graph.bin`.
@@ -697,5 +721,23 @@ fn build_trait_impls(
     }
 
     trait_impls
+}
+
+/// Collect string_args from each chunk.
+fn collect_string_args(chunks: &[CodeChunk]) -> Vec<Vec<(String, String, u32, u8)>> {
+    chunks.iter().map(|c| c.string_args.clone()).collect()
+}
+
+/// Build a sorted index from lowercase string value → [(chunk_idx, line)].
+fn build_string_index(all: &[Vec<(String, String, u32, u8)>]) -> Vec<(String, Vec<(u32, u32)>)> {
+    let mut map: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+    for (chunk_idx, args) in all.iter().enumerate() {
+        for (_, value, line, _) in args {
+            map.entry(value.to_lowercase())
+                .or_default()
+                .push((chunk_idx as u32, *line));
+        }
+    }
+    map.into_iter().collect()
 }
 

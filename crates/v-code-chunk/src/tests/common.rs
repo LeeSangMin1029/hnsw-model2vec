@@ -293,7 +293,7 @@ fn embed_text_no_visibility_no_extra_space() {
         call_lines: vec![],
         type_refs: vec![],
         param_types: vec![],
-        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
+        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![], string_args: vec![], param_flows: vec![],
     };
     let embed = chunk.to_embed_text("test.rs", &[]);
     // "[function] foo" — no double space before name
@@ -323,7 +323,7 @@ fn embed_text_with_visibility_prefix() {
         call_lines: vec![],
         type_refs: vec![],
         param_types: vec![],
-        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
+        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![], string_args: vec![], param_flows: vec![],
     };
     let embed = chunk.to_embed_text("test.rs", &[]);
     assert!(
@@ -352,7 +352,7 @@ fn custom_fields_empty_collections_omitted() {
         call_lines: vec![],
         type_refs: vec![],
         param_types: vec![],
-        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![],
+        return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![], string_args: vec![], param_flows: vec![],
     };
     let custom = chunk.to_custom_fields(&[]);
     assert!(!custom.contains_key("calls"), "empty calls should not be in custom fields");

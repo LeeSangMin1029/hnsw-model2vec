@@ -2,7 +2,7 @@
 
 use crate::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 use super::ParsedSource;
-use super::common::{extract_function_signature, extract_struct_fields, collect_sorted_unique, walk_for_calls_with_lines, walk_for_type_ids, extract_name};
+use super::common::{extract_function_signature, extract_struct_fields, collect_sorted_unique, walk_for_calls_with_lines, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
 
 /// Walk calls with line info and deduplicate, preserving first occurrence's line.
 fn extract_calls_deduped(
@@ -72,6 +72,8 @@ pub fn simple_type_chunk(
         ast_hash: 0,
         body_hash: 0,
         sub_blocks: Vec::new(),
+        string_args: Vec::new(),
+        param_flows: Vec::new(),
     })
 }
 
@@ -148,6 +150,22 @@ pub fn build_chunk(
     } else {
         (Vec::new(), Vec::new())
     };
+    let string_args = if config.extract_calls && is_func {
+        walk_for_string_args(node, src)
+            .into_iter()
+            .map(|sa| (sa.callee, sa.value, sa.line, sa.arg_position))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let param_flows = if config.extract_calls && is_func {
+        walk_for_param_flows(node, src)
+            .into_iter()
+            .map(|pf| (pf.param_name, pf.param_position, pf.callee, pf.callee_arg, pf.line))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let type_refs = collect_sorted_unique(node, src, walk_for_type_ids);
     let param_types = (lang.extract_params_fn)(node, src);
     let return_type = (lang.extract_return_fn)(node, src);
@@ -173,6 +191,8 @@ pub fn build_chunk(
         ast_hash: 0,
         body_hash: 0,
         sub_blocks: Vec::new(),
+        string_args,
+        param_flows,
     })
 }
 
@@ -237,6 +257,22 @@ pub fn extract_methods(
         } else {
             (Vec::new(), Vec::new())
         };
+        let string_args = if config.extract_calls {
+            walk_for_string_args(&actual_child, src)
+                .into_iter()
+                .map(|sa| (sa.callee, sa.value, sa.line, sa.arg_position))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let param_flows = if config.extract_calls {
+            walk_for_param_flows(&actual_child, src)
+                .into_iter()
+                .map(|pf| (pf.param_name, pf.param_position, pf.callee, pf.callee_arg, pf.line))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let doc = (lang.extract_doc_fn)(&body, &actual_child, src);
         let type_refs = collect_sorted_unique(&actual_child, src, walk_for_type_ids);
         let param_types = (lang.extract_params_fn)(&actual_child, src);
@@ -263,6 +299,8 @@ pub fn extract_methods(
             ast_hash: 0,
             body_hash: 0,
             sub_blocks: Vec::new(),
+            string_args,
+            param_flows,
         });
     }
 }

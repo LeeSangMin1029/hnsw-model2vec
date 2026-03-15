@@ -11,6 +11,8 @@ pub fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         call_lines: vec![],
         types: vec![],
         imports: vec![],
+        string_args: vec![],
+        param_flows: vec![],
     }
 }
 
@@ -25,5 +27,7 @@ pub fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         call_lines: vec![],
         types: vec![],
         imports: vec![],
+        string_args: vec![],
+        param_flows: vec![],
     }
 }
