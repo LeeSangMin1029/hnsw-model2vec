@@ -530,10 +530,11 @@ fn resolve_with_imports(
         }
 
     // 5. Type-reference heuristic for `.method()` calls.
-    //    Check source chunk's type refs AND types inferred from `::` calls in the same chunk.
+    //    Prefer call_types (from `Foo::bar` calls in the same chunk) over source_types,
+    //    because `let x = Foo::new(); x.method()` means `.method()` is likely on Foo.
     if let Some((_, method)) = lower.rsplit_once('.') {
         let leaf_method = method.rsplit_once('.').map_or(method, |p| p.1);
-        for ty in source_types.iter().chain(call_types.iter()) {
+        for ty in call_types.iter().chain(source_types.iter()) {
             let ty_lower = ty.to_lowercase();
             let candidate = format!("{ty_lower}::{leaf_method}");
             if let Some(&idx) = exact.get(&candidate) {

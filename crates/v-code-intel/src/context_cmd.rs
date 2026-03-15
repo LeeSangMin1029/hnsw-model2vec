@@ -121,10 +121,12 @@ fn collect_unresolved(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) ->
 
         for call in &chunks[seed_usize].calls {
             // Skip if it resolves to a known callee (by short name match).
+            // For `receiver.method` calls, use the leaf method name for matching.
             let short = call.rsplit("::").next().unwrap_or(call);
+            let leaf = short.rsplit('.').next().unwrap_or(short);
             let is_resolved = resolved_names.iter().any(|n| {
                 let n_short = n.rsplit("::").next().unwrap_or(n);
-                n_short.eq_ignore_ascii_case(short)
+                n_short.eq_ignore_ascii_case(leaf)
             });
             if !is_resolved && !is_noise(call) && seen.insert(call.clone()) {
                 unresolved.push(call.clone());

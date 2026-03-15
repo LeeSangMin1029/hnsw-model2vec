@@ -59,7 +59,9 @@ fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::C
     let db_str = canonical.to_str()?;
 
     let params = serde_json::json!({"db": db_str});
-    let result = v_daemon::daemon_rpc("graph/build", params, 120).ok()?;
+    // Short timeout (10s): if daemon has cached CallMap this is fast;
+    // if it needs full LSP resolution, fall back to tree-sitter heuristic.
+    let result = v_daemon::daemon_rpc("graph/build", params, 10).ok()?;
 
     if result.get("status").and_then(|s| s.as_str()) == Some("ok") {
         eprintln!("[graph] Built via daemon (LSP entries: {})",
