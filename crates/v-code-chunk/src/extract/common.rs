@@ -78,13 +78,12 @@ pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<Stri
 }
 
 /// Recursively walk to find call nodes, recording the 0-based source line of each call.
-pub fn walk_for_calls_with_lines(
-    node: &tree_sitter::Node,
-    src: &[u8],
-    calls: &mut Vec<String>,
-    lines: &mut Vec<u32>,
-) {
-    let call_name = match node.kind() {
+/// Extract and normalize the callee name from a call/method-invocation node.
+///
+/// Returns `None` for non-call nodes. Handles `call_expression`, `call`,
+/// and `method_invocation` node kinds. Normalizes multiline names.
+pub fn extract_callee_from_node(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let raw = match node.kind() {
         "call_expression" | "call" => {
             node.child_by_field_name("function")
                 .and_then(|f| extract_callee_name(f, src))
@@ -102,16 +101,24 @@ pub fn walk_for_calls_with_lines(
             })
         }
         _ => None,
-    };
+    }?;
 
-    if let Some(name) = call_name {
-        // Normalize multiline call expressions: collapse whitespace to single space
-        // e.g. "self\n            .request" → "self.request"
-        let name = if name.contains('\n') {
-            name.split_whitespace().collect::<Vec<_>>().join("")
-        } else {
-            name
-        };
+    // Normalize multiline call expressions: collapse whitespace
+    // e.g. "self\n            .request" → "self.request"
+    Some(if raw.contains('\n') {
+        raw.split_whitespace().collect::<Vec<_>>().join("")
+    } else {
+        raw
+    })
+}
+
+pub fn walk_for_calls_with_lines(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    calls: &mut Vec<String>,
+    lines: &mut Vec<u32>,
+) {
+    if let Some(name) = extract_callee_from_node(node, src) {
         lines.push(node.start_position().row as u32);
         calls.push(name);
     }
@@ -236,32 +243,7 @@ fn walk_for_string_args_inner(
     bindings: &std::collections::HashMap<String, String>,
     out: &mut Vec<StringArg>,
 ) {
-    let callee = match node.kind() {
-        "call_expression" | "call" => {
-            node.child_by_field_name("function")
-                .and_then(|f| extract_callee_name(f, src))
-        }
-        "method_invocation" => {
-            node.child_by_field_name("name").and_then(|n| {
-                n.utf8_text(src).ok().map(|name| {
-                    if let Some(obj) = node.child_by_field_name("object")
-                        && let Ok(obj_text) = obj.utf8_text(src) {
-                            format!("{obj_text}.{name}")
-                        } else {
-                            name.to_owned()
-                        }
-                })
-            })
-        }
-        _ => None,
-    };
-
-    if let Some(mut callee_name) = callee {
-        // Normalize multiline call names
-        if callee_name.contains('\n') {
-            callee_name = callee_name.split_whitespace().collect::<Vec<_>>().join("");
-        }
-
+    if let Some(callee_name) = extract_callee_from_node(node, src) {
         // Skip enum variant constructors and wrappers — not meaningful call sites
         if is_noise_callee(&callee_name) {
             let mut cursor = node.walk();

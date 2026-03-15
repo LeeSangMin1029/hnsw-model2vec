@@ -51,8 +51,6 @@ indicatif = "0.17"
 crossbeam.workspace = true
 rayon.workspace = true
 
-# Ctrl+C handling
-ctrlc = "3.4"
 
 # Dictionary provisioning (all already in dep tree — zero additional compile)
 ureq = "2"

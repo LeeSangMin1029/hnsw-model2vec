@@ -40,8 +40,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # File watching
 notify = "7"
 
-# Signal handling
-ctrlc = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }

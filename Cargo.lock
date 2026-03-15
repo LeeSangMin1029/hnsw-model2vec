@@ -3936,7 +3936,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "ctrlc",
  "fs2",
  "notify",
  "serde",
@@ -3972,7 +3971,6 @@ dependencies = [
  "bincode",
  "clap",
  "crossbeam",
- "ctrlc",
  "flate2",
  "indicatif",
  "lindera",
@@ -4002,6 +4000,7 @@ name = "v-hnsw-core"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "ctrlc",
  "serde",
  "thiserror 2.0.18",
 ]

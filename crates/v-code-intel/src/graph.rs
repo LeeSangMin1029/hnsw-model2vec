@@ -7,7 +7,7 @@
 //! - Add new traversal methods (e.g., shortest path) as `impl CallGraph` methods.
 //! - Add new fields to `CallGraph` and update `build()` + bump cache version.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -165,32 +165,10 @@ impl CallGraph {
     pub fn build(chunks: &[CodeChunk]) -> Self {
         let meta = ChunkMeta::collect(chunks);
         let mut adj = AdjState::new(chunks.len());
-
-        // Pre-collect owner struct/impl type_refs for self.field.method resolution.
         let owner_types = collect_owner_types(chunks, &meta);
 
         for (src, c) in chunks.iter().enumerate() {
-            let imports = build_import_map(&c.imports);
-            let self_type = owning_type(&c.name);
-            let call_types = extract_call_types(&c.calls);
-            // Merge owner's type_refs for self.field.method resolution.
-            let mut enriched_types = c.types.clone();
-            if let Some(ref owner) = self_type {
-                if let Some(extra) = owner_types.get(owner.as_str()) {
-                    for t in extra {
-                        if !enriched_types.contains(t) {
-                            enriched_types.push(t.clone());
-                        }
-                    }
-                }
-            }
-            for (call_idx, call) in c.calls.iter().enumerate() {
-                if let Some(tgt) = resolve_with_imports(call, &meta.exact, &meta.short, &imports, self_type.as_deref(), &enriched_types, &call_types) {
-                    let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
-                    adj.add_edge(src, tgt, call_line);
-                }
-            }
-            resolve_type_ref_edges(src, &c.types, &meta.exact, &meta.short, &imports, &mut adj.callees, &mut adj.callers);
+            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &mut adj, &HashSet::new());
         }
 
         adj.dedup();
@@ -270,38 +248,56 @@ impl CallGraph {
             }
 
             // Tree-sitter fallback for calls NOT covered by LSP resolution.
-            let imports = build_import_map(&c.imports);
-            let self_type = owning_type(&c.name);
-            let call_types = extract_call_types(&c.calls);
-            let mut enriched_types = c.types.clone();
-            if let Some(ref owner) = self_type {
-                if let Some(extra) = owner_types.get(owner.as_str()) {
-                    for t in extra {
-                        if !enriched_types.contains(t) {
-                            enriched_types.push(t.clone());
-                        }
-                    }
-                }
-            }
-            for (call_idx, call) in c.calls.iter().enumerate() {
-                let call_short = call.to_lowercase();
-                let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
-                if resolved_names.contains(call_leaf) {
-                    continue;
-                }
-                if let Some(tgt) = resolve_with_imports(
-                    call, &exact_single, &meta.short, &imports,
-                    self_type.as_deref(), &enriched_types, &call_types,
-                ) {
-                    let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
-                    adj.add_edge(src, tgt, call_line);
-                }
-            }
-            resolve_type_ref_edges(src, &c.types, &exact_single, &meta.short, &imports, &mut adj.callees, &mut adj.callers);
+            Self::resolve_chunk_edges(src, c, &exact_single, &meta.short, &owner_types, &mut adj, &resolved_names);
         }
 
         adj.dedup();
         Self::from_parts(meta, adj, chunks)
+    }
+
+    /// Resolve tree-sitter edges for a single chunk.
+    ///
+    /// Shared by `build()` and `build_with_resolved_calls()` (fallback path).
+    /// `skip_calls` contains short names already resolved by LSP — those are skipped.
+    fn resolve_chunk_edges(
+        src: usize,
+        chunk: &CodeChunk,
+        exact: &BTreeMap<String, u32>,
+        short: &BTreeMap<String, u32>,
+        owner_types: &BTreeMap<String, Vec<String>>,
+        adj: &mut AdjState,
+        skip_calls: &HashSet<String>,
+    ) {
+        let imports = build_import_map(&chunk.imports);
+        let self_type = owning_type(&chunk.name);
+        let call_types = extract_call_types(&chunk.calls);
+        let mut enriched_types = chunk.types.clone();
+        if let Some(ref owner) = self_type {
+            if let Some(extra) = owner_types.get(owner.as_str()) {
+                for t in extra {
+                    if !enriched_types.contains(t) {
+                        enriched_types.push(t.clone());
+                    }
+                }
+            }
+        }
+        for (call_idx, call) in chunk.calls.iter().enumerate() {
+            if !skip_calls.is_empty() {
+                let call_short = call.to_lowercase();
+                let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
+                if skip_calls.contains(call_leaf) {
+                    continue;
+                }
+            }
+            if let Some(tgt) = resolve_with_imports(
+                call, exact, short, &imports,
+                self_type.as_deref(), &enriched_types, &call_types,
+            ) {
+                let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
+                adj.add_edge(src, tgt, call_line);
+            }
+        }
+        resolve_type_ref_edges(src, &chunk.types, exact, short, &imports, &mut adj.callees, &mut adj.callers);
     }
 
     /// Assemble a `CallGraph` from pre-built metadata and adjacency state.
