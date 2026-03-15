@@ -66,33 +66,63 @@ pub fn run_symbols(
     limit: Option<usize>,
     compact: bool,
 ) -> Result<()> {
+    let is_file_query = name.as_deref().is_some_and(looks_like_file_path);
+
     let key = format!(
-        "symbols:{}:{}:{}:{}",
+        "symbols:{}:{}:{}:{}:{}",
         name.as_deref().unwrap_or(""),
         kind.as_deref().unwrap_or(""),
         if include_tests { "t" } else { "" },
         limit.map_or(String::new(), |l| l.to_string()),
+        if is_file_query { "f" } else { "" },
     );
     run_chunk_query(&db, format, &key,
         |c| {
-            if let Some(ref n) = name
-                && !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
+            if let Some(ref n) = name {
+                if is_file_query {
+                    // File mode: match file path suffix
+                    if !c.file.ends_with(n) && !c.file.ends_with(&n.replace('\\', "/")) {
+                        return false;
+                    }
+                } else {
+                    // Name mode: substring match
+                    if !c.name.to_lowercase().contains(&n.to_lowercase()) { return false; }
+                }
+            }
             if let Some(ref k) = kind
                 && c.kind.to_lowercase() != k.to_lowercase() { return false; }
             if !include_tests && v_code_intel::graph::is_test_chunk(c) { return false; }
             true
         },
         "No symbols found.",
-        |n| format!("{n} symbols found:\n"),
+        |n| {
+            if is_file_query {
+                format!("{n} symbols in file:\n")
+            } else {
+                format!("{n} symbols found:\n")
+            }
+        },
         limit,
         compact,
     )?;
 
-    // Show trait implementations if any trait was in the results.
-    if !matches!(format, OutputFormat::Json) {
+    // Show trait implementations if any trait was in the results (name mode only).
+    if !is_file_query && !matches!(format, OutputFormat::Json) {
         print_trait_impls_if_relevant(&db, name.as_deref())?;
     }
     Ok(())
+}
+
+/// Check if a string looks like a file path rather than a symbol name.
+///
+/// Heuristic: contains a known source file extension or path separator.
+fn looks_like_file_path(s: &str) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        ".rs", ".go", ".py", ".js", ".ts", ".tsx", ".jsx",
+        ".c", ".cpp", ".cc", ".h", ".hpp",
+        ".java", ".kt", ".cs", ".rb", ".swift",
+    ];
+    EXTENSIONS.iter().any(|ext| s.ends_with(ext)) || s.contains('/')
 }
 
 /// If the symbol search matched any trait, print its implementations.

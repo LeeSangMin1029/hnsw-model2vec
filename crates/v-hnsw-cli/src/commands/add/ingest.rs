@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use crate::chunk::{ChunkConfig, MarkdownChunker};
+use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_embed::Model2VecModel;
 use v_hnsw_storage::StorageEngine;
 
+use crate::chunk::{ChunkConfig, MarkdownChunker};
 use crate::commands::pipeline::process_records;
 use crate::commands::common;
 use crate::commands::common::IngestRecord;
@@ -139,6 +140,12 @@ pub fn finalize_ingest(
         );
     }
 
+    // Early cutoff: skip records whose body_hash matches existing payload.
+    let (records, skipped) = filter_unchanged_records(records, engine);
+    if skipped > 0 {
+        eprintln!("Skipped {skipped} unchanged symbols (body_hash match)");
+    }
+
     let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
 
     let mut file_index = file_index::load_file_index(db_path)?;
@@ -153,6 +160,45 @@ pub fn finalize_ingest(
         added_ids: inserted_ids,
         removed_ids,
     })
+}
+
+/// Extract `body_hash` (i64) from a payload's custom fields.
+fn payload_body_hash(payload: &v_hnsw_core::Payload) -> Option<i64> {
+    payload.custom.get("body_hash").and_then(|v| {
+        if let PayloadValue::Integer(h) = v { Some(*h) } else { None }
+    })
+}
+
+/// Filter out records whose `body_hash` matches the existing payload in the DB.
+///
+/// Returns `(records_to_process, skipped_count)`.
+fn filter_unchanged_records(
+    records: Vec<IngestRecord>,
+    engine: &StorageEngine,
+) -> (Vec<IngestRecord>, usize) {
+    let store = engine.payload_store();
+    let mut changed = Vec::with_capacity(records.len());
+    let mut skipped = 0usize;
+
+    for rec in records {
+        let new_hash = rec.custom.get("body_hash").and_then(|v| {
+            if let PayloadValue::Integer(h) = v { Some(*h) } else { None }
+        });
+
+        // If we can read the existing payload and body_hash matches, skip re-embedding.
+        if let Some(new_h) = new_hash
+            && let Ok(Some(existing)) = store.get_payload(rec.id)
+            && let Some(old_h) = payload_body_hash(&existing)
+            && old_h == new_h
+        {
+            skipped += 1;
+            continue;
+        }
+
+        changed.push(rec);
+    }
+
+    (changed, skipped)
 }
 
 /// Chunk a single markdown file into [`IngestRecord`]s.

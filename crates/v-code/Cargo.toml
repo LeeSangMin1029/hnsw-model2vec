@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "v_code"
+path = "src/lib.rs"
+
 [[bin]]
 name = "v-code"
 path = "src/main.rs"

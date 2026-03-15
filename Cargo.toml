@@ -29,6 +29,7 @@ v-hnsw-graph = { path = "crates/v-hnsw-graph" }
 v-hnsw-storage = { path = "crates/v-hnsw-storage" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
+v-code = { path = "crates/v-code" }
 v-code-chunk = { path = "crates/v-code-chunk" }
 v-code-intel = { path = "crates/v-code-intel" }
 v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }

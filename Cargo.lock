@@ -3942,6 +3942,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "v-code",
  "v-code-intel",
  "v-hnsw-core",
  "v-hnsw-embed",

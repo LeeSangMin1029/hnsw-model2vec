@@ -1,7 +1,7 @@
 //! v-code — Code intelligence CLI.
 
 mod cli;
-mod commands;
+use v_code::commands;
 
 use clap::Parser;
 use v_hnsw_cli::error::CliError;

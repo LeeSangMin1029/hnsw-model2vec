@@ -244,6 +244,7 @@ fn spawn_background(db_path: Option<&Path>, port: u16, timeout_secs: u64) -> Res
 /// If Job Object creation fails, returns `None` — the daemon still runs,
 /// just without automatic child cleanup.
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "Windows Job Object API requires FFI calls")]
 fn setup_job_object() -> Option<JobObjectGuard> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::JobObjects::{
@@ -292,6 +293,7 @@ fn setup_job_object() -> Option<JobObjectGuard> {
 struct JobObjectGuard(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
+#[expect(unsafe_code, reason = "CloseHandle FFI call")]
 impl Drop for JobObjectGuard {
     fn drop(&mut self) {
         unsafe {
