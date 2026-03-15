@@ -152,6 +152,22 @@ pub fn walk_for_string_args(node: &tree_sitter::Node, src: &[u8]) -> Vec<StringA
     result
 }
 
+/// Returns `true` for callee names that are enum variants, smart-pointer
+/// constructors, or other wrappers that don't represent meaningful call sites
+/// for string-argument tracking.
+fn is_noise_callee(name: &str) -> bool {
+    matches!(
+        name,
+        "Some" | "Ok" | "Err" | "None"
+            | "Box::new" | "Arc::new" | "Rc::new"
+            | "vec" | "format" | "println" | "eprintln"
+            | "write" | "writeln" | "panic" | "todo"
+            | "unimplemented" | "unreachable" | "assert"
+            | "assert_eq" | "assert_ne" | "debug_assert"
+            | "debug_assert_eq" | "debug_assert_ne"
+    )
+}
+
 fn walk_for_string_args_inner(
     node: &tree_sitter::Node,
     src: &[u8],
@@ -183,6 +199,15 @@ fn walk_for_string_args_inner(
         // Normalize multiline call names
         if callee_name.contains('\n') {
             callee_name = callee_name.split_whitespace().collect::<Vec<_>>().join("");
+        }
+
+        // Skip enum variant constructors and wrappers — not meaningful call sites
+        if is_noise_callee(&callee_name) {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                walk_for_string_args_inner(&child, src, bindings, out);
+            }
+            return;
         }
 
         if let Some(args_node) = node.child_by_field_name("arguments") {
@@ -541,29 +566,31 @@ fn walk_param_flows_inner(
         if callee_name.contains('\n') {
             callee_name = callee_name.split_whitespace().collect::<Vec<_>>().join("");
         }
-        if let Some(args_node) = node.child_by_field_name("arguments") {
-            let mut cursor = args_node.walk();
-            let mut arg_pos: u8 = 0;
-            for arg in args_node.children(&mut cursor) {
-                if arg.kind() == "identifier"
-                    && let Ok(ident) = arg.utf8_text(src)
-                    && let Some((_, param_pos)) =
-                        params.iter().find(|(name, _)| name == ident)
-                {
-                    flows.push(ParamFlow {
-                        param_name: ident.to_owned(),
-                        param_position: *param_pos,
-                        callee: callee_name.clone(),
-                        callee_arg: arg_pos,
-                        line: arg.start_position().row as u32,
-                    });
-                }
-                if !arg.kind().contains('(')
-                    && !arg.kind().contains(')')
-                    && arg.kind() != ","
-                    && arg.kind() != "comment"
-                {
-                    arg_pos = arg_pos.saturating_add(1);
+        if !is_noise_callee(&callee_name) {
+            if let Some(args_node) = node.child_by_field_name("arguments") {
+                let mut cursor = args_node.walk();
+                let mut arg_pos: u8 = 0;
+                for arg in args_node.children(&mut cursor) {
+                    if arg.kind() == "identifier"
+                        && let Ok(ident) = arg.utf8_text(src)
+                        && let Some((_, param_pos)) =
+                            params.iter().find(|(name, _)| name == ident)
+                    {
+                        flows.push(ParamFlow {
+                            param_name: ident.to_owned(),
+                            param_position: *param_pos,
+                            callee: callee_name.clone(),
+                            callee_arg: arg_pos,
+                            line: arg.start_position().row as u32,
+                        });
+                    }
+                    if !arg.kind().contains('(')
+                        && !arg.kind().contains(')')
+                        && arg.kind() != ","
+                        && arg.kind() != "comment"
+                    {
+                        arg_pos = arg_pos.saturating_add(1);
+                    }
                 }
             }
         }
