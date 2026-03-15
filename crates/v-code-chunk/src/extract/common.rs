@@ -152,19 +152,65 @@ pub fn walk_for_string_args(node: &tree_sitter::Node, src: &[u8]) -> Vec<StringA
     result
 }
 
+/// Extract a clean callee name from a `function` field node of a `call_expression`.
+///
+/// For simple identifiers or scoped identifiers (`foo`, `Mod::func`), returns
+/// the text directly. For `field_expression` nodes (method chains like
+/// `a(x).b`), returns only the method name (e.g. `b`) since the receiver is
+/// a separate call that gets walked independently.
+fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    match func_node.kind() {
+        "field_expression" => {
+            // `receiver.method` — extract just the method name
+            let field = func_node.child_by_field_name("field")?;
+            let method = field.utf8_text(src).ok()?;
+            // Try to get a short receiver name (e.g. `self`, a variable, or a type)
+            // For chained calls like `a(x).b(y)`, receiver is a call_expression — skip it
+            if let Some(value) = func_node.child_by_field_name("value") {
+                match value.kind() {
+                    // Simple receiver: self.method, var.method
+                    "identifier" | "self" => {
+                        let recv = value.utf8_text(src).ok()?;
+                        return Some(format!("{recv}.{method}"));
+                    }
+                    // Type::method via scoped identifier won't hit field_expression,
+                    // but SomeStruct.field patterns can
+                    _ => {}
+                }
+            }
+            Some(method.to_owned())
+        }
+        // identifier, scoped_identifier (Foo::bar), generic_function (foo::<T>)
+        _ => {
+            let text = func_node.utf8_text(src).ok()?;
+            // Sanity check: if text contains parens, it's a nested call expression
+            // that shouldn't be treated as a callee name
+            if text.contains('(') {
+                return None;
+            }
+            Some(text.to_owned())
+        }
+    }
+}
+
 /// Returns `true` for callee names that are enum variants, smart-pointer
-/// constructors, or other wrappers that don't represent meaningful call sites
-/// for string-argument tracking.
+/// constructors, error-handling chain methods, or other wrappers that don't
+/// represent meaningful call sites for string-argument tracking.
 fn is_noise_callee(name: &str) -> bool {
     matches!(
         name,
+        // Enum variants & wrappers
         "Some" | "Ok" | "Err" | "None"
             | "Box::new" | "Arc::new" | "Rc::new"
+            // Formatting & assertion macros
             | "vec" | "format" | "println" | "eprintln"
             | "write" | "writeln" | "panic" | "todo"
             | "unimplemented" | "unreachable" | "assert"
             | "assert_eq" | "assert_ne" | "debug_assert"
             | "debug_assert_eq" | "debug_assert_ne"
+            // Error-handling chain methods (string args are error messages, not data flow)
+            | "context" | "with_context" | "expect" | "unwrap_or"
+            | "unwrap_or_else" | "map_err" | "ok_or" | "ok_or_else"
     )
 }
 
@@ -177,8 +223,7 @@ fn walk_for_string_args_inner(
     let callee = match node.kind() {
         "call_expression" | "call" => {
             node.child_by_field_name("function")
-                .and_then(|f| f.utf8_text(src).ok())
-                .map(|t| t.to_owned())
+                .and_then(|f| extract_callee_name(f, src))
         }
         "method_invocation" => {
             node.child_by_field_name("name").and_then(|n| {
@@ -546,8 +591,7 @@ fn walk_param_flows_inner(
     let callee = match node.kind() {
         "call_expression" | "call" => node
             .child_by_field_name("function")
-            .and_then(|f| f.utf8_text(src).ok())
-            .map(|t| t.to_owned()),
+            .and_then(|f| extract_callee_name(f, src)),
         "method_invocation" => node.child_by_field_name("name").and_then(|n| {
             n.utf8_text(src).ok().map(|name| {
                 if let Some(obj) = node.child_by_field_name("object")
