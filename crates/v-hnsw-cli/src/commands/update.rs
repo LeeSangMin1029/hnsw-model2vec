@@ -85,7 +85,7 @@ pub fn run(db_path: PathBuf, input_path: Option<PathBuf>, exclude: &[String]) ->
     let stats = run_core(&db_path, &input_path, None, exclude)?;
 
     // Notify daemon to reload if running
-    if let Ok(()) = v_daemon::notify_reload(&db_path) {
+    if let Ok(()) = v_hnsw_storage::daemon_client::notify_reload(&db_path) {
         println!("Daemon notified to reload indexes.");
     }
 
@@ -299,7 +299,7 @@ fn try_daemon_update(db_path: &Path, input_path: &Path, exclude: &[String]) -> R
     });
 
     // Update can take a long time — generous read timeout (300s)
-    let result = v_daemon::daemon_rpc("update", params, 300)?;
+    let result = v_hnsw_storage::daemon_client::daemon_rpc("update", params, 300)?;
 
     let stats: UpdateStats = serde_json::from_value(result)
         .context("Failed to parse update stats")?;

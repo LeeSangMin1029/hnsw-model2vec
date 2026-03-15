@@ -20,7 +20,6 @@ v-code-intel.workspace = true
 v-hnsw-rerank.workspace = true
 v-hnsw-graph.workspace = true
 v-hnsw-search.workspace = true
-v-daemon = { workspace = true }
 
 clap = { workspace = true, features = ["derive"] }
 anyhow = "1"

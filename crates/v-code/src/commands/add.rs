@@ -130,7 +130,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         )?;
 
         // Notify daemon to reload if running
-        if v_daemon::notify_reload(&db_path).is_ok() {
+        if v_hnsw_storage::daemon_client::notify_reload(&db_path).is_ok() {
             println!("Daemon notified to reload indexes.");
         }
 

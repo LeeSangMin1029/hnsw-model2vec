@@ -6,6 +6,7 @@
 
 mod collection;
 mod collection_manager;
+pub mod daemon_client;
 pub mod db_config;
 pub mod distance;
 mod engine;

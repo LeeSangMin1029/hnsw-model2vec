@@ -53,13 +53,13 @@ fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::C
     // Fire-and-forget: ask daemon to build graph asynchronously.
     // Always return None so the caller falls through to tree-sitter.
     // Daemon will save graph.bin when done → next invocation gets cache hit.
-    if !v_daemon::is_running() {
+    if !v_hnsw_storage::daemon_client::is_running() {
         return None;
     }
 
     if let Some(canonical) = db.canonicalize().ok().and_then(|p| p.to_str().map(String::from)) {
         let params = serde_json::json!({"db": canonical});
-        v_daemon::daemon_rpc_fire_and_forget("graph/build", params);
+        v_hnsw_storage::daemon_client::daemon_rpc_fire_and_forget("graph/build", params);
         eprintln!("[graph] Requested daemon build (async) — using tree-sitter for now");
     }
 
@@ -68,7 +68,7 @@ fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::C
 
 fn daemon_spawn_and_wait(db: &std::path::Path) {
     // Non-blocking: spawn daemon in background for next invocation.
-    v_daemon::spawn_daemon(db);
+    v_hnsw_storage::daemon_client::spawn_daemon(db);
 }
 
 pub use v_code_intel::parse::CodeChunk;

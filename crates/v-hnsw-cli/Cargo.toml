@@ -24,8 +24,6 @@ v-hnsw-search = { workspace = true, features = ["korean"] }
 # Code intelligence (optional — only v-code binary enables this)
 v-code-intel = { workspace = true, optional = true }
 
-# Daemon client (default-features = false → lib only, no server deps)
-v-daemon = { workspace = true }
 
 # Markdown chunking
 pulldown-cmark = "0.13"

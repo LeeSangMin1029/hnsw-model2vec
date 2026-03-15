@@ -71,7 +71,7 @@ fn try_daemon_search(db: &std::path::Path, query: &str, k: usize, tags: &[String
         "tags": tags,
     });
 
-    let result = v_daemon::daemon_rpc("search", params, 30)?;
+    let result = v_hnsw_storage::daemon_client::daemon_rpc("search", params, 30)?;
 
     let results: Vec<super::search_result::SearchResultItem> =
         serde_json::from_value(result.get("results").cloned().unwrap_or_default())
@@ -91,7 +91,7 @@ fn try_daemon_search(db: &std::path::Path, query: &str, k: usize, tags: &[String
 
 /// Auto-start daemon in background if not running.
 fn auto_start_daemon(db: &std::path::Path) {
-    v_daemon::spawn_daemon(db);
+    v_hnsw_storage::daemon_client::spawn_daemon(db);
 }
 
 /// Parse a comma-separated vector string.
