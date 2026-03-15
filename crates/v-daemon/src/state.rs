@@ -331,10 +331,6 @@ impl DaemonState {
         Ok(key)
     }
 
-    pub fn model(&mut self) -> Result<&Model2VecModel> {
-        self.ensure_model()
-    }
-
     pub fn search(&mut self, db_path: &Path, query: &str, k: usize, tags: Vec<String>) -> Result<SearchResponse> {
         let start = Instant::now();
         let embedding = self.resolve_embedding(query)?;

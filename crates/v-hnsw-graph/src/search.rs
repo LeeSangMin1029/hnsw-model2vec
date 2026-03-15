@@ -145,6 +145,50 @@ pub(crate) fn search_ext<D: DistanceMetric>(
         graph.entry_point, graph.max_layer, query, k, ef)
 }
 
+/// Greedy descent from entry point through upper layers, returning the layer-0 entry.
+///
+/// Shared by single-stage and two-stage search paths.
+fn descend_to_layer0<N: NodeGraph>(
+    nodes: &N,
+    dc: &dyn DistanceComputer,
+    config: &crate::config::HnswConfig,
+    entry_point: Option<PointId>,
+    max_layer: LayerId,
+    query: &[f32],
+) -> v_hnsw_core::Result<Option<(PointId, f32)>> {
+    if query.len() != config.dim {
+        return Err(VhnswError::DimensionMismatch {
+            expected: config.dim,
+            got: query.len(),
+        });
+    }
+
+    let entry_id = match entry_point {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let mut cur_dist = dc.distance(query, entry_id)?;
+    let mut cur_id = entry_id;
+
+    if max_layer > 0 {
+        for layer_idx in (1..=max_layer).rev() {
+            let layer = layer_idx as LayerId;
+            let (new_id, new_dist) = greedy_closest_dc(nodes, dc, query, cur_id, cur_dist, layer)?;
+            cur_id = new_id;
+            cur_dist = new_dist;
+        }
+    }
+
+    Ok(Some((cur_id, cur_dist)))
+}
+
+/// Sort by distance ascending and truncate to top-k.
+fn sort_truncate(results: &mut Vec<(PointId, f32)>, k: usize) {
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(k);
+}
+
 /// Internal search implementation, generic over node access.
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn search_with_store<D: DistanceMetric, N: NodeGraph>(
@@ -158,43 +202,17 @@ pub(crate) fn search_with_store<D: DistanceMetric, N: NodeGraph>(
     k: usize,
     ef: usize,
 ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-    if query.len() != config.dim {
-        return Err(VhnswError::DimensionMismatch {
-            expected: config.dim,
-            got: query.len(),
-        });
-    }
-
-    let entry_id = match entry_point {
-        Some(id) => id,
-        None => return Ok(Vec::new()),
+    let dc = StoreDc { store, metric: distance };
+    let Some((cur_id, cur_dist)) = descend_to_layer0(nodes, &dc, config, entry_point, max_layer, query)? else {
+        return Ok(Vec::new());
     };
 
-    let entry_vec = store.get(entry_id)?;
-    let mut cur_dist = distance.distance(query, entry_vec);
-    let mut cur_id = entry_id;
-
-    // Greedy descent from top layer down to layer 1
-    if max_layer > 0 {
-        for layer_idx in (1..=max_layer).rev() {
-            let layer = layer_idx as LayerId;
-            let (new_id, new_dist) = greedy_closest(nodes, store, distance, query, cur_id, cur_dist, layer)?;
-            cur_id = new_id;
-            cur_dist = new_dist;
-        }
-    }
-
-    // Search at layer 0 with full ef
     let effective_ef = ef.max(k);
     let entry_points = vec![(cur_id, cur_dist)];
-    let results = search_layer(nodes, store, distance, query, &entry_points, effective_ef, 0)?;
+    let mut results = search_layer_dc(nodes, &dc, query, &entry_points, effective_ef, 0)?;
 
-    // Take top-k sorted by distance ascending
-    let mut sorted = results;
-    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    sorted.truncate(k);
-
-    Ok(sorted)
+    sort_truncate(&mut results, k);
+    Ok(results)
 }
 
 /// Two-stage HNSW search with approximate distance for traversal and exact rescore.
@@ -202,9 +220,6 @@ pub(crate) fn search_with_store<D: DistanceMetric, N: NodeGraph>(
 /// 1. Greedy descent (upper layers) + layer-0 beam search using `approx_dc`.
 /// 2. Rescore top-ef candidates using `exact_dc` for accurate final ranking.
 /// 3. Return top-k results.
-///
-/// Designed for SQ8 quantization: `approx_dc` uses u8 asymmetric distance,
-/// `exact_dc` uses f32 exact distance.
 #[expect(clippy::too_many_arguments)]
 pub fn search_two_stage<N: NodeGraph>(
     nodes: &N,
@@ -217,33 +232,10 @@ pub fn search_two_stage<N: NodeGraph>(
     k: usize,
     ef: usize,
 ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-    if query.len() != config.dim {
-        return Err(VhnswError::DimensionMismatch {
-            expected: config.dim,
-            got: query.len(),
-        });
-    }
-
-    let entry_id = match entry_point {
-        Some(id) => id,
-        None => return Ok(Vec::new()),
+    let Some((cur_id, cur_d)) = descend_to_layer0(nodes, approx_dc, config, entry_point, max_layer, query)? else {
+        return Ok(Vec::new());
     };
 
-    let cur_dist = approx_dc.distance(query, entry_id)?;
-    let mut cur_id = entry_id;
-    let mut cur_d = cur_dist;
-
-    // Greedy descent using approximate distance (upper layers)
-    if max_layer > 0 {
-        for layer_idx in (1..=max_layer).rev() {
-            let layer = layer_idx as LayerId;
-            let (new_id, new_dist) = greedy_closest_dc(nodes, approx_dc, query, cur_id, cur_d, layer)?;
-            cur_id = new_id;
-            cur_d = new_dist;
-        }
-    }
-
-    // Search layer 0 with approximate distance
     let effective_ef = ef.max(k);
     let entry_points = vec![(cur_id, cur_d)];
     let approx_results = search_layer_dc(nodes, approx_dc, query, &entry_points, effective_ef, 0)?;
@@ -256,10 +248,7 @@ pub fn search_two_stage<N: NodeGraph>(
         }
     }
 
-    // Sort by exact distance, take top-k
-    rescored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    rescored.truncate(k);
-
+    sort_truncate(&mut rescored, k);
     Ok(rescored)
 }
 

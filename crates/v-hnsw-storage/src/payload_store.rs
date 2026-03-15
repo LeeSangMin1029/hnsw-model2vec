@@ -85,6 +85,17 @@ impl FilePayloadStore {
         })
     }
 
+    /// Update source and tag secondary indexes for a payload.
+    fn update_secondary_indexes(&mut self, id: PointId, payload: &Payload) {
+        let source_points = self.source_index.entry(payload.source.clone()).or_default();
+        if !source_points.contains(&id) {
+            source_points.push(id);
+        }
+        for tag in &payload.tags {
+            self.tag_index.entry(tag.clone()).or_default().insert(id);
+        }
+    }
+
     /// Write a payload to the file and update the index.
     pub fn write_payload(&mut self, id: PointId, payload: &Payload) -> Result<()> {
         let config = bincode::config::standard();
@@ -92,23 +103,9 @@ impl FilePayloadStore {
             .map_err(|e| VhnswError::Payload(format!("failed to encode payload: {e}")))?;
 
         let offset = self.payload_file.seek(SeekFrom::End(0))?;
-        let length = data.len() as u32;
-
         self.payload_file.write_all(&data)?;
-
-        self.payload_index.insert(id, (offset, length));
-
-        // Update source index
-        let source_points = self.source_index.entry(payload.source.clone()).or_default();
-        if !source_points.contains(&id) {
-            source_points.push(id);
-        }
-
-        // Update tag index (Roaring Treemap — u64 safe)
-        for tag in &payload.tags {
-            self.tag_index.entry(tag.clone()).or_default().insert(id);
-        }
-
+        self.payload_index.insert(id, (offset, data.len() as u32));
+        self.update_secondary_indexes(id, payload);
         Ok(())
     }
 
@@ -116,27 +113,14 @@ impl FilePayloadStore {
     pub fn write_text(&mut self, id: PointId, text: &str) -> Result<()> {
         let data = text.as_bytes();
         let offset = self.text_file.seek(SeekFrom::End(0))?;
-        let length = data.len() as u32;
-
         self.text_file.write_all(data)?;
-
-        self.text_index.insert(id, (offset, length));
-
+        self.text_index.insert(id, (offset, data.len() as u32));
         Ok(())
     }
 
     /// Buffer a payload in memory (for WAL-backed writes before flush).
     pub fn buffer_payload(&mut self, id: PointId, payload: Payload) {
-        let source_points = self.source_index.entry(payload.source.clone()).or_default();
-        if !source_points.contains(&id) {
-            source_points.push(id);
-        }
-
-        // Update tag index (Roaring Treemap — u64 safe)
-        for tag in &payload.tags {
-            self.tag_index.entry(tag.clone()).or_default().insert(id);
-        }
-
+        self.update_secondary_indexes(id, &payload);
         self.pending_payloads.insert(id, payload);
     }
 
