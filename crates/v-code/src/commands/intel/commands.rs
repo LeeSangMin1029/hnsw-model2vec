@@ -461,7 +461,9 @@ pub fn run_flow(
     query: String,
     depth: u32,
 ) -> Result<()> {
+    use std::collections::BTreeMap;
     use v_code_intel::flow_cmd;
+    use v_code_intel::helpers::{apply_alias, build_path_aliases};
 
     let graph = load_or_build_graph(&db, None)?;
     let paths = flow_cmd::trace_string_flow(&graph, &query, depth);
@@ -471,26 +473,55 @@ pub fn run_flow(
         return Ok(());
     }
 
-    println!("=== flow: \"{query}\" ({} path(s)) ===\n", paths.len());
+    // Collect all files across all paths for alias building
+    let all_files: Vec<&str> = paths
+        .iter()
+        .flat_map(|p| p.iter().map(|e| super::relative_path(&graph.files[e.chunk_idx as usize])))
+        .collect();
+    let (alias_map, legend) = build_path_aliases(&all_files);
+
+    // Group flows by their origin file (first step's file)
+    let mut groups: BTreeMap<&str, Vec<(usize, &Vec<flow_cmd::FlowStep>)>> = BTreeMap::new();
     for (i, path) in paths.iter().enumerate() {
-        if paths.len() > 1 {
-            println!("  Flow #{}", i + 1);
+        if let Some(first) = path.first() {
+            let file = super::relative_path(&graph.files[first.chunk_idx as usize]);
+            groups.entry(file).or_default().push((i, path));
         }
-        for (step, entry) in path.iter().enumerate() {
-            let file = super::relative_path(&graph.files[entry.chunk_idx as usize]);
-            let func = &graph.names[entry.chunk_idx as usize];
-            let lines = format_lines_opt(graph.lines[entry.chunk_idx as usize]);
-            let kind = &graph.kinds[entry.chunk_idx as usize];
-            let marker = if entry.is_direct { "direct" } else { "relay" };
-            let indent = "   ".repeat(step);
-            let arrow = if step == 0 { "  " } else { "-> " };
-            println!(
-                "  {indent}{arrow}{file}{lines}  [{kind}] {func}  [{marker}] {callee}(\"{value}\")",
-                callee = entry.callee,
-                value = entry.value,
-            );
+    }
+
+    println!("=== flow: \"{query}\" ({} path(s)) ===\n", paths.len());
+
+    for (file, items) in &groups {
+        let short = apply_alias(file, &alias_map);
+        println!("@ {short}");
+        for (_, path) in items {
+            for (step, entry) in path.iter().enumerate() {
+                let i = entry.chunk_idx as usize;
+                let func = &graph.names[i];
+                let lines = format_lines_opt(graph.lines[i]);
+                let marker = if entry.is_direct { "direct" } else { "relay" };
+                if step == 0 {
+                    println!(
+                        "  {lines} {func}  [{marker}] {callee}(\"{value}\")",
+                        callee = entry.callee, value = entry.value,
+                    );
+                } else {
+                    let ef = super::relative_path(&graph.files[i]);
+                    let eshort = apply_alias(ef, &alias_map);
+                    println!(
+                        "    -> {eshort}{lines}  {func}  [{marker}] {callee}(\"{value}\")",
+                        callee = entry.callee, value = entry.value,
+                    );
+                }
+            }
         }
         println!();
+    }
+
+    if !legend.is_empty() {
+        for (alias, dir) in &legend {
+            println!("{alias} = {dir}");
+        }
     }
     Ok(())
 }
