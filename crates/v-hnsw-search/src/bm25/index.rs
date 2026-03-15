@@ -258,14 +258,11 @@ impl<T: Tokenizer> Bm25Index<T> {
     /// Call after bulk document insertion and before searching. This is O(N)
     /// for codes + O(256) for the LUT. Subsequent searches use the cached values.
     pub fn build_fieldnorm_cache(&mut self) {
-        let avg = self.avg_doc_length();
-        self.fieldnorm_lut = Some(super::fieldnorm::FieldNormLut::build(self.params.b, avg));
+        let (codes, lut) = Self::build_fieldnorm(
+            &self.doc_lengths, &self.params, self.total_length, self.total_docs);
+        self.fieldnorm_lut = Some(lut);
         if self.fieldnorm_codes.len() != self.doc_lengths.len() {
-            self.fieldnorm_codes = self
-                .doc_lengths
-                .iter()
-                .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
-                .collect();
+            self.fieldnorm_codes = codes;
         }
     }
 
@@ -278,10 +275,7 @@ impl<T: Tokenizer> Bm25Index<T> {
         if self.total_docs == 0 {
             return Vec::new();
         }
-        let mut query_tokens = self.tokenizer.tokenize(query);
-        let bigrams = super::bigram::generate(&query_tokens);
-        query_tokens.extend(bigrams);
-        let terms = self.resolve_terms(&query_tokens);
+        let terms = self.prepare_query(query);
         if terms.is_empty() {
             return Vec::new();
         }
@@ -326,10 +320,7 @@ impl<T: Tokenizer> Bm25Index<T> {
         if self.total_docs == 0 || doc_ids.is_empty() {
             return Vec::new();
         }
-        let mut query_tokens = self.tokenizer.tokenize(query);
-        let bigrams = super::bigram::generate(&query_tokens);
-        query_tokens.extend(bigrams);
-        let terms = self.resolve_terms(&query_tokens);
+        let terms = self.prepare_query(query);
         if terms.is_empty() {
             return Vec::new();
         }
@@ -339,6 +330,14 @@ impl<T: Tokenizer> Bm25Index<T> {
     }
 
     // -- Query resolution & scoring utilities --
+
+    /// Tokenize + bigrams + resolve to posting slices.
+    fn prepare_query<'a>(&'a self, query: &str) -> Vec<(&'a [Posting], f32)> {
+        let mut tokens = self.tokenizer.tokenize(query);
+        let bigrams = super::bigram::generate(&tokens);
+        tokens.extend(bigrams);
+        self.resolve_terms(&tokens)
+    }
 
     /// Resolve query tokens to posting slices with pre-computed IDF weights.
     ///
@@ -432,19 +431,30 @@ impl<T: Tokenizer> Bm25Index<T> {
         )
     }
 
+    /// Build fieldnorm codes + LUT from doc lengths and params.
+    fn build_fieldnorm(
+        doc_lengths: &HashMap<PointId, u32>,
+        params: &Bm25Params,
+        total_length: u64,
+        total_docs: usize,
+    ) -> (FxHashMap<PointId, u8>, super::fieldnorm::FieldNormLut) {
+        let codes = doc_lengths
+            .iter()
+            .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
+            .collect();
+        let avg = if total_docs == 0 { 0.0 } else { total_length as f32 / total_docs as f32 };
+        let lut = super::fieldnorm::FieldNormLut::build(params.b, avg);
+        (codes, lut)
+    }
+
     /// Load index from file. Prefers FST format if available, falls back to bincode.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
         // Try FST format first (compact, faster load)
         if let Some(dir) = path.as_ref().parent()
             && super::fst_storage::fst_exists(dir) {
                 let fst = super::fst_storage::load_fst::<T>(dir)?;
-                let fieldnorm_codes: FxHashMap<PointId, u8> = fst.doc_lengths
-                    .iter()
-                    .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
-                    .collect();
-                let avg = if fst.total_docs == 0 { 0.0 }
-                    else { fst.total_length as f32 / fst.total_docs as f32 };
-                let lut = super::fieldnorm::FieldNormLut::build(fst.params.b, avg);
+                let (fieldnorm_codes, lut) = Self::build_fieldnorm(
+                    &fst.doc_lengths, &fst.params, fst.total_length, fst.total_docs);
                 return Ok(Self {
                     tokenizer: fst.tokenizer,
                     storage: TermStorage::Fst {
@@ -466,10 +476,6 @@ impl<T: Tokenizer> Bm25Index<T> {
     }
 
     /// Load index in mutable (HashMap) mode from bincode format.
-    ///
-    /// Use this instead of `load()` when you need to mutate the index
-    /// (e.g. `add_document` / `remove_document`, then `save`).
-    /// `load()` may return a read-only FST index that silently ignores mutations.
     pub fn load_mutable(path: impl AsRef<Path>) -> Result<Self, VhnswError> {
         use std::io::Read;
 
@@ -484,14 +490,8 @@ impl<T: Tokenizer> Bm25Index<T> {
 
         let doc_lengths: HashMap<PointId, u32> = data.doc_lengths.into_iter().collect();
         let max_doc_id = doc_lengths.keys().max().copied().unwrap_or(0);
-
-        let fieldnorm_codes: FxHashMap<PointId, u8> = doc_lengths
-            .iter()
-            .map(|(&id, &len)| (id, super::fieldnorm::encode(len)))
-            .collect();
-        let avg = if data.total_docs == 0 { 0.0 }
-            else { data.total_length as f32 / data.total_docs as f32 };
-        let lut = super::fieldnorm::FieldNormLut::build(data.params.b, avg);
+        let (fieldnorm_codes, lut) = Self::build_fieldnorm(
+            &doc_lengths, &data.params, data.total_length, data.total_docs);
 
         Ok(Self {
             tokenizer: data.tokenizer,

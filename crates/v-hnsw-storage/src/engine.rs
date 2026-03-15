@@ -209,11 +209,7 @@ impl StorageEngine {
         self.payloads.buffer_text(id, text_owned);
 
         self.ops_since_checkpoint += 1;
-
-        // Auto-checkpoint if threshold reached
-        if self.ops_since_checkpoint >= self.config.checkpoint_threshold {
-            self.checkpoint()?;
-        }
+        self.maybe_checkpoint()?;
 
         Ok(())
     }
@@ -261,11 +257,7 @@ impl StorageEngine {
         }
 
         self.ops_since_checkpoint += batch.len();
-
-        // Auto-checkpoint once per batch
-        if self.ops_since_checkpoint >= self.config.checkpoint_threshold {
-            self.checkpoint()?;
-        }
+        self.maybe_checkpoint()?;
 
         Ok(())
     }
@@ -282,11 +274,7 @@ impl StorageEngine {
         self.payloads.mark_removed(id);
 
         self.ops_since_checkpoint += 1;
-
-        // Auto-checkpoint if threshold reached
-        if self.ops_since_checkpoint >= self.config.checkpoint_threshold {
-            self.checkpoint()?;
-        }
+        self.maybe_checkpoint()?;
 
         Ok(())
     }
@@ -333,11 +321,7 @@ impl StorageEngine {
         self.wal.append(&WalRecord::BatchEnd { batch_id })?;
 
         self.ops_since_checkpoint += old_count + new_count + 2; // +2 for batch markers
-
-        // Auto-checkpoint if threshold reached
-        if self.ops_since_checkpoint >= self.config.checkpoint_threshold {
-            self.checkpoint()?;
-        }
+        self.maybe_checkpoint()?;
 
         Ok(())
     }
@@ -383,6 +367,14 @@ impl StorageEngine {
     /// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
         self.vectors.len() == 0
+    }
+
+    /// Auto-checkpoint if ops threshold reached.
+    fn maybe_checkpoint(&mut self) -> Result<()> {
+        if self.ops_since_checkpoint >= self.config.checkpoint_threshold {
+            self.checkpoint()?;
+        }
+        Ok(())
     }
 
     // --- Private methods ---

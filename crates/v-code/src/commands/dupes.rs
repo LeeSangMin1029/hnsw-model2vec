@@ -271,10 +271,7 @@ fn label(pstore: &impl PayloadStore, id: u64) -> String {
 // ── Path alias helpers ───────────────────────────────────────────────────
 
 use v_code_intel::helpers::{apply_alias, build_path_aliases};
-
-fn normalize_path(p: &str) -> String {
-    p.replace('\\', "/")
-}
+use v_code_intel::parse::normalize_path;
 
 fn print_legend(legend: &[(String, String)]) {
     if !legend.is_empty() {
