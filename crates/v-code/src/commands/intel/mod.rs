@@ -50,8 +50,8 @@ pub fn load_or_build_graph(
 }
 
 fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::CallGraph> {
-    // Ensure daemon is running with current binary version.
-    if !v_daemon::ensure_daemon(db) {
+    // Only use daemon if already running — never block waiting for it to start.
+    if !v_daemon::is_running() {
         return None;
     }
 
@@ -71,7 +71,8 @@ fn daemon_try_graph_build(db: &std::path::Path) -> Option<v_code_intel::graph::C
 }
 
 fn daemon_spawn_and_wait(db: &std::path::Path) {
-    v_daemon::spawn_daemon_and_wait(db);
+    // Non-blocking: spawn daemon in background for next invocation.
+    v_daemon::spawn_daemon(db);
 }
 
 pub use v_code_intel::parse::CodeChunk;

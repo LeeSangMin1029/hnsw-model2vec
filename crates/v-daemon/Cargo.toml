@@ -17,7 +17,7 @@ v-code-intel.workspace = true
 v-hnsw-core.workspace = true
 v-hnsw-embed.workspace = true
 v-hnsw-graph.workspace = true
-v-hnsw-search.workspace = true
+v-hnsw-search = { workspace = true, features = ["korean"] }
 v-hnsw-storage.workspace = true
 
 # CLI
@@ -39,6 +39,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Signal handling
 ctrlc = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
 
 [lints]
 workspace = true

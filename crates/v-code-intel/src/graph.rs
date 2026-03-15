@@ -90,6 +90,11 @@ impl ChunkMeta {
             let lower = c.name.to_lowercase();
 
             exact.insert(lower.clone(), idx);
+            // Also insert generic-stripped alias: "foo<t>::bar" → "foo::bar"
+            let stripped = strip_generics_from_key(&lower);
+            if stripped != lower {
+                exact.entry(stripped).or_insert(idx);
+            }
             if let Some(s) = c.name.rsplit("::").next() {
                 short.entry(s.to_lowercase()).or_insert(idx);
             }
@@ -161,12 +166,26 @@ impl CallGraph {
         let meta = ChunkMeta::collect(chunks);
         let mut adj = AdjState::new(chunks.len());
 
+        // Pre-collect owner struct/impl type_refs for self.field.method resolution.
+        let owner_types = collect_owner_types(chunks, &meta);
+
         for (src, c) in chunks.iter().enumerate() {
             let imports = build_import_map(&c.imports);
             let self_type = owning_type(&c.name);
             let call_types = extract_call_types(&c.calls);
+            // Merge owner's type_refs for self.field.method resolution.
+            let mut enriched_types = c.types.clone();
+            if let Some(ref owner) = self_type {
+                if let Some(extra) = owner_types.get(owner.as_str()) {
+                    for t in extra {
+                        if !enriched_types.contains(t) {
+                            enriched_types.push(t.clone());
+                        }
+                    }
+                }
+            }
             for (call_idx, call) in c.calls.iter().enumerate() {
-                if let Some(tgt) = resolve_with_imports(call, &meta.exact, &meta.short, &imports, self_type.as_deref(), &c.types, &call_types) {
+                if let Some(tgt) = resolve_with_imports(call, &meta.exact, &meta.short, &imports, self_type.as_deref(), &enriched_types, &call_types) {
                     let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
                     adj.add_edge(src, tgt, call_line);
                 }
@@ -198,6 +217,7 @@ impl CallGraph {
         }
 
         let mut adj = AdjState::new(len);
+        let owner_types = collect_owner_types(chunks, &meta);
 
         // Build chunk-index → resolved callee list lookup.
         let resolved_for_chunk: Vec<Option<Vec<String>>> = {
@@ -253,6 +273,16 @@ impl CallGraph {
             let imports = build_import_map(&c.imports);
             let self_type = owning_type(&c.name);
             let call_types = extract_call_types(&c.calls);
+            let mut enriched_types = c.types.clone();
+            if let Some(ref owner) = self_type {
+                if let Some(extra) = owner_types.get(owner.as_str()) {
+                    for t in extra {
+                        if !enriched_types.contains(t) {
+                            enriched_types.push(t.clone());
+                        }
+                    }
+                }
+            }
             for (call_idx, call) in c.calls.iter().enumerate() {
                 let call_short = call.to_lowercase();
                 let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
@@ -261,7 +291,7 @@ impl CallGraph {
                 }
                 if let Some(tgt) = resolve_with_imports(
                     call, &exact_single, &meta.short, &imports,
-                    self_type.as_deref(), &c.types, &call_types,
+                    self_type.as_deref(), &enriched_types, &call_types,
                 ) {
                     let call_line = c.call_lines.get(call_idx).copied().unwrap_or(0);
                     adj.add_edge(src, tgt, call_line);
@@ -425,6 +455,8 @@ fn is_common_method(method: &str) -> bool {
             | "contains" | "remove" | "map" | "filter" | "collect"
             | "unwrap" | "join" | "split" | "trim" | "parse"
             | "display" | "fmt" | "write" | "read" | "flush"
+            | "search" | "open" | "close" | "load" | "save"
+            | "send" | "recv" | "next" | "run" | "start" | "stop"
     )
 }
 
@@ -445,13 +477,37 @@ fn resolve_with_imports(
     }
 
     // 2. self.method → OwningType::method.
+    //    self.field.method → try field name as type hint against source_types.
     if let Some(method) = lower.strip_prefix("self.") {
-        // Strip chained field access: self.foo.bar.method → method (last segment)
         let leaf_method = method.rsplit_once('.').map_or(method, |p| p.1);
+        // 2a. Try owning type first.
         if let Some(owner) = self_type {
             let qualified = format!("{owner}::{leaf_method}");
             if let Some(&idx) = exact.get(&qualified) {
                 return Some(idx);
+            }
+        }
+        // 2b. self.field.method → match field name against type_refs to infer type.
+        //     e.g. self.sparse_index.search → field "sparse_index", type "Bm25Index"
+        if let Some((field_path, _)) = method.rsplit_once('.') {
+            let field_leaf = field_path.rsplit_once('.').map_or(field_path, |p| p.1);
+            for ty in source_types.iter().chain(call_types.iter()) {
+                // Heuristic: field name contains type name (sparse_index ~ Bm25Index)
+                // or type name contains field name fragment
+                let ty_lower = ty.to_lowercase();
+                let candidate = format!("{ty_lower}::{leaf_method}");
+                if let Some(&idx) = exact.get(&candidate) {
+                    return Some(idx);
+                }
+                // Also try: field name as-is matches a short type name
+                let _ = field_leaf; // used below
+            }
+            // Try field_leaf directly as a type name
+            if let Some(qualified) = imports.get(field_leaf) {
+                let candidate = format!("{qualified}::{leaf_method}");
+                if let Some(&idx) = exact.get(&candidate) {
+                    return Some(idx);
+                }
             }
         }
     }
@@ -547,6 +603,33 @@ fn resolve_type_ref_edges(
     }
 }
 
+/// Collect type_refs from struct/impl chunks keyed by owning type name (lowercase).
+///
+/// For `impl SimpleHybridSearcher<D, T>` with type_refs `[Bm25Index, HnswGraph, ...]`,
+/// produces `{"simplehybridsearcher": ["Bm25Index", "HnswGraph", ...]}`.
+/// Methods of that type can then use these types to resolve `self.field.method()` calls.
+fn collect_owner_types(chunks: &[CodeChunk], _meta: &ChunkMeta) -> BTreeMap<String, Vec<String>> {
+    let mut result: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for c in chunks {
+        if !matches!(c.kind.as_str(), "struct" | "impl") {
+            continue;
+        }
+        // owning_type uses lowercase leaf before generic params
+        // e.g. "SimpleHybridSearcher<D, T>" → key should match owning_type output
+        let lower = c.name.to_lowercase();
+        let leaf = lower.rsplit("::").next().unwrap_or(&lower);
+        // Strip generic params for the key: "simplehybridsearcher<d, t>" → "simplehybridsearcher"
+        let key = leaf.split('<').next().unwrap_or(leaf);
+        let entry = result.entry(key.to_owned()).or_default();
+        for ty in &c.types {
+            if !entry.contains(ty) {
+                entry.push(ty.clone());
+            }
+        }
+    }
+    result
+}
+
 /// Extract type names from `::` call prefixes.
 ///
 /// E.g. `["DeltaNeighbors::from_ids", "Vec::new"]` → `["deltaneighbors", "vec"]`.
@@ -566,11 +649,29 @@ fn extract_call_types(calls: &[String]) -> Vec<String> {
 }
 
 /// Extract the owning type from a chunk name like "Foo::bar" → "foo".
+/// Strips generic parameters: "Foo<T>::bar" → "foo".
+/// Strip generic params from each `::` segment of a key.
+/// `"foo<t>::bar"` → `"foo::bar"`, `"foo<d, t>::search_ext"` → `"foo::search_ext"`.
+fn strip_generics_from_key(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut depth = 0u32;
+    for ch in key.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => { depth = depth.saturating_sub(1); }
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn owning_type(name: &str) -> Option<String> {
     let (prefix, _) = name.rsplit_once("::")?;
-    // Take the last segment for nested paths: "mod::Foo::bar" → "Foo"
     let leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
-    Some(leaf.to_lowercase())
+    // Strip generic params: "Foo<T>" → "Foo"
+    let stripped = leaf.split('<').next().unwrap_or(leaf);
+    Some(stripped.to_lowercase())
 }
 
 /// Parse `use` declarations into a short_name → qualified_path map.

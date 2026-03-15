@@ -164,8 +164,6 @@ pub struct DaemonState {
 
 impl DaemonState {
     pub fn new(initial_db: Option<&Path>) -> Result<Self> {
-        ensure_korean_dict()?;
-
         let mut state = Self {
             model: None,
             model_name: None,
@@ -176,11 +174,21 @@ impl DaemonState {
             lsp_servers: HashMap::new(),
         };
 
+        // Store the initial DB path but don't load it yet.
+        // Indexes are loaded lazily on first request (ensure_db).
         if let Some(db_path) = initial_db {
-            state.ensure_db(db_path)?;
+            if let Ok(key) = db_path.canonicalize() {
+                let config = DbConfig::load(&key).ok();
+                if let Some(ref c) = config {
+                    if let Some(ref name) = c.embed_model {
+                        state.model_name = Some(name.clone());
+                        state.model_dim = Some(c.dim);
+                    }
+                }
+            }
         }
 
-        eprintln!("[daemon] Model deferred (loads on first query)");
+        eprintln!("[daemon] Idle — indexes load on first request");
         Ok(state)
     }
 
@@ -379,6 +387,9 @@ fn load_sparse(db_path: &Path, code: bool) -> Result<SparseIndex> {
     let fst_path = db_path.join("bm25_terms.fst");
 
     if snap_path.exists() && fst_path.exists() && !is_newer(&bin_path, &snap_path) {
+        if !code {
+            ensure_korean_dict()?;
+        }
         let snap = Bm25Snapshot::open(db_path).context("Failed to open BM25 snapshot")?;
         eprintln!("[daemon] BM25 snapshot loaded: {} docs (mmap, code={})", snap.total_docs(), code);
         return Ok(SparseIndex::Snapshot(snap, code));
@@ -388,6 +399,7 @@ fn load_sparse(db_path: &Path, code: bool) -> Result<SparseIndex> {
         eprintln!("[daemon] BM25 heap loaded (code)");
         Ok(SparseIndex::HeapCode(bm25))
     } else {
+        ensure_korean_dict()?;
         let bm25: Bm25Index<KoreanBm25Tokenizer> = Bm25Index::load(&bin_path).context("Failed to load BM25 index")?;
         eprintln!("[daemon] BM25 heap loaded (document)");
         Ok(SparseIndex::HeapDoc(bm25))

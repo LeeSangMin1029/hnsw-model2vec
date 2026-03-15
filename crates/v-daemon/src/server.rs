@@ -43,6 +43,12 @@ pub fn run(
     // Keep `_lock_file` alive so the lock persists until shutdown.
     let _lock_file = lock_file;
 
+    // On Windows, create a Job Object so that all child processes (rust-analyzer,
+    // proc-macro-server) are automatically killed when the daemon exits — even
+    // on crashes where Drop destructors don't run.
+    #[cfg(windows)]
+    let _job = setup_job_object();
+
     let initial = db_path
         .as_deref()
         .map(|p| p.canonicalize())
@@ -195,4 +201,70 @@ fn spawn_background(db_path: Option<&Path>, port: u16, timeout_secs: u64) -> Res
     cmd.spawn().context("Failed to spawn background daemon")?;
     std::thread::sleep(Duration::from_millis(500));
     Ok(())
+}
+
+// ── Job Object (Windows) ────────────────────────────────────────────
+
+/// Create a Windows Job Object with `KILL_ON_JOB_CLOSE` and assign the
+/// current process to it. When the daemon exits (including crashes), the
+/// OS automatically terminates all child processes (rust-analyzer, etc.).
+///
+/// Returns the job handle wrapped in a struct that closes it on drop.
+/// If Job Object creation fails, returns `None` — the daemon still runs,
+/// just without automatic child cleanup.
+#[cfg(windows)]
+fn setup_job_object() -> Option<JobObjectGuard> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            eprintln!("[daemon] Failed to create Job Object");
+            return None;
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok == 0 {
+            eprintln!("[daemon] Failed to set Job Object limits");
+            CloseHandle(job);
+            return None;
+        }
+
+        // Assign current process to the job.
+        let current = windows_sys::Win32::System::Threading::GetCurrentProcess();
+        let ok = AssignProcessToJobObject(job, current);
+        if ok == 0 {
+            eprintln!("[daemon] Failed to assign process to Job Object");
+            CloseHandle(job);
+            return None;
+        }
+
+        eprintln!("[daemon] Job Object active — child processes will auto-terminate on exit");
+        Some(JobObjectGuard(job))
+    }
+}
+
+#[cfg(windows)]
+struct JobObjectGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for JobObjectGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
 }
