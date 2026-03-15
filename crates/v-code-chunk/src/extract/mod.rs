@@ -11,6 +11,10 @@ pub mod common;
 pub mod lang;
 pub mod chunk;
 
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
+
 /// Result of parsing source code with tree-sitter.
 pub struct ParsedSource {
     /// The parsed syntax tree.

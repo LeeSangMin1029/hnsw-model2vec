@@ -219,7 +219,7 @@ fn extract_field_receiver(node: tree_sitter::Node, src: &[u8]) -> Option<String>
 /// Returns `true` for callee names that are enum variants, smart-pointer
 /// constructors, error-handling chain methods, or other wrappers that don't
 /// represent meaningful call sites for string-argument tracking.
-fn is_noise_callee(name: &str) -> bool {
+pub(crate) fn is_noise_callee(name: &str) -> bool {
     matches!(
         name,
         // Enum variants & wrappers
@@ -339,7 +339,7 @@ fn collect_bindings_recursive(
 /// Handles `string_literal`, `string`, `interpreted_string_literal`,
 /// `raw_string_literal`, and `template_string` / `string_content` variants.
 /// Returns `None` if the node is not a recognized string type.
-fn extract_string_value(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub(crate) fn extract_string_value(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
     match node.kind() {
         "string_literal" | "string" | "interpreted_string_literal"
         | "raw_string_literal" | "string_value" => {
@@ -353,7 +353,7 @@ fn extract_string_value(node: &tree_sitter::Node, src: &[u8]) -> Option<String> 
 /// Strip surrounding quotes from a string literal.
 ///
 /// Handles `"..."`, `'...'`, `` `...` ``, `r"..."`, `r#"..."#` etc.
-fn strip_string_quotes(s: &str) -> String {
+pub(crate) fn strip_string_quotes(s: &str) -> String {
     // Raw strings: r"...", r#"..."#
     if let Some(rest) = s.strip_prefix('r') {
         let hashes = rest.chars().take_while(|&c| c == '#').count();
