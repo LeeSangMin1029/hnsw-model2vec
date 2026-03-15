@@ -59,7 +59,14 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
             .unwrap_or(rest);
         stripped.to_owned()
     } else {
-        rest.split_whitespace().last().unwrap_or(rest).to_owned()
+        // Strip optional visibility prefix, then take everything as the name.
+        // Cannot split by whitespace because generic names contain spaces
+        // (e.g. "SimpleHybridSearcher<D, T>::search_ext").
+        let stripped = rest.strip_prefix("pub(crate) ")
+            .or_else(|| rest.strip_prefix("pub "))
+            .or_else(|| rest.strip_prefix("export "))
+            .unwrap_or(rest);
+        stripped.to_owned()
     };
 
     let mut file = String::new();

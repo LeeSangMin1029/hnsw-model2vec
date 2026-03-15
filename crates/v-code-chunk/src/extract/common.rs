@@ -87,8 +87,7 @@ pub fn walk_for_calls_with_lines(
     let call_name = match node.kind() {
         "call_expression" | "call" => {
             node.child_by_field_name("function")
-                .and_then(|f| f.utf8_text(src).ok())
-                .map(|t| t.to_owned())
+                .and_then(|f| extract_callee_name(f, src))
         }
         "method_invocation" => {
             node.child_by_field_name("name").and_then(|n| {
@@ -161,35 +160,52 @@ pub fn walk_for_string_args(node: &tree_sitter::Node, src: &[u8]) -> Vec<StringA
 fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> Option<String> {
     match func_node.kind() {
         "field_expression" => {
-            // `receiver.method` — extract just the method name
             let field = func_node.child_by_field_name("field")?;
             let method = field.utf8_text(src).ok()?;
-            // Try to get a short receiver name (e.g. `self`, a variable, or a type)
-            // For chained calls like `a(x).b(y)`, receiver is a call_expression — skip it
             if let Some(value) = func_node.child_by_field_name("value") {
                 match value.kind() {
-                    // Simple receiver: self.method, var.method
                     "identifier" | "self" => {
                         let recv = value.utf8_text(src).ok()?;
                         return Some(format!("{recv}.{method}"));
                     }
-                    // Type::method via scoped identifier won't hit field_expression,
-                    // but SomeStruct.field patterns can
+                    // self.field.method → "self.field.method"
+                    "field_expression" => {
+                        if let Some(recv) = extract_field_receiver(value, src) {
+                            return Some(format!("{recv}.{method}"));
+                        }
+                    }
+                    // chained call: a(x).b(y) → receiver is call_expression, just return method
                     _ => {}
                 }
             }
             Some(method.to_owned())
         }
-        // identifier, scoped_identifier (Foo::bar), generic_function (foo::<T>)
         _ => {
             let text = func_node.utf8_text(src).ok()?;
-            // Sanity check: if text contains parens, it's a nested call expression
-            // that shouldn't be treated as a callee name
             if text.contains('(') {
                 return None;
             }
             Some(text.to_owned())
         }
+    }
+}
+
+/// Extract receiver path from nested field expressions: `self.foo.bar` → "self.foo.bar"
+/// Stops at call expressions or other complex nodes.
+fn extract_field_receiver(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let field = node.child_by_field_name("field")?;
+    let field_name = field.utf8_text(src).ok()?;
+    let value = node.child_by_field_name("value")?;
+    match value.kind() {
+        "identifier" | "self" => {
+            let recv = value.utf8_text(src).ok()?;
+            Some(format!("{recv}.{field_name}"))
+        }
+        "field_expression" => {
+            let inner = extract_field_receiver(value, src)?;
+            Some(format!("{inner}.{field_name}"))
+        }
+        _ => None,
     }
 }
 

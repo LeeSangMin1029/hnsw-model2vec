@@ -415,6 +415,19 @@ fn graph_cache_path(db: &Path) -> std::path::PathBuf {
 /// 5. Type-reference heuristic: `var.method` where source chunk references
 ///    a type that has `::method` → resolve to that type's method
 /// 6. Short name fallback for `::` calls; receiver-type gated for `.` calls
+/// Methods too common/ambiguous for unknown-receiver fallback resolution.
+fn is_common_method(method: &str) -> bool {
+    matches!(
+        method,
+        "new" | "default" | "from" | "into" | "clone" | "to_owned"
+            | "to_string" | "as_ref" | "as_mut" | "iter" | "len"
+            | "is_empty" | "push" | "pop" | "insert" | "get"
+            | "contains" | "remove" | "map" | "filter" | "collect"
+            | "unwrap" | "join" | "split" | "trim" | "parse"
+            | "display" | "fmt" | "write" | "read" | "flush"
+    )
+}
+
 fn resolve_with_imports(
     call: &str,
     exact: &BTreeMap<String, u32>,
@@ -483,6 +496,11 @@ fn resolve_with_imports(
     if let Some((receiver, method)) = lower.rsplit_once('.') {
         let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
         if imports.contains_key(receiver_leaf) || exact.contains_key(receiver_leaf) {
+            return short.get(method).copied();
+        }
+        // 6b. Unknown receiver fallback: try short match if method name is
+        // sufficiently specific (not a common trait/stdlib method).
+        if !is_common_method(method) {
             return short.get(method).copied();
         }
         return None;

@@ -101,7 +101,11 @@ fn print_trait_impls_if_relevant(db: &std::path::Path, name: Option<&str>) -> Re
         Some(n) => n,
         None => return Ok(()),
     };
-    let graph = load_or_build_graph(db, None)?;
+    // Use cached graph only — don't trigger a full build just for trait impls.
+    let graph = match graph::CallGraph::load(db) {
+        Some(g) => g,
+        None => return Ok(()),
+    };
     let indices = graph.resolve(name);
     for idx in indices {
         let i = idx as usize;
