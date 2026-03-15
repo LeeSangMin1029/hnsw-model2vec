@@ -164,7 +164,7 @@ pub fn walk_for_string_args(node: &tree_sitter::Node, src: &[u8]) -> Vec<StringA
 /// the text directly. For `field_expression` nodes (method chains like
 /// `a(x).b`), returns only the method name (e.g. `b`) since the receiver is
 /// a separate call that gets walked independently.
-fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> Option<String> {
     match func_node.kind() {
         "field_expression" => {
             let field = func_node.child_by_field_name("field")?;
@@ -199,7 +199,7 @@ fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> Option<Strin
 
 /// Extract receiver path from nested field expressions: `self.foo.bar` → "self.foo.bar"
 /// Stops at call expressions or other complex nodes.
-fn extract_field_receiver(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+pub(crate) fn extract_field_receiver(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
     let field = node.child_by_field_name("field")?;
     let field_name = field.utf8_text(src).ok()?;
     let value = node.child_by_field_name("value")?;
@@ -557,7 +557,7 @@ pub fn walk_for_param_flows(node: &tree_sitter::Node, src: &[u8]) -> Vec<ParamFl
 }
 
 /// Collect parameter names and their 0-based positions from a function node.
-fn collect_param_names(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, u8)> {
+pub(crate) fn collect_param_names(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, u8)> {
     let Some(params_node) = node.child_by_field_name("parameters") else {
         return Vec::new();
     };
@@ -579,7 +579,7 @@ fn collect_param_names(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, u8)
     result
 }
 
-fn walk_param_flows_inner(
+pub(crate) fn walk_param_flows_inner(
     node: &tree_sitter::Node,
     src: &[u8],
     params: &[(String, u8)],
