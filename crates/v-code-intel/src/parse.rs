@@ -130,6 +130,7 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
                 let token = token.trim();
                 if let Some(paren) = token.find('(')
                     && let Some(end) = token.rfind(')')
+                    && paren < end
                 {
                     let callee = token[..paren].to_owned();
                     let inner = &token[paren + 1..end];

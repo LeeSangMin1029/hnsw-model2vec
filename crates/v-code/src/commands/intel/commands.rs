@@ -164,6 +164,7 @@ pub fn run_context(
     symbol: String,
     depth: u32,
     format: OutputFormat,
+    source: bool,
 ) -> Result<()> {
     use v_code_intel::context_cmd;
 
@@ -214,7 +215,7 @@ pub fn run_context(
         if ext_count > 0 { format!(", {} extern", ext_count) } else { String::new() },
     );
     println!("=== context: {symbol} ({counts}) ===\n");
-    print_file_grouped(&graph, &entries);
+    print_file_grouped(&graph, &entries, source);
 
     // Show unresolved/external calls if any.
     if !result.unresolved_calls.is_empty() {
@@ -330,7 +331,7 @@ pub fn run_blast(
 
     println!("=== blast: {symbol} ({} affected, {} prod, {} test) ===\n",
         summary.total_affected, summary.prod_count, summary.test_count);
-    print_file_grouped(&graph, &tagged);
+    print_file_grouped(&graph, &tagged, false);
 
     Ok(())
 }
@@ -624,7 +625,7 @@ struct TaggedEntry {
 /// [A] = crates/v-hnsw-search/src/bm25/
 /// [B] = crates/v-hnsw-search/src/bm25/
 /// ```
-fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry]) {
+fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry], show_source: bool) {
     use std::collections::BTreeMap;
     use v_code_intel::helpers::{apply_alias, build_path_aliases};
 
@@ -667,6 +668,11 @@ fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry]) {
                     println!("    {s}");
                 }
             }
+            if show_source && (e.tag == "def" || e.sig) {
+                if let Some((start, end)) = graph.lines[i] {
+                    print_source_lines(&graph.files[i], start, end);
+                }
+            }
         }
         println!();
     }
@@ -676,6 +682,24 @@ fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry]) {
             println!("{alias} = {dir}");
         }
     }
+}
+
+/// Read and print source lines from a file.
+fn print_source_lines(file_path: &str, start: usize, end: usize) {
+    let Ok(content) = std::fs::read_to_string(file_path) else {
+        return;
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = start.saturating_sub(1); // 1-based → 0-based
+    let end = end.min(lines.len());
+    if start >= end {
+        return;
+    }
+    println!("    ```");
+    for (i, line) in lines[start..end].iter().enumerate() {
+        println!("    {:>4}│ {line}", start + i + 1);
+    }
+    println!("    ```");
 }
 
 fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
@@ -796,7 +820,7 @@ pub fn run_untested(
             call_line: 0,
         })
         .collect();
-    print_file_grouped(&graph, &tagged);
+    print_file_grouped(&graph, &tagged, false);
 
     Ok(())
 }

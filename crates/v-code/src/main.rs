@@ -40,8 +40,8 @@ fn run() -> anyhow::Result<()> {
         Commands::Symbols { db, name, kind, format, include_tests, limit, compact } => {
             intel::run_symbols(db, name, kind, format, include_tests, limit, compact || env_compact())
         }
-        Commands::Context { db, symbol, depth, format } => {
-            intel::run_context(db, symbol, depth, format)
+        Commands::Context { db, symbol, depth, format, source } => {
+            intel::run_context(db, symbol, depth, format, source)
         }
         Commands::Deps { db, file, format, depth } => {
             intel::deps::run_deps(db, file, format, depth)

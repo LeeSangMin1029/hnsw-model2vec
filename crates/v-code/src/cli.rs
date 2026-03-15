@@ -54,6 +54,9 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+        /// Include source code inline for each entry.
+        #[arg(long, short = 's')]
+        source: bool,
     },
     /// Show file-level dependency graph from code chunks.
     Deps {
