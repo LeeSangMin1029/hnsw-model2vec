@@ -335,6 +335,29 @@ impl<T: Clone> MyTrait for Vec<T> {
 }
 "#;
 
+pub const SAMPLE_RUST_SELF_CALLS: &str = r#"
+struct Resolver {
+    count: i32,
+}
+
+impl Resolver {
+    fn helper(&self) -> i32 {
+        self.count + 1
+    }
+
+    fn do_work(&mut self) {
+        let x = self.helper();
+        println!("{}", x);
+    }
+
+    fn multiline_call(&mut self) {
+        let result = self
+            .helper();
+        after_call(result);
+    }
+}
+"#;
+
 pub const SAMPLE_RUST_SINGLE_LINE_FN: &str = r#"
 fn one_liner() { 42 }
 "#;

@@ -323,6 +323,42 @@ fn custom_fields_include_type_refs() {
     );
 }
 
+#[test]
+fn self_method_call_extracted() {
+    let config = CodeChunkConfig { min_lines: 1, extract_calls: true, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_SELF_CALLS);
+
+    let do_work = chunks.iter().find(|c| c.name.contains("do_work"))
+        .expect("should find do_work method");
+
+    assert!(
+        do_work.calls.iter().any(|c| c == "self.helper"),
+        "do_work should extract self.helper call, got: {:?}", do_work.calls
+    );
+}
+
+#[test]
+fn multiline_call_normalized() {
+    let config = CodeChunkConfig { min_lines: 1, extract_calls: true, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let chunks = chunker.chunk(super::fixtures::SAMPLE_RUST_SELF_CALLS);
+
+    let mc = chunks.iter().find(|c| c.name.contains("multiline_call"))
+        .expect("should find multiline_call method");
+
+    // "self\n            .helper()" should be normalized to "self.helper"
+    assert!(
+        mc.calls.iter().any(|c| c == "self.helper"),
+        "multiline self.helper should be normalized, got: {:?}", mc.calls
+    );
+    // after_call should also be extracted (not lost due to multiline)
+    assert!(
+        mc.calls.iter().any(|c| c == "after_call"),
+        "after_call should not be lost after multiline call, got: {:?}", mc.calls
+    );
+}
+
 // ── Edge case tests ─────────────────────────────────────────────────
 
 #[test]

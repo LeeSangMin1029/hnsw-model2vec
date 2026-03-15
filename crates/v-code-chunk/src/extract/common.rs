@@ -106,6 +106,13 @@ pub fn walk_for_calls_with_lines(
     };
 
     if let Some(name) = call_name {
+        // Normalize multiline call expressions: collapse whitespace to single space
+        // e.g. "self\n            .request" → "self.request"
+        let name = if name.contains('\n') {
+            name.split_whitespace().collect::<Vec<_>>().join("")
+        } else {
+            name
+        };
         lines.push(node.start_position().row as u32);
         calls.push(name);
     }

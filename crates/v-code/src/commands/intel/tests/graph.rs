@@ -121,6 +121,33 @@ fn resolve_no_match() {
     assert!(results.is_empty());
 }
 
+// ── self.method() resolution ─────────────────────────────────────────
+
+#[test]
+fn build_resolves_self_method_calls() {
+    let chunks = vec![
+        chunk("Resolver::helper", "src/lsp.rs", &[]),
+        chunk("Resolver::do_work", "src/lsp.rs", &["self.helper"]),
+    ];
+    let graph = CallGraph::build(&chunks);
+
+    // self.helper → Resolver::helper (owning type from chunk name)
+    assert_eq!(graph.callees[1], vec![0], "self.helper should resolve to Resolver::helper");
+    assert_eq!(graph.callers[0], vec![1], "Resolver::helper should have do_work as caller");
+}
+
+#[test]
+fn build_resolves_chained_self_method() {
+    let chunks = vec![
+        chunk("Foo::bar", "src/foo.rs", &[]),
+        chunk("Foo::run", "src/foo.rs", &["self.config.bar"]),
+    ];
+    let graph = CallGraph::build(&chunks);
+
+    // self.config.bar → Foo::bar (last segment after stripping self.)
+    assert_eq!(graph.callees[1], vec![0], "self.config.bar should resolve to Foo::bar");
+}
+
 // ── is_test detection ────────────────────────────────────────────────
 
 #[test]
