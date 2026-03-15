@@ -37,6 +37,9 @@ fs2.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# File watching
+notify = "7"
+
 # Signal handling
 ctrlc = "3"
 

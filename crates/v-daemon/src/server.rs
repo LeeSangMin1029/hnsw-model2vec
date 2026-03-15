@@ -10,6 +10,7 @@ use fs2::FileExt;
 
 use crate::interrupt::is_interrupted;
 use crate::state::DaemonState;
+use crate::watcher::FileWatcher;
 
 /// Run the daemon server.
 pub fn run(
@@ -82,6 +83,16 @@ pub fn run(
 
     let mut last_activity = Instant::now();
 
+    // Start file watcher for the project root (if a DB is configured).
+    let mut watcher = db_path
+        .as_deref()
+        .and_then(|db| {
+            let db_canon = db.canonicalize().ok()?;
+            let project_root = v_code_intel::lsp::find_project_root(&db_canon)?;
+            eprintln!("[daemon] Project root: {}", project_root.display());
+            FileWatcher::new(&[project_root], db_canon)
+        });
+
     loop {
         if is_interrupted() {
             eprintln!("\n[daemon] Received shutdown signal");
@@ -96,6 +107,21 @@ pub fn run(
         state.maybe_unload_model();
         state.maybe_evict_databases();
         state.maybe_evict_lsp();
+
+        // Poll file watcher for source changes → invalidate graph cache.
+        if let Some(ref mut w) = watcher {
+            let changed = w.poll_changes();
+            if !changed.is_empty() {
+                eprintln!(
+                    "[watcher] {} file(s) changed, invalidating graph cache",
+                    changed.len(),
+                );
+                for f in &changed {
+                    tracing::debug!(file = %f.display(), "source file changed");
+                }
+                w.invalidate_graph_cache();
+            }
+        }
 
         match listener.accept() {
             Ok((stream, addr)) => {

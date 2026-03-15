@@ -10,6 +10,7 @@ pub mod handler;
 pub mod interrupt;
 pub mod server;
 pub mod state;
+pub mod watcher;
 
 // Re-export client functions for backward compatibility.
 pub use client::*;
