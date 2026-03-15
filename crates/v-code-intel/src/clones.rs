@@ -476,20 +476,12 @@ fn chunk_contains(
 
 // ── Shared helpers ───────────────────────────────────────────────────────
 
-/// Payload-based test detection — mirrors `graph::is_test_chunk` criteria.
+/// Payload-based test detection — uses shared `is_test_path` + text-level check.
 fn is_test_chunk(pstore: &impl PayloadStore, id: u64) -> bool {
     let Some(payload) = pstore.get_payload(id).ok().flatten() else {
         return false;
     };
-    let src = &payload.source;
-    if src.contains("/tests/")
-        || src.contains("\\tests\\")
-        || src.contains("/test/")
-        || src.contains("\\test\\")
-        || src.ends_with("_test.rs")
-        || src.ends_with("_test.go")
-        || src.contains("/test_")
-    {
+    if crate::graph::is_test_path(&payload.source) {
         return true;
     }
     if let Ok(Some(text)) = pstore.get_text(id) {

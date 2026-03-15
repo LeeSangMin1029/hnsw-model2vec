@@ -194,40 +194,35 @@ pub fn run_context(
     Ok(())
 }
 
+/// Build a JSON object for a graph node, optionally including depth/signature.
+fn node_json(graph: &graph::CallGraph, idx: u32, depth: Option<u32>, sig: bool) -> serde_json::Value {
+    let i = idx as usize;
+    let mut obj = serde_json::json!({
+        "f": super::relative_path(&graph.files[i]),
+        "l": super::format_lines_str_opt(graph.lines[i]),
+        "k": &graph.kinds[i],
+        "n": &graph.names[i],
+        "t": graph.is_test[i],
+    });
+    if let Some(d) = depth {
+        obj["d"] = serde_json::json!(d);
+    }
+    if sig {
+        obj["sig"] = serde_json::json!(graph.signatures[i].as_deref().unwrap_or(""));
+    }
+    obj
+}
+
 fn build_context_json(
     graph: &graph::CallGraph,
     result: &v_code_intel::context_cmd::ContextResult,
 ) -> serde_json::Value {
-    let entry_json = |idx: u32| -> serde_json::Value {
-        let i = idx as usize;
-        serde_json::json!({
-            "f": super::relative_path(&graph.files[i]),
-            "l": super::format_lines_str_opt(graph.lines[i]),
-            "k": &graph.kinds[i],
-            "n": &graph.names[i],
-            "sig": graph.signatures[i].as_deref().unwrap_or(""),
-            "t": graph.is_test[i],
-        })
-    };
-
-    let bfs_entry_json = |idx: u32, depth: u32| -> serde_json::Value {
-        let i = idx as usize;
-        serde_json::json!({
-            "f": super::relative_path(&graph.files[i]),
-            "l": super::format_lines_str_opt(graph.lines[i]),
-            "k": &graph.kinds[i],
-            "n": &graph.names[i],
-            "d": depth,
-            "t": graph.is_test[i],
-        })
-    };
-
     serde_json::json!({
-        "definition": result.seeds.iter().map(|&idx| entry_json(idx)).collect::<Vec<_>>(),
-        "callers": result.callers.iter().map(|e| bfs_entry_json(e.idx, e.depth)).collect::<Vec<_>>(),
-        "callees": result.callees.iter().map(|e| bfs_entry_json(e.idx, e.depth)).collect::<Vec<_>>(),
-        "types": result.types.iter().map(|&idx| entry_json(idx)).collect::<Vec<_>>(),
-        "tests": result.tests.iter().map(|&idx| entry_json(idx)).collect::<Vec<_>>(),
+        "definition": result.seeds.iter().map(|&idx| node_json(graph, idx, None, true)).collect::<Vec<_>>(),
+        "callers": result.callers.iter().map(|e| node_json(graph, e.idx, Some(e.depth), false)).collect::<Vec<_>>(),
+        "callees": result.callees.iter().map(|e| node_json(graph, e.idx, Some(e.depth), false)).collect::<Vec<_>>(),
+        "types": result.types.iter().map(|&idx| node_json(graph, idx, None, false)).collect::<Vec<_>>(),
+        "tests": result.tests.iter().map(|&idx| node_json(graph, idx, None, false)).collect::<Vec<_>>(),
     })
 }
 
@@ -261,12 +256,7 @@ pub fn run_blast(
     }
 
     let graph = load_or_build_graph(&db, None)?;
-    let seeds = graph.resolve(&symbol);
-
-    if seeds.is_empty() {
-        println!("No symbol found matching \"{symbol}\".");
-        return Ok(());
-    }
+    let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
 
     let all_entries = impact::bfs_reverse(&graph, &seeds, depth);
     let summary = blast::summarize_blast(&graph, &all_entries);
@@ -312,18 +302,25 @@ pub fn run_jump(
     }
 
     let graph = load_or_build_graph(&db, None)?;
-    let seeds = graph.resolve(&symbol);
-
-    if seeds.is_empty() {
-        println!("No symbol found matching \"{symbol}\".");
-        return Ok(());
-    }
+    let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
 
     println!("=== Execution Flow: {symbol} ===\n");
     let tree = jump::build_flow_tree(&graph, &seeds, depth);
     print!("{}", jump::render_tree(&graph, &tree));
 
     Ok(())
+}
+
+/// Resolve a symbol name to graph indices, printing a message if not found.
+/// Returns `None` (and prints) when resolution yields no results.
+fn resolve_symbol(graph: &graph::CallGraph, symbol: &str) -> Option<Vec<u32>> {
+    let seeds = graph.resolve(symbol);
+    if seeds.is_empty() {
+        println!("No symbol found matching \"{symbol}\".");
+        None
+    } else {
+        Some(seeds)
+    }
 }
 
 fn filter_test_entries(entries: Vec<impact::BfsEntry>, include_tests: bool) -> Vec<impact::BfsEntry> {
@@ -356,17 +353,8 @@ pub fn run_trace(
     }
 
     let graph = load_or_build_graph(&db, None)?;
-    let sources = graph.resolve(&from);
-    let targets = graph.resolve(&to);
-
-    if sources.is_empty() {
-        println!("No symbol found matching \"{from}\".");
-        return Ok(());
-    }
-    if targets.is_empty() {
-        println!("No symbol found matching \"{to}\".");
-        return Ok(());
-    }
+    let Some(sources) = resolve_symbol(&graph, &from) else { return Ok(()) };
+    let Some(targets) = resolve_symbol(&graph, &to) else { return Ok(()) };
 
     match trace::bfs_shortest_path(&graph, &sources, &targets) {
         Some(path) => {

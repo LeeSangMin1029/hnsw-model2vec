@@ -103,11 +103,7 @@ pub fn code_chunk_to_record(
     let id = generate_id(source, chunk.chunk_index);
     let embed_text = chunk.to_embed_text(file_path_str, called_by);
 
-    let is_test = source.contains("/tests/")
-        || source.contains("\\tests\\")
-        || source.contains("/test/")
-        || source.contains("\\test\\")
-        || source.ends_with("_test.rs")
+    let is_test = v_code_intel::graph::is_test_path(source)
         || chunk.name.starts_with("test_");
 
     let mut tags = vec![

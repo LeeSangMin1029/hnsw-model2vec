@@ -557,11 +557,34 @@ fn build_import_map(imports: &[String]) -> BTreeMap<String, String> {
     map
 }
 
-/// Determine if a chunk is test code based on file path and name.
+/// Pick the best index from `indices` by matching module name against file path.
+/// Prefers `.rs` files; returns first file-match or `None`.
+fn disambiguate_by_module(
+    indices: &[u32],
+    mod_prefix: &str,
+    chunks: &[CodeChunk],
+) -> Option<u32> {
+    let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
+    let last_mod_no_us = last_mod.replace('_', "");
+    let mut fallback: Option<u32> = None;
+    for &idx in indices {
+        let file_lower = chunks[idx as usize].file.to_lowercase();
+        let file_no_us = file_lower.replace('_', "");
+        if file_lower.contains(last_mod) || file_no_us.contains(&last_mod_no_us) {
+            if file_lower.ends_with(".rs") {
+                return Some(idx);
+            }
+            if fallback.is_none() {
+                fallback = Some(idx);
+            }
+        }
+    }
+    fallback
+}
+
 /// Find the best chunk match for a resolved function name.
 ///
 /// Tries exact match first, then suffix match with module-to-file disambiguation.
-/// Returns `None` if no match found.
 fn find_best_chunk_match(
     fn_lower: &str,
     fn_module: Option<&str>,
@@ -573,84 +596,35 @@ fn find_best_chunk_match(
         if indices.len() == 1 {
             return Some(indices[0]);
         }
-        // Multiple chunks with same name — disambiguate by module/file.
-        // Prefer .rs files over non-Rust files.
-        if let Some(mod_prefix) = fn_module {
-            let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
-            let last_mod_no_us = last_mod.replace('_', "");
-            let mut fallback: Option<u32> = None;
-            for &idx in indices {
-                let file_lower = chunks[idx as usize].file.to_lowercase();
-                let file_no_us = file_lower.replace('_', "");
-                if file_lower.contains(last_mod) || file_no_us.contains(&last_mod_no_us) {
-                    if file_lower.ends_with(".rs") {
-                        return Some(idx);
-                    }
-                    if fallback.is_none() {
-                        fallback = Some(idx);
-                    }
-                }
-            }
-            if let Some(fb) = fallback {
-                return Some(fb);
-            }
+        if let Some(mod_prefix) = fn_module
+            && let Some(idx) = disambiguate_by_module(indices, mod_prefix, chunks) {
+            return Some(idx);
         }
         return Some(indices[0]);
     }
 
     // Suffix match: "graph::CallGraph::build" → chunk "CallGraph::build".
-    // Only match qualified chunk names (containing "::") to avoid bare method ambiguity.
-    // E.g., callee "HashMap::insert" must NOT match bare chunk "insert".
     let mut best: Option<u32> = None;
     for (chunk_name, indices) in exact {
-        if !chunk_name.contains("::") {
-            // Bare names require module-to-file disambiguation.
-            if let Some(mod_prefix) = fn_module {
-                let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
-                let last_mod_no_us = last_mod.replace('_', "");
-                if fn_lower.ends_with(chunk_name.as_str()) {
-                    let prefix_len = fn_lower.len() - chunk_name.len();
-                    if prefix_len == 0 || fn_lower.as_bytes()[prefix_len - 1] == b':' {
-                        // Prefer .rs files (Rust sources) over non-Rust files.
-                        let mut fallback: Option<u32> = None;
-                        for &idx in indices {
-                            let file_lower = chunks[idx as usize].file.to_lowercase();
-                            let file_no_us = file_lower.replace('_', "");
-                            if file_lower.contains(last_mod) || file_no_us.contains(&last_mod_no_us) {
-                                if file_lower.ends_with(".rs") {
-                                    return Some(idx);
-                                }
-                                if fallback.is_none() {
-                                    fallback = Some(idx);
-                                }
-                            }
-                        }
-                        if let Some(fb) = fallback {
-                            return Some(fb);
-                        }
-                    }
-                }
-            }
+        if !fn_lower.ends_with(chunk_name.as_str()) {
             continue;
         }
-        if fn_lower.ends_with(chunk_name.as_str()) {
-            let prefix_len = fn_lower.len() - chunk_name.len();
-            if prefix_len == 0 || fn_lower.as_bytes()[prefix_len - 1] == b':' {
-                if let Some(mod_prefix) = fn_module {
-                    let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
-                    let last_mod_no_us = last_mod.replace('_', "");
-                    for &idx in indices {
-                        let file_lower = chunks[idx as usize].file.to_lowercase();
-                        let file_no_us = file_lower.replace('_', "");
-                        if file_lower.contains(last_mod) || file_no_us.contains(&last_mod_no_us) {
-                            return Some(idx);
-                        }
-                    }
-                }
-                if best.is_none() {
-                    best = Some(indices[0]);
-                }
+        let prefix_len = fn_lower.len() - chunk_name.len();
+        if prefix_len > 0 && fn_lower.as_bytes()[prefix_len - 1] != b':' {
+            continue;
+        }
+
+        if let Some(mod_prefix) = fn_module {
+            if let Some(idx) = disambiguate_by_module(indices, mod_prefix, chunks) {
+                return Some(idx);
             }
+        }
+        // Bare names without "::" skip unless module-disambiguated above.
+        if !chunk_name.contains("::") {
+            continue;
+        }
+        if best.is_none() {
+            best = Some(indices[0]);
         }
     }
     best
@@ -671,15 +645,19 @@ fn strip_chunk_generics(name: &str) -> String {
     result
 }
 
+/// Check if a file path looks like a test file.
+pub fn is_test_path(path: &str) -> bool {
+    path.contains("/tests/")
+        || path.contains("\\tests\\")
+        || path.contains("/test/")
+        || path.contains("\\test\\")
+        || path.ends_with("_test.rs")
+        || path.ends_with("_test.go")
+        || path.contains("/test_")
+}
+
 pub fn is_test_chunk(c: &CodeChunk) -> bool {
-    c.file.contains("/tests/")
-        || c.file.contains("\\tests\\")
-        || c.file.contains("/test/")
-        || c.file.contains("\\test\\")
-        || c.file.ends_with("_test.rs")
-        || c.file.ends_with("_test.go")
-        || c.name.starts_with("test_")
-        || c.file.contains("/test_")
+    is_test_path(&c.file) || c.name.starts_with("test_")
 }
 
 /// Build trait → impl mapping from impl chunk names.

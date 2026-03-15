@@ -39,61 +39,31 @@ pub struct DetailParams {
 
 /// Run the detail command.
 pub fn run_detail(params: DetailParams) -> Result<()> {
-    let DetailParams {
-        db,
-        symbol,
-        add,
-        decision,
-        why,
-        constraint,
-        rejected,
-        failure,
-        fix,
-        root_cause,
-        reject_reason,
-        reject_condition,
-        resolve,
-        invalidate,
-        show_all,
-        delete,
-        file_path,
-        line_range,
-        relate,
-    } = params;
-
-    // Delete mode
-    if delete {
-        return run_delete(&db, &symbol);
+    if params.delete {
+        return run_delete(&params.db, &params.symbol);
+    }
+    if params.resolve {
+        return run_resolve(&params.db, &params.symbol);
+    }
+    if let Some(ref inv_reason) = params.invalidate {
+        return run_invalidate(&params.db, &params.symbol, inv_reason);
     }
 
-    // Resolve / invalidate modes
-    if resolve {
-        return run_resolve(&db, &symbol);
-    }
-    if let Some(ref inv_reason) = invalidate {
-        return run_invalidate(&db, &symbol, inv_reason);
-    }
-
-    // Check if any mutation flag is set
-    let has_mutation = add.is_some()
-        || decision.is_some()
-        || why.is_some()
-        || constraint.is_some()
-        || rejected.is_some()
-        || failure.is_some()
-        || fix.is_some()
-        || file_path.is_some()
-        || line_range.is_some()
-        || relate.is_some();
+    let has_mutation = params.add.is_some()
+        || params.decision.is_some()
+        || params.why.is_some()
+        || params.constraint.is_some()
+        || params.rejected.is_some()
+        || params.failure.is_some()
+        || params.fix.is_some()
+        || params.file_path.is_some()
+        || params.line_range.is_some()
+        || params.relate.is_some();
 
     if has_mutation {
-        run_mutate(
-            &db, &symbol, add, decision, why, constraint, rejected,
-            failure, fix, root_cause, reject_reason, reject_condition,
-            file_path, line_range, relate,
-        )
+        run_mutate(&params)
     } else {
-        run_show_filtered(&db, &symbol, show_all)
+        run_show_filtered(&params.db, &params.symbol, params.show_all)
     }
 }
 
@@ -170,24 +140,9 @@ fn parse_line_range(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Add or update reasoning for a symbol.
-#[expect(clippy::too_many_arguments)]
-fn run_mutate(
-    db: &std::path::Path,
-    symbol: &str,
-    add: Option<String>,
-    decision: Option<String>,
-    why: Option<String>,
-    constraint: Option<String>,
-    rejected: Option<String>,
-    failure: Option<String>,
-    fix: Option<String>,
-    root_cause: Option<String>,
-    reject_reason: Option<String>,
-    reject_condition: Option<String>,
-    file_path: Option<String>,
-    line_range: Option<String>,
-    relate: Option<String>,
-) -> Result<()> {
+fn run_mutate(params: &DetailParams) -> Result<()> {
+    let db = &params.db;
+    let symbol = &params.symbol;
     let mut entry = reason::load_reason(db, symbol)?
         .unwrap_or_else(|| ReasonEntry {
             symbol: symbol.to_owned(),
@@ -205,12 +160,11 @@ fn run_mutate(
     let commit = reason::get_git_head();
     let mut changes = Vec::new();
 
-    // --file-path / --line-range: update location info (#1)
-    if let Some(ref fp) = file_path {
+    if let Some(ref fp) = params.file_path {
         entry.file_path = Some(fp.clone());
         changes.push(format!("set file_path: {fp}"));
     }
-    if let Some(ref lr) = line_range {
+    if let Some(ref lr) = params.line_range {
         if let Some(range) = parse_line_range(lr) {
             entry.line_range = Some(range);
             changes.push(format!("set line_range: {}-{}", range.0, range.1));
@@ -218,14 +172,10 @@ fn run_mutate(
             changes.push(format!("invalid line_range format (expected start:end): {lr}"));
         }
     }
-
-    // --relate: add related symbol (#6) with bidirectional reference
-    if let Some(ref rel) = relate {
+    if let Some(ref rel) = params.relate {
         if !entry.related_symbols.contains(rel) {
             entry.related_symbols.push(rel.clone());
             changes.push(format!("added related symbol: {rel}"));
-
-            // Bidirectional: also update the related symbol's entry
             if let Ok(Some(mut related_entry)) = reason::load_reason(db, rel)
                 && !related_entry.related_symbols.contains(&symbol.to_owned())
             {
@@ -237,126 +187,82 @@ fn run_mutate(
         }
     }
 
-    // --add: general note
-    if let Some(ref note) = add {
-        entry.history.push(HistoryItem {
-            action: "note".to_owned(),
-            date: today.clone(),
-            note: Some(note.clone()),
-            failure: None,
-            fix: None,
-            root_cause: None,
-            resolved: false,
-            commit: commit.clone(),
-        });
+    if let Some(ref note) = params.add {
+        push_history(&mut entry, &today, &commit, "note", Some(note.clone()), None, None, None);
         changes.push(format!("added note: {note}"));
     }
-
-    // --decision / --why: set or update design decision
-    if let Some(ref d) = decision {
+    if let Some(ref d) = params.decision {
         entry.decision = Some(d.clone());
         changes.push(format!("set decision: {d}"));
     }
-    if let Some(ref w) = why {
+    if let Some(ref w) = params.why {
         entry.why = Some(w.clone());
         changes.push(format!("set why: {w}"));
     }
-    if decision.is_some() || why.is_some() {
+    if params.decision.is_some() || params.why.is_some() {
         let is_first = entry.history.is_empty()
             || !entry.history.iter().any(|h| h.action == "create" || h.action == "decision");
-        entry.history.push(HistoryItem {
-            action: if is_first { "create" } else { "decision" }.to_owned(),
-            date: today.clone(),
-            note: decision.as_ref().map(|d| {
-                if let Some(ref w) = why {
-                    format!("{d} -- {w}")
-                } else {
-                    d.clone()
-                }
-            }),
-            failure: None,
-            fix: None,
-            root_cause: None,
-            resolved: false,
-            commit: commit.clone(),
+        let action = if is_first { "create" } else { "decision" };
+        let note = params.decision.as_ref().map(|d| {
+            if let Some(ref w) = params.why { format!("{d} -- {w}") } else { d.clone() }
         });
+        push_history(&mut entry, &today, &commit, action, note, None, None, None);
     }
 
-    // --constraint: append
-    if let Some(ref c) = constraint {
+    if let Some(ref c) = params.constraint {
         if !entry.constraints.contains(c) {
             entry.constraints.push(c.clone());
             changes.push(format!("added constraint: {c}"));
-            entry.history.push(HistoryItem {
-                action: "constraint".to_owned(),
-                date: today.clone(),
-                note: Some(c.clone()),
-                failure: None,
-                fix: None,
-                root_cause: None,
-                resolved: false,
-                commit: commit.clone(),
-            });
+            push_history(&mut entry, &today, &commit, "constraint", Some(c.clone()), None, None, None);
         } else {
             changes.push(format!("constraint already exists: {c}"));
         }
     }
 
-    // --rejected: append (with structured reason/condition)
-    if let Some(ref r) = rejected {
+    if let Some(ref r) = params.rejected {
         let alt = RejectedAlternative {
             approach: r.clone(),
-            reason: reject_reason.clone(),
-            condition: reject_condition.clone(),
+            reason: params.reject_reason.clone(),
+            condition: params.reject_condition.clone(),
         };
         if !entry.rejected.iter().any(|existing| existing.approach == alt.approach) {
             entry.rejected.push(alt);
             changes.push(format!("added rejected alternative: {r}"));
-            entry.history.push(HistoryItem {
-                action: "rejected".to_owned(),
-                date: today.clone(),
-                note: Some(r.clone()),
-                failure: None,
-                fix: None,
-                root_cause: None,
-                resolved: false,
-                commit: commit.clone(),
-            });
+            push_history(&mut entry, &today, &commit, "rejected", Some(r.clone()), None, None, None);
         } else {
             changes.push(format!("rejected alternative already exists: {r}"));
         }
     }
 
-    // --failure / --fix: failure-fix record (with optional root_cause)
-    if failure.is_some() || fix.is_some() {
-        entry.history.push(HistoryItem {
-            action: "modify".to_owned(),
-            date: today,
-            note: None,
-            failure: failure.clone(),
-            fix: fix.clone(),
-            root_cause: root_cause.clone(),
-            resolved: false,
-            commit,
-        });
-        if let Some(ref f) = failure {
-            changes.push(format!("recorded failure: {f}"));
-        }
-        if let Some(ref f) = fix {
-            changes.push(format!("recorded fix: {f}"));
-        }
-        if let Some(ref rc) = root_cause {
-            changes.push(format!("root cause: {rc}"));
-        }
+    if params.failure.is_some() || params.fix.is_some() {
+        push_history(&mut entry, &today, &commit, "modify", None,
+            params.failure.clone(), params.fix.clone(), params.root_cause.clone());
+        if let Some(ref f) = params.failure { changes.push(format!("recorded failure: {f}")); }
+        if let Some(ref f) = params.fix { changes.push(format!("recorded fix: {f}")); }
+        if let Some(ref rc) = params.root_cause { changes.push(format!("root cause: {rc}")); }
     }
 
     reason::save_reason(db, &entry)?;
-
     println!("Updated \"{symbol}\":");
-    for c in &changes {
-        println!("  + {c}");
-    }
+    for c in &changes { println!("  + {c}"); }
     Ok(())
+}
+
+fn push_history(
+    entry: &mut ReasonEntry, today: &str, commit: &Option<String>,
+    action: &str, note: Option<String>,
+    failure: Option<String>, fix: Option<String>, root_cause: Option<String>,
+) {
+    entry.history.push(HistoryItem {
+        action: action.to_owned(),
+        date: today.to_owned(),
+        note,
+        failure,
+        fix,
+        root_cause,
+        resolved: false,
+        commit: commit.clone(),
+    });
 }
 
 /// List all reasoning entries in the database.
