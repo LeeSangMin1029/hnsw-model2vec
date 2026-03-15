@@ -12,26 +12,6 @@ use lru::LruCache;
 const QUERY_CACHE_MAX: usize = 1000;
 const QUERY_CACHE_FILE: &str = "query_cache.bin";
 
-/// Platform-aware cache directory for v-hnsw.
-fn cache_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(local).join("v-hnsw").join("cache");
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
-            return PathBuf::from(cache).join("v-hnsw");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".cache").join("v-hnsw");
-        }
-    }
-    std::env::temp_dir().join("v-hnsw")
-}
-
 /// LRU cache for query embeddings, with disk persistence.
 pub struct QueryCache {
     cache: LruCache<String, Vec<f32>>,
@@ -48,7 +28,7 @@ struct CacheEntry {
 impl QueryCache {
     /// Global cache (not tied to a specific DB).
     pub fn global() -> Self {
-        Self::load(&cache_dir())
+        Self::load(&v_hnsw_core::cache_dir())
     }
 
     /// Load cache from disk, or create empty if not found.

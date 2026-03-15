@@ -3,7 +3,7 @@
 //! Detects input type (folder with .md files, .jsonl) and processes accordingly.
 //! Auto-creates database, embeds text, builds indexes.
 
-pub(crate) mod ingest;
+pub mod ingest;
 
 use std::path::{Path, PathBuf};
 

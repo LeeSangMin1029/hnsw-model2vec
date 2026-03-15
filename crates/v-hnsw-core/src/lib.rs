@@ -1,6 +1,7 @@
 //! Core traits, types, and error definitions for v-hnsw.
 
 mod error;
+pub mod interrupt;
 mod traits;
 mod types;
 
@@ -26,6 +27,26 @@ pub fn data_dir() -> std::path::PathBuf {
     home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".v-hnsw")
+}
+
+/// Platform-aware cache directory for v-hnsw.
+pub fn cache_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            return std::path::PathBuf::from(local).join("v-hnsw").join("cache");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
+            return std::path::PathBuf::from(cache).join("v-hnsw");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(".cache").join("v-hnsw");
+        }
+    }
+    std::env::temp_dir().join("v-hnsw")
 }
 
 /// Korean dictionary directory: `~/.v-hnsw/dict/ko-dic/`.

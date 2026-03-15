@@ -1,19 +1,11 @@
-//! Global Ctrl+C interrupt flag.
+//! Ctrl+C interrupt handling — delegates to v-hnsw-core.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Global flag for Ctrl+C handling.
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-/// Check if Ctrl+C was pressed.
-pub fn is_interrupted() -> bool {
-    INTERRUPTED.load(Ordering::Relaxed)
-}
+pub use v_hnsw_core::interrupt::is_interrupted;
 
 /// Install Ctrl+C handler that sets the interrupt flag.
 pub fn install_handler() {
     if let Err(e) = ctrlc::set_handler(move || {
-        INTERRUPTED.store(true, Ordering::SeqCst);
+        v_hnsw_core::interrupt::set_interrupted();
         eprintln!("\nInterrupted. Cleaning up...");
     }) {
         eprintln!("Warning: Failed to set Ctrl+C handler: {e}");

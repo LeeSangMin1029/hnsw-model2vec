@@ -52,7 +52,7 @@ fn params(db: &Path, symbol: &str) -> DetailParams {
 #[test]
 fn list_empty_db() {
     let tmp = TempDir::new().unwrap();
-    let entries = run_list(tmp.path()).unwrap();
+    let entries = reason::list_reasons(tmp.path()).unwrap();
     assert!(entries.is_empty());
 }
 
@@ -62,7 +62,7 @@ fn list_single_entry() {
     let e = make_entry("Foo::bar", Some("use Arc"));
     save(tmp.path(), &e);
 
-    let entries = run_list(tmp.path()).unwrap();
+    let entries = reason::list_reasons(tmp.path()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].symbol, "Foo::bar");
     assert_eq!(entries[0].decision.as_deref(), Some("use Arc"));
@@ -75,7 +75,7 @@ fn list_multiple_entries_sorted() {
     save(tmp.path(), &make_entry("Alpha::init", Some("lazy init")));
     save(tmp.path(), &make_entry("Mid::process", None));
 
-    let entries = run_list(tmp.path()).unwrap();
+    let entries = reason::list_reasons(tmp.path()).unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].symbol, "Alpha::init");
     assert_eq!(entries[1].symbol, "Mid::process");
@@ -90,7 +90,7 @@ fn list_after_delete_excludes_deleted() {
 
     reason::delete_reason(tmp.path(), "B").unwrap();
 
-    let entries = run_list(tmp.path()).unwrap();
+    let entries = reason::list_reasons(tmp.path()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].symbol, "A");
 }
@@ -185,7 +185,7 @@ fn list_preserves_full_entry_data() {
     }];
     save(tmp.path(), &e);
 
-    let entries = run_list(tmp.path()).unwrap();
+    let entries = reason::list_reasons(tmp.path()).unwrap();
     assert_eq!(entries.len(), 1);
     let got = &entries[0];
     assert_eq!(got.decision.as_deref(), Some("complex"));

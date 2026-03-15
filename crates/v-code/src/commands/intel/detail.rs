@@ -265,12 +265,6 @@ fn push_history(
     });
 }
 
-/// List all reasoning entries in the database.
-#[cfg(test)]
-pub fn run_list(db: &std::path::Path) -> Result<Vec<ReasonEntry>> {
-    reason::list_reasons(db)
-}
-
 /// Pretty-print a reason entry, optionally filtering resolved history items.
 fn print_entry(entry: &ReasonEntry, show_all: bool) {
     println!("=== {} ===\n", entry.symbol);

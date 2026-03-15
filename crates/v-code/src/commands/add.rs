@@ -16,7 +16,7 @@ use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::scan_files;
 use super::ingest::{CodeChunkEntry, entries_to_records};
-use v_hnsw_cli::commands::pipeline::process_records;
+use v_hnsw_cli::commands::add::ingest::finalize_ingest;
 use v_hnsw_cli::is_interrupted;
 
 // ── Model loading ────────────────────────────────────────────────────────
@@ -108,33 +108,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let records = entries_to_records(&entries);
     println!("Symbols: {} (functions, structs, enums, ...)", records.len());
 
-    // === Remove stale chunks for re-added files ===
-    let file_idx = file_index::load_file_index(&db_path)?;
-    let mut removed_ids = Vec::new();
-    for (path, (_, _, new_ids)) in &file_metadata_map {
-        if let Some(existing) = file_idx.get_file(path) {
-            for &old_id in &existing.chunk_ids {
-                if !new_ids.contains(&old_id) {
-                    let _ = engine.remove(old_id);
-                    removed_ids.push(old_id);
-                }
-            }
-        }
-    }
-    if !removed_ids.is_empty() {
-        engine.checkpoint().ok();
-        println!("Removed {} stale symbols", removed_ids.len());
-    }
-
-    // === Embed + insert ===
-    let (inserted, _errors, _inserted_ids) = process_records(records, &model, &mut engine)?;
-
-    // === Update file index ===
-    let mut file_idx = file_index::load_file_index(&db_path)?;
-    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
-        file_idx.update_file(path, mtime, size, chunk_ids);
-    }
-    file_index::save_file_index(&db_path, &file_idx)?;
+    // === Remove stale + embed + insert + update file index ===
+    let result = finalize_ingest(&db_path, records, &model, &mut engine, file_metadata_map)?;
+    let inserted = result.inserted;
+    let removed_ids = result.removed_ids;
+    let _inserted_ids = result.added_ids;
 
     if is_interrupted() {
         println!();

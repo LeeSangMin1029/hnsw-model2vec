@@ -6,7 +6,7 @@
 //! - [`super::ingest`]: embedding pipeline, payload building, batch insert
 //! - [`super::search_result`]: search result formatting, language detection
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -34,34 +34,7 @@ pub use super::search_result::{build_results, fusion_alpha, SearchResultItem};
 #[cfg(test)]
 pub use super::search_result::has_korean;
 
-// ── Cache / path utilities ──────────────────────────────────────────────
-
-/// Platform-aware cache directory for v-hnsw.
-pub fn cache_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(local).join("v-hnsw").join("cache");
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
-            return PathBuf::from(cache).join("v-hnsw");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".cache").join("v-hnsw");
-        }
-    }
-    std::env::temp_dir().join("v-hnsw")
-}
-
-/// Get a file path inside the cache directory, creating it if needed.
-pub fn cache_file(name: &str) -> PathBuf {
-    let dir = cache_dir();
-    std::fs::create_dir_all(&dir).ok();
-    dir.join(name)
-}
+// ── Path utilities ──────────────────────────────────────────────────────
 
 /// Validate that a database directory exists; bail with a standard message if not.
 pub fn require_db(path: &Path) -> Result<()> {

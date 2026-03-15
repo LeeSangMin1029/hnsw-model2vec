@@ -110,7 +110,7 @@ pub fn process_markdown_files(
 ///
 /// Shared tail logic for `process_markdown_files`.
 /// Returns `(inserted, errors, added_ids, removed_ids)`.
-pub(crate) fn finalize_ingest(
+pub fn finalize_ingest(
     db_path: &Path,
     records: Vec<IngestRecord>,
     model: &Model2VecModel,
