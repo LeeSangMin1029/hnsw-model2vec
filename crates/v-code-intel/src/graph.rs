@@ -7,7 +7,7 @@
 //! - Add new traversal methods (e.g., shortest path) as `impl CallGraph` methods.
 //! - Add new fields to `CallGraph` and update `build()` + bump cache version.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -168,9 +168,10 @@ impl CallGraph {
         let owner_types = collect_owner_types(chunks, &meta);
         let owner_field_types = collect_owner_field_types(chunks);
         let return_type_map = build_return_type_map(chunks);
+        let trait_methods = collect_trait_methods(chunks);
 
         for (src, c) in chunks.iter().enumerate() {
-            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &owner_field_types, &return_type_map, &mut adj, &HashSet::new());
+            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &mut adj, &HashSet::new());
         }
 
         adj.dedup();
@@ -200,6 +201,7 @@ impl CallGraph {
         let owner_types = collect_owner_types(chunks, &meta);
         let owner_field_types = collect_owner_field_types(chunks);
         let return_type_map = build_return_type_map(chunks);
+        let trait_methods = collect_trait_methods(chunks);
 
         // Build chunk-index → resolved callee list lookup.
         let resolved_for_chunk: Vec<Option<Vec<String>>> = {
@@ -252,7 +254,7 @@ impl CallGraph {
             }
 
             // Tree-sitter fallback for calls NOT covered by LSP resolution.
-            Self::resolve_chunk_edges(src, c, &exact_single, &meta.short, &owner_types, &owner_field_types, &return_type_map, &mut adj, &resolved_names);
+            Self::resolve_chunk_edges(src, c, &exact_single, &meta.short, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &mut adj, &resolved_names);
         }
 
         adj.dedup();
@@ -271,6 +273,7 @@ impl CallGraph {
         owner_types: &BTreeMap<String, Vec<String>>,
         owner_field_types: &BTreeMap<String, BTreeMap<String, String>>,
         return_type_map: &BTreeMap<String, String>,
+        trait_methods: &BTreeSet<String>,
         adj: &mut AdjState,
         skip_calls: &HashSet<String>,
     ) {
@@ -311,7 +314,7 @@ impl CallGraph {
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &imports,
                 self_type.as_deref(), &enriched_types, &call_types,
-                &receiver_types,
+                &receiver_types, trait_methods,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 adj.add_edge(src, tgt, call_line);
@@ -470,6 +473,7 @@ fn resolve_with_imports(
     source_types: &[String],
     call_types: &[String],
     receiver_types: &BTreeMap<String, String>,
+    trait_methods: &BTreeSet<String>,
 ) -> Option<u32> {
     let lower = call.to_lowercase();
 
@@ -587,10 +591,13 @@ fn resolve_with_imports(
             // Type is external (File, OpenOptions, etc.) → skip
             return None;
         }
-        // 6c. Unknown receiver, unknown type → don't match.
-        // As type inference improves, more receivers become known and
-        // true positives recover automatically — no hardcoded blocklist needed.
-        return None;
+        // 6c. Unknown receiver → check if method is a trait method.
+        // Trait methods (clone, next, into, etc.) are too ambiguous without
+        // type info → skip. Non-trait methods are likely project-specific → allow.
+        if trait_methods.contains(method) {
+            return None;
+        }
+        return short.get(method).copied();
     }
     None
 }
@@ -706,6 +713,38 @@ fn build_return_type_map(chunks: &[CodeChunk]) -> BTreeMap<String, String> {
         map.insert(name_lower, resolved);
     }
     map
+}
+
+/// Collect trait method names from chunks.
+///
+/// Finds all trait chunks, then collects short method names from function chunks
+/// whose name starts with `TraitName::` (e.g., `Iterator::next` → `"next"`).
+fn collect_trait_methods(chunks: &[CodeChunk]) -> BTreeSet<String> {
+    let trait_names: BTreeSet<String> = chunks
+        .iter()
+        .filter(|c| c.kind == "trait")
+        .map(|c| {
+            let lower = c.name.to_lowercase();
+            lower.rsplit("::").next().unwrap_or(&lower).to_owned()
+        })
+        .collect();
+
+    let mut methods = BTreeSet::new();
+    for c in chunks {
+        if c.kind != "function" {
+            continue;
+        }
+        let lower = c.name.to_lowercase();
+        if let Some((prefix, method)) = lower.rsplit_once("::") {
+            let leaf_prefix = prefix.rsplit("::").next().unwrap_or(prefix);
+            // Strip generics: "iterator<item>" → "iterator"
+            let leaf_clean = leaf_prefix.split('<').next().unwrap_or(leaf_prefix);
+            if trait_names.contains(leaf_clean) {
+                methods.insert(method.to_owned());
+            }
+        }
+    }
+    methods
 }
 
 /// Extract the leaf type name from a possibly generic/reference type string.
