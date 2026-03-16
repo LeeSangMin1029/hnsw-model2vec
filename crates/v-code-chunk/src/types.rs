@@ -121,6 +121,8 @@ pub struct CodeChunk {
     pub type_refs: Vec<String>,
     /// Parameter name-type pairs (e.g., `[("amount", "f64")]`).
     pub param_types: Vec<(String, String)>,
+    /// Struct field name-type pairs (e.g., `[("name", "String")]`).
+    pub field_types: Vec<(String, String)>,
     /// Return type string (e.g., `"Result<Vec<Item>>"`).
     pub return_type: Option<String>,
     /// Structural AST hash for clone detection (0 = not computed).
@@ -133,6 +135,9 @@ pub struct CodeChunk {
     pub string_args: Vec<(String, String, u32, u8)>,
     /// Parameter-to-callee argument flows: `(param_name, param_pos, callee, callee_arg, line)`.
     pub param_flows: Vec<(String, u8, String, u8, u32)>,
+    /// Local variable type annotations: `(variable_name, type_name)`.
+    /// Collected from `let x: Type = ...` patterns.
+    pub local_types: Vec<(String, String)>,
 }
 
 impl CodeChunk {
@@ -178,6 +183,16 @@ impl CodeChunk {
             parts.push(format!("Params: {}", params.join(", ")));
         }
 
+        // Struct field types
+        if !self.field_types.is_empty() {
+            let fields: Vec<String> = self
+                .field_types
+                .iter()
+                .map(|(n, t)| format!("{n}: {t}"))
+                .collect();
+            parts.push(format!("Fields: {}", fields.join(", ")));
+        }
+
         // Type references
         if !self.type_refs.is_empty() {
             parts.push(format!("Types: {}", self.type_refs.join(", ")));
@@ -211,6 +226,16 @@ impl CodeChunk {
                 .map(|(pname, _, callee, _, _)| format!("{pname}\u{2192}{callee}"))
                 .collect();
             parts.push(format!("Flows: {}", items.join(", ")));
+        }
+
+        // Local variable type annotations
+        if !self.local_types.is_empty() {
+            let items: Vec<String> = self
+                .local_types
+                .iter()
+                .map(|(name, ty)| format!("{name}: {ty}"))
+                .collect();
+            parts.push(format!("Locals: {}", items.join(", ")));
         }
 
         // Called by (reverse references)
@@ -318,6 +343,19 @@ impl CodeChunk {
                 .collect();
             custom.insert(
                 "param_flows".to_owned(),
+                PayloadValue::StringList(encoded),
+            );
+        }
+
+        // Local variable type annotations
+        if !self.local_types.is_empty() {
+            let encoded: Vec<String> = self
+                .local_types
+                .iter()
+                .map(|(name, ty)| format!("{name}\t{ty}"))
+                .collect();
+            custom.insert(
+                "local_types".to_owned(),
                 PayloadValue::StringList(encoded),
             );
         }

@@ -25,6 +25,8 @@
                 sub_blocks: vec![],
                 string_args: vec![],
                 param_flows: vec![],
+                field_types: vec![],
+                local_types: vec![],
             },
             source: "test.rs".to_string(),
             file_path_str: "test.rs".to_string(),

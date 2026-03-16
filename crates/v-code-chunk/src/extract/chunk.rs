@@ -2,7 +2,7 @@
 
 use crate::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 use super::ParsedSource;
-use super::common::{extract_function_signature, extract_struct_fields, collect_sorted_unique, walk_for_calls_with_lines, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
+use super::common::{extract_function_signature, extract_struct_fields, extract_struct_field_types, collect_sorted_unique, walk_for_calls_with_lines, walk_for_let_types, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
 
 /// Walk calls with line info and deduplicate, preserving first occurrence's line.
 pub(crate) fn extract_calls_deduped(
@@ -51,6 +51,11 @@ pub fn simple_type_chunk(
     } else {
         None
     };
+    let field_types = if matches!(kind, CodeNodeKind::Struct) {
+        extract_struct_field_types(node, src)
+    } else {
+        Vec::new()
+    };
     Some(CodeChunk {
         text,
         kind,
@@ -68,12 +73,14 @@ pub fn simple_type_chunk(
         call_lines: Vec::new(),
         type_refs,
         param_types: Vec::new(),
+        field_types,
         return_type: None,
         ast_hash: 0,
         body_hash: 0,
         sub_blocks: Vec::new(),
         string_args: Vec::new(),
         param_flows: Vec::new(),
+        local_types: Vec::new(),
     })
 }
 
@@ -169,6 +176,16 @@ pub fn build_chunk(
     let type_refs = collect_sorted_unique(node, src, walk_for_type_ids);
     let param_types = (lang.extract_params_fn)(node, src);
     let return_type = (lang.extract_return_fn)(node, src);
+    let field_types = if matches!(kind, CodeNodeKind::Struct) {
+        extract_struct_field_types(node, src)
+    } else {
+        Vec::new()
+    };
+    let local_types = if is_func {
+        walk_for_let_types(node, src)
+    } else {
+        Vec::new()
+    };
 
     Some(CodeChunk {
         text,
@@ -187,12 +204,14 @@ pub fn build_chunk(
         call_lines,
         type_refs,
         param_types,
+        field_types,
         return_type,
         ast_hash: 0,
         body_hash: 0,
         sub_blocks: Vec::new(),
         string_args,
         param_flows,
+        local_types,
     })
 }
 
@@ -277,6 +296,7 @@ pub fn extract_methods(
         let type_refs = collect_sorted_unique(&actual_child, src, walk_for_type_ids);
         let param_types = (lang.extract_params_fn)(&actual_child, src);
         let return_type = (lang.extract_return_fn)(&actual_child, src);
+        let local_types = walk_for_let_types(&actual_child, src);
 
         chunks.push(CodeChunk {
             text,
@@ -295,12 +315,14 @@ pub fn extract_methods(
             call_lines,
             type_refs,
             param_types,
+            field_types: Vec::new(),
             return_type,
             ast_hash: 0,
             body_hash: 0,
             sub_blocks: Vec::new(),
             string_args,
             param_flows,
+            local_types,
         });
     }
 }

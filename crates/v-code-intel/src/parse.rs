@@ -24,6 +24,15 @@ pub struct CodeChunk {
     /// Parameter-to-callee argument flows: (param_name, param_pos, callee, callee_arg, line).
     #[serde(default)]
     pub param_flows: Vec<(String, u8, String, u8, u32)>,
+    /// Parameter name → type mappings (e.g., `("dag", "Dag")`).
+    #[serde(default)]
+    pub param_types: Vec<(String, String)>,
+    /// Struct field name → type mappings (e.g., `("name", "String")`).
+    #[serde(default)]
+    pub field_types: Vec<(String, String)>,
+    /// Local variable type annotations (e.g., `("x", "Vec")`).
+    #[serde(default)]
+    pub local_types: Vec<(String, String)>,
 }
 
 /// Parse the text field of a code chunk into a [`CodeChunk`].
@@ -77,6 +86,9 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
     let mut types = Vec::new();
     let mut string_args: Vec<(String, String, u32, u8)> = Vec::new();
     let mut param_flows: Vec<(String, u8, String, u8, u32)> = Vec::new();
+    let mut param_types: Vec<(String, String)> = Vec::new();
+    let mut field_types: Vec<(String, String)> = Vec::new();
+    let mut local_types: Vec<(String, String)> = Vec::new();
 
     for line in lines_iter {
         if let Some(f) = line.strip_prefix("File: ") {
@@ -138,6 +150,42 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
                     string_args.push((callee, value, 0, 0));
                 }
             }
+        } else if let Some(p) = line.strip_prefix("Params: ") {
+            for token in p.split(", ") {
+                let token = token.trim();
+                if let Some(colon) = token.find(": ") {
+                    let name = token[..colon].to_owned();
+                    let ty = token[colon + 2..].to_owned();
+                    param_types.push((name, ty));
+                }
+            }
+        } else if let Some(ft) = line.strip_prefix("Fields: ") {
+            for token in ft.split(", ") {
+                let token = token.trim();
+                if let Some(colon) = token.find(": ") {
+                    let name = token[..colon].to_owned();
+                    let ty = token[colon + 2..].to_owned();
+                    field_types.push((name, ty));
+                }
+            }
+        } else if let Some(lt) = line.strip_prefix("Locals: ") {
+            for token in lt.split(", ") {
+                let token = token.trim();
+                if let Some(colon) = token.find(": ") {
+                    let name = token[..colon].to_owned();
+                    let ty = token[colon + 2..].to_owned();
+                    local_types.push((name, ty));
+                }
+            }
+        } else if let Some(lt) = line.strip_prefix("Locals: ") {
+            for token in lt.split(", ") {
+                let token = token.trim();
+                if let Some(colon) = token.find(": ") {
+                    let name = token[..colon].to_owned();
+                    let ty = token[colon + 2..].to_owned();
+                    local_types.push((name, ty));
+                }
+            }
         }
     }
 
@@ -157,6 +205,9 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         imports: Vec::new(),
         string_args,
         param_flows,
+        param_types,
+        field_types,
+        local_types,
     })
 }
 

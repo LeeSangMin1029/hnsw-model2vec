@@ -57,31 +57,26 @@ fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
     let Some(canonical) = db.canonicalize().ok() else {
         return DaemonBuildResult::Unavailable;
     };
+
+    // If daemon already built the graph (cached), use it immediately.
+    if let Some(g) = v_code_intel::graph::CallGraph::load(&canonical) {
+        return DaemonBuildResult::Ready(g);
+    }
+
+    // No cached graph — fire-and-forget build request to daemon.
+    // Fall back to tree-sitter immediately instead of blocking 300s.
     let Some(db_str) = canonical.to_str() else {
         return DaemonBuildResult::Unavailable;
     };
-
     let params = serde_json::json!({"db": db_str});
-    eprintln!("[graph] Waiting for daemon LSP graph build...");
-    match v_hnsw_storage::daemon_client::daemon_rpc("graph/build", params, 300) {
-        Ok(result) => {
-            let nodes = result.get("nodes").and_then(|v| v.as_u64()).unwrap_or(0);
-            let lsp = result.get("lsp_entries").and_then(|v| v.as_u64()).unwrap_or(0);
-            eprintln!("[graph] Daemon graph ready: {nodes} nodes, {lsp} LSP entries");
-            v_code_intel::graph::CallGraph::load(&canonical)
-                .map(DaemonBuildResult::Ready)
-                .unwrap_or(DaemonBuildResult::Unavailable)
-        }
-        Err(e) => {
-            eprintln!("[graph] Daemon build failed: {e}");
-            DaemonBuildResult::Unavailable
-        }
-    }
+    eprintln!("[graph] Requesting daemon graph build (non-blocking)...");
+    v_hnsw_storage::daemon_client::daemon_rpc_fire_and_forget("graph/build", params);
+    DaemonBuildResult::Building
 }
 
-fn daemon_spawn_and_wait(db: &std::path::Path) {
-    // Non-blocking: spawn daemon in background for next invocation.
-    v_hnsw_storage::daemon_client::spawn_daemon(db);
+fn daemon_spawn_and_wait(_db: &std::path::Path) {
+    // Do NOT auto-spawn daemon — tree-sitter resolution is sufficient.
+    // Users can manually start v-daemon if they want LSP-enhanced graphs.
 }
 
 pub use v_code_intel::parse::CodeChunk;

@@ -17,6 +17,9 @@ fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> CodeChunk {
         imports: vec![],
         string_args: vec![],
         param_flows: vec![],
+        param_types: vec![],
+        field_types: vec![],
+        local_types: vec![],
     }
 }
 

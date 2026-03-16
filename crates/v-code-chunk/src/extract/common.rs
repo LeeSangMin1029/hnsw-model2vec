@@ -461,6 +461,49 @@ pub fn extract_struct_fields(node: &tree_sitter::Node, src: &[u8]) -> Option<Str
     if fields.is_empty() { None } else { Some(fields.join(", ")) }
 }
 
+/// Extract struct field name-type pairs from a struct definition node.
+///
+/// Returns `Vec<(field_name, type_name)>` for struct fields. The type name
+/// extracts only the base type identifier (strips generic parameters).
+/// Works for Rust (`field_declaration`), Go, TypeScript, and C/C++.
+pub(crate) fn extract_struct_field_types(
+    node: &tree_sitter::Node,
+    src: &[u8],
+) -> Vec<(String, String)> {
+    let body = node
+        .child_by_field_name("body")
+        .or_else(|| {
+            let mut c = node.walk();
+            node.children(&mut c)
+                .find(|n| n.kind() == "field_declaration_list")
+        });
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    let mut fields = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        let kind = child.kind();
+        // Rust: field_declaration, Go: field_declaration, TS: property_signature,
+        // C/C++: field_declaration
+        if kind != "field_declaration" && kind != "property_signature" {
+            continue;
+        }
+        let name = child
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(src).ok())
+            .unwrap_or_default();
+        let ty_text = child
+            .child_by_field_name("type")
+            .and_then(|n| extract_leaf_type_name(&n, src))
+            .unwrap_or_default();
+        if !name.is_empty() && !ty_text.is_empty() {
+            fields.push((name.to_owned(), ty_text));
+        }
+    }
+    fields
+}
+
 /// Generic helper: extract parameter name-type pairs from a node's `parameters` field.
 ///
 /// For each child whose kind is in `param_kinds`, calls `extractor` to produce
@@ -648,4 +691,160 @@ pub(super) fn extract_return_type_skip(
     ret.utf8_text(src)
         .ok()
         .map(|s| s.strip_prefix(strip_prefix).unwrap_or(s).to_owned())
+}
+
+/// Walk a function body to collect `let` binding type annotations.
+///
+/// Returns `(variable_name, leaf_type_name)` pairs.
+/// For example, `let x: Vec<String> = ...;` yields `("x", "Vec")`.
+/// Tuple patterns and complex destructuring are skipped.
+pub(crate) fn walk_for_let_types(node: &tree_sitter::Node, src: &[u8]) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    walk_let_types_inner(node, src, &mut result);
+    result
+}
+
+fn walk_let_types_inner(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, String)>,
+) {
+    let kind = node.kind();
+
+    // Rust: let_declaration
+    if kind == "let_declaration" {
+        if let Some(pat) = node.child_by_field_name("pattern")
+            && pat.kind() == "identifier"
+            && let Ok(name) = pat.utf8_text(src)
+            && let Some(ty) = node.child_by_field_name("type")
+            && let Some(leaf) = extract_leaf_type_name(&ty, src)
+        {
+            out.push((name.to_owned(), leaf));
+        }
+    }
+    // Go: short_var_declaration (x := expr) has no type; var_declaration with type
+    else if kind == "var_spec" {
+        if let Some(name_node) = node.child_by_field_name("name")
+            && let Ok(name) = name_node.utf8_text(src)
+            && let Some(ty) = node.child_by_field_name("type")
+            && let Some(leaf) = extract_leaf_type_name(&ty, src)
+        {
+            out.push((name.to_owned(), leaf));
+        }
+    }
+    // TypeScript/JavaScript: variable_declarator with type_annotation
+    else if kind == "variable_declarator" {
+        if let Some(name_node) = node.child_by_field_name("name")
+            && name_node.kind() == "identifier"
+            && let Ok(name) = name_node.utf8_text(src)
+            && let Some(ty) = node.child_by_field_name("type")
+            && let Some(leaf) = extract_leaf_type_name(&ty, src)
+        {
+            out.push((name.to_owned(), leaf));
+        }
+    }
+    // C/C++: declaration → type + declarator
+    else if kind == "declaration" {
+        if let Some(ty) = node.child_by_field_name("type")
+            && let Some(leaf) = extract_leaf_type_name(&ty, src)
+            && let Some(decl) = node.child_by_field_name("declarator")
+        {
+            // declarator may be identifier or pointer/array declarator
+            let ident = find_identifier_in_declarator(&decl, src);
+            if let Some(name) = ident {
+                out.push((name, leaf));
+            }
+        }
+    }
+    // Python: type (annotated assignment) — `x: int = 5`
+    else if kind == "assignment" || kind == "expression_statement" {
+        // Python typed assignment: left : type = right
+        // tree-sitter-python uses `type` field on assignment node
+        if let Some(ty) = node.child_by_field_name("type")
+            && let Some(leaf) = extract_leaf_type_name(&ty, src)
+            && let Some(left) = node.child_by_field_name("left")
+            && left.kind() == "identifier"
+            && let Ok(name) = left.utf8_text(src)
+        {
+            out.push((name.to_owned(), leaf));
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_let_types_inner(&child, src, out);
+    }
+}
+
+/// Extract the leaf (outermost) type name from a type node.
+///
+/// Strips references, generics, pointers, etc. to get the base type name.
+/// - `type_identifier` → text as-is
+/// - `generic_type` → first child (the base type)
+/// - `reference_type` / `pointer_type` → recurse into inner type
+/// - `scoped_type_identifier` → last `type_identifier` child
+/// - `type_annotation` (TS) → first meaningful child
+fn extract_leaf_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "identifier" | "primitive_type" => {
+            node.utf8_text(src).ok().map(|s| s.to_owned())
+        }
+        "generic_type" => {
+            // First child is the base type (e.g., Vec in Vec<T>)
+            let child = node.child(0)?;
+            extract_leaf_type_name(&child, src)
+        }
+        "reference_type" | "pointer_type" | "mutable_specifier" => {
+            // Skip & / &mut / * and get the inner type
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(name) = extract_leaf_type_name(&child, src) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        "scoped_type_identifier" | "scoped_identifier" => {
+            // Take the last type_identifier segment
+            let mut cursor = node.walk();
+            let mut last = None;
+            for child in node.children(&mut cursor) {
+                if child.kind() == "type_identifier" || child.kind() == "identifier" {
+                    last = child.utf8_text(src).ok().map(|s| s.to_owned());
+                }
+            }
+            last
+        }
+        "type_annotation" => {
+            // TypeScript: skip the `: ` token and get the actual type
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() != ":" {
+                    return extract_leaf_type_name(&child, src);
+                }
+            }
+            None
+        }
+        _ => {
+            // Try first named child as fallback
+            if let Some(child) = node.named_child(0) {
+                return extract_leaf_type_name(&child, src);
+            }
+            None
+        }
+    }
+}
+
+/// Find the identifier name inside a C/C++ declarator node.
+fn find_identifier_in_declarator(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        return node.utf8_text(src).ok().map(|s| s.to_owned());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(name) = find_identifier_in_declarator(&child, src) {
+            return Some(name);
+        }
+    }
+    None
 }
