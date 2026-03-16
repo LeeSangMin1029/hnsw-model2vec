@@ -33,6 +33,9 @@ pub struct CodeChunk {
     /// Local variable type annotations (e.g., `("x", "Vec")`).
     #[serde(default)]
     pub local_types: Vec<(String, String)>,
+    /// Return type (e.g., `"Result<Vec<Item>>"`, `"Self"`).
+    #[serde(default)]
+    pub return_type: Option<String>,
 }
 
 /// Parse the text field of a code chunk into a [`CodeChunk`].
@@ -89,6 +92,7 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
     let mut param_types: Vec<(String, String)> = Vec::new();
     let mut field_types: Vec<(String, String)> = Vec::new();
     let mut local_types: Vec<(String, String)> = Vec::new();
+    let mut return_type: Option<String> = None;
 
     for line in lines_iter {
         if let Some(f) = line.strip_prefix("File: ") {
@@ -111,6 +115,11 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
             file = normalize_path(f);
         } else if let Some(s) = line.strip_prefix("Signature: ") {
             signature = Some(s.trim().to_owned());
+        } else if let Some(r) = line.strip_prefix("Returns: ") {
+            let r = r.trim();
+            if !r.is_empty() {
+                return_type = Some(r.to_owned());
+            }
         } else if let Some(c) = line.strip_prefix("Calls: ") {
             // Parse "name@line" annotations: split off @N suffix
             for token in c.split(", ") {
@@ -177,15 +186,6 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
                     local_types.push((name, ty));
                 }
             }
-        } else if let Some(lt) = line.strip_prefix("Locals: ") {
-            for token in lt.split(", ") {
-                let token = token.trim();
-                if let Some(colon) = token.find(": ") {
-                    let name = token[..colon].to_owned();
-                    let ty = token[colon + 2..].to_owned();
-                    local_types.push((name, ty));
-                }
-            }
         }
     }
 
@@ -208,6 +208,7 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         param_types,
         field_types,
         local_types,
+        return_type,
     })
 }
 

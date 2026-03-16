@@ -16,6 +16,7 @@ pub fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         param_types: vec![],
         field_types: vec![],
         local_types: vec![],
+        return_type: None,
     }
 }
 
@@ -35,5 +36,6 @@ pub fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
         param_types: vec![],
         field_types: vec![],
         local_types: vec![],
+        return_type: None,
     }
 }

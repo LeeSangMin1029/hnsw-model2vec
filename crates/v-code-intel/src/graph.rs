@@ -17,7 +17,7 @@ use crate::lsp::CallMap;
 use crate::parse::CodeChunk;
 
 /// Cache format version — bump when struct layout changes.
-const CACHE_VERSION: u8 = 5;
+const CACHE_VERSION: u8 = 6;
 
 /// Pre-built call graph with bidirectional adjacency lists.
 #[derive(bincode::Encode, bincode::Decode)]
@@ -166,9 +166,11 @@ impl CallGraph {
         let meta = ChunkMeta::collect(chunks);
         let mut adj = AdjState::new(chunks.len());
         let owner_types = collect_owner_types(chunks, &meta);
+        let owner_field_types = collect_owner_field_types(chunks);
+        let return_type_map = build_return_type_map(chunks);
 
         for (src, c) in chunks.iter().enumerate() {
-            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &mut adj, &HashSet::new());
+            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &owner_field_types, &return_type_map, &mut adj, &HashSet::new());
         }
 
         adj.dedup();
@@ -196,6 +198,8 @@ impl CallGraph {
 
         let mut adj = AdjState::new(len);
         let owner_types = collect_owner_types(chunks, &meta);
+        let owner_field_types = collect_owner_field_types(chunks);
+        let return_type_map = build_return_type_map(chunks);
 
         // Build chunk-index → resolved callee list lookup.
         let resolved_for_chunk: Vec<Option<Vec<String>>> = {
@@ -248,7 +252,7 @@ impl CallGraph {
             }
 
             // Tree-sitter fallback for calls NOT covered by LSP resolution.
-            Self::resolve_chunk_edges(src, c, &exact_single, &meta.short, &owner_types, &mut adj, &resolved_names);
+            Self::resolve_chunk_edges(src, c, &exact_single, &meta.short, &owner_types, &owner_field_types, &return_type_map, &mut adj, &resolved_names);
         }
 
         adj.dedup();
@@ -265,6 +269,8 @@ impl CallGraph {
         exact: &BTreeMap<String, u32>,
         short: &BTreeMap<String, u32>,
         owner_types: &BTreeMap<String, Vec<String>>,
+        owner_field_types: &BTreeMap<String, BTreeMap<String, String>>,
+        return_type_map: &BTreeMap<String, String>,
         adj: &mut AdjState,
         skip_calls: &HashSet<String>,
     ) {
@@ -281,6 +287,19 @@ impl CallGraph {
                 }
             }
         }
+        // Build receiver name → type lookup from param/local/field types.
+        let mut receiver_types = build_receiver_type_map(chunk);
+        // Enrich with struct field types for self.field resolution.
+        if let Some(ref owner) = self_type {
+            if let Some(fields) = owner_field_types.get(owner.as_str()) {
+                for (field_name, field_type) in fields {
+                    receiver_types.entry(field_name.clone()).or_insert_with(|| field_type.clone());
+                }
+            }
+        }
+        // Infer local variable types from return_type_map.
+        // `let x = Foo::new()` → if return_type_map["foo::new"] = "foo", then x: foo.
+        infer_local_types_from_calls(&chunk.calls, return_type_map, &mut receiver_types);
         for (call_idx, call) in chunk.calls.iter().enumerate() {
             if !skip_calls.is_empty() {
                 let call_short = call.to_lowercase();
@@ -292,6 +311,7 @@ impl CallGraph {
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &imports,
                 self_type.as_deref(), &enriched_types, &call_types,
+                &receiver_types,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 adj.add_edge(src, tgt, call_line);
@@ -440,22 +460,7 @@ fn graph_cache_path(db: &Path) -> std::path::PathBuf {
 /// 4. Direct import match for bare names
 /// 5. Type-reference heuristic: `var.method` where source chunk references
 ///    a type that has `::method` → resolve to that type's method
-/// 6. Short name fallback for `::` calls; receiver-type gated for `.` calls
-/// Methods too common/ambiguous for unknown-receiver fallback resolution.
-fn is_common_method(method: &str) -> bool {
-    matches!(
-        method,
-        "new" | "default" | "from" | "into" | "clone" | "to_owned"
-            | "to_string" | "as_ref" | "as_mut" | "iter" | "len"
-            | "is_empty" | "push" | "pop" | "insert" | "get"
-            | "contains" | "remove" | "map" | "filter" | "collect"
-            | "unwrap" | "join" | "split" | "trim" | "parse"
-            | "display" | "fmt" | "write" | "read" | "flush"
-            | "search" | "open" | "close" | "load" | "save"
-            | "send" | "recv" | "next" | "run" | "start" | "stop"
-    )
-}
-
+/// 6. Short name fallback for `::` calls; type-gated for `.` calls (no hardcoded blocklist)
 fn resolve_with_imports(
     call: &str,
     exact: &BTreeMap<String, u32>,
@@ -464,6 +469,7 @@ fn resolve_with_imports(
     self_type: Option<&str>,
     source_types: &[String],
     call_types: &[String],
+    receiver_types: &BTreeMap<String, String>,
 ) -> Option<u32> {
     let lower = call.to_lowercase();
 
@@ -483,22 +489,35 @@ fn resolve_with_imports(
                 return Some(idx);
             }
         }
-        // 2b. self.field.method → match field name against type_refs to infer type.
-        //     e.g. self.sparse_index.search → field "sparse_index", type "Bm25Index"
+        // 2b. self.field.method → look up field type from receiver_types (populated
+        //     from owner_field_types), then resolve FieldType::method.
+        //     e.g. self.tokenizer.encode → receiver_types["tokenizer"] = "tokenizer" → Tokenizer::encode
         if let Some((field_path, _)) = method.rsplit_once('.') {
             let field_leaf = field_path.rsplit_once('.').map_or(field_path, |p| p.1);
+            // Direct field type lookup (from struct definition)
+            if let Some(field_type) = receiver_types.get(field_leaf) {
+                let candidate = format!("{field_type}::{leaf_method}");
+                if let Some(&idx) = exact.get(&candidate) {
+                    return Some(idx);
+                }
+                // Field type exists in project → allow short fallback
+                if short.contains_key(field_type) || exact.contains_key(field_type) {
+                    if let Some(&idx) = short.get(leaf_method) {
+                        return Some(idx);
+                    }
+                }
+                // Field type is external → skip to avoid false positive
+                return None;
+            }
+            // Fallback: try type_refs heuristic
             for ty in source_types.iter().chain(call_types.iter()) {
-                // Heuristic: field name contains type name (sparse_index ~ Bm25Index)
-                // or type name contains field name fragment
                 let ty_lower = ty.to_lowercase();
                 let candidate = format!("{ty_lower}::{leaf_method}");
                 if let Some(&idx) = exact.get(&candidate) {
                     return Some(idx);
                 }
-                // Also try: field name as-is matches a short type name
-                let _ = field_leaf; // used below
             }
-            // Try field_leaf directly as a type name
+            // Try field_leaf directly as a type name via imports
             if let Some(qualified) = imports.get(field_leaf) {
                 let candidate = format!("{qualified}::{leaf_method}");
                 if let Some(&idx) = exact.get(&candidate) {
@@ -551,11 +570,26 @@ fn resolve_with_imports(
         if imports.contains_key(receiver_leaf) || exact.contains_key(receiver_leaf) {
             return short.get(method).copied();
         }
-        // 6b. Unknown receiver fallback: try short match if method name is
-        // sufficiently specific (not a common trait/stdlib method).
-        if !is_common_method(method) {
-            return short.get(method).copied();
+        // 6b. Type-aware receiver check: if we know the receiver's type from
+        // param_types/local_types/field_types, only match if that type is a
+        // project-internal type (exists in exact or short map).
+        if let Some(recv_type) = receiver_types.get(receiver_leaf) {
+            let ty_lower = recv_type.to_lowercase();
+            // Type exists in project → resolve via Type::method or short fallback
+            let qualified = format!("{ty_lower}::{method}");
+            if let Some(&idx) = exact.get(&qualified) {
+                return Some(idx);
+            }
+            // Type is in project (exact or short map) → allow short fallback
+            if short.contains_key(&ty_lower) || exact.contains_key(&ty_lower) {
+                return short.get(method).copied();
+            }
+            // Type is external (File, OpenOptions, etc.) → skip
+            return None;
         }
+        // 6c. Unknown receiver, unknown type → don't match.
+        // As type inference improves, more receivers become known and
+        // true positives recover automatically — no hardcoded blocklist needed.
         return None;
     }
     None
@@ -627,6 +661,61 @@ fn collect_owner_types(chunks: &[CodeChunk], _meta: &ChunkMeta) -> BTreeMap<Stri
     result
 }
 
+/// Collect struct field name → type mappings keyed by owning type (lowercase).
+///
+/// E.g. struct `MmapStaticModel { tokenizer: Tokenizer, weights: Vec }` →
+/// `{"mmapmstaticmodel": {"tokenizer": "tokenizer", "weights": "vec"}}`.
+fn collect_owner_field_types(chunks: &[CodeChunk]) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut result: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for c in chunks {
+        if c.kind != "struct" {
+            continue;
+        }
+        let lower = c.name.to_lowercase();
+        let leaf = lower.rsplit("::").next().unwrap_or(&lower);
+        let key = leaf.split('<').next().unwrap_or(leaf);
+        let entry = result.entry(key.to_owned()).or_default();
+        for (field_name, field_type) in &c.field_types {
+            entry.insert(field_name.to_lowercase(), field_type.to_lowercase());
+        }
+    }
+    result
+}
+
+/// Build function name → return type map (lowercase → lowercase leaf type).
+///
+/// Resolves `Self` to the owning type: `Foo::new → Self` becomes `foo::new → foo`.
+fn build_return_type_map(chunks: &[CodeChunk]) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for c in chunks {
+        if c.kind != "function" {
+            continue;
+        }
+        let Some(ref ret) = c.return_type else { continue };
+        let ret_lower = ret.to_lowercase();
+        // Extract leaf type: "Result<Vec<Item>>" → "result", "Option<String>" → "option"
+        // For Self resolution, check the raw type
+        let leaf = extract_leaf_type(&ret_lower);
+        let resolved = if leaf == "self" || leaf == "&self" || leaf == "&mut self" {
+            // Resolve Self to owning type
+            owning_type(&c.name).unwrap_or(leaf.to_owned())
+        } else {
+            leaf.to_owned()
+        };
+        let name_lower = c.name.to_lowercase();
+        map.insert(name_lower, resolved);
+    }
+    map
+}
+
+/// Extract the leaf type name from a possibly generic/reference type string.
+/// `"result<vec<item>>"` → `"result"`, `"&mut foo"` → `"foo"`, `"Self"` → `"self"`
+fn extract_leaf_type(ty: &str) -> &str {
+    let ty = ty.strip_prefix('&').unwrap_or(ty);
+    let ty = ty.strip_prefix("mut ").unwrap_or(ty);
+    ty.split('<').next().unwrap_or(ty).trim()
+}
+
 /// Extract type names from `::` call prefixes.
 ///
 /// E.g. `["DeltaNeighbors::from_ids", "Vec::new"]` → `["deltaneighbors", "vec"]`.
@@ -661,6 +750,64 @@ fn strip_generics_from_key(key: &str) -> String {
         }
     }
     out
+}
+
+/// Build a receiver name → type map from param_types, local_types, field_types.
+///
+/// E.g. `param_types = [("handle", "File")]` → `{"handle": "file"}` (lowercase).
+/// For `self.field` lookups, field_types are keyed as-is.
+fn build_receiver_type_map(chunk: &CodeChunk) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for (name, ty) in &chunk.param_types {
+        let name_lower = name.to_lowercase();
+        let ty_lower = ty.to_lowercase();
+        if name_lower != "self" && !ty_lower.is_empty() {
+            map.insert(name_lower, ty_lower);
+        }
+    }
+    for (name, ty) in &chunk.local_types {
+        let name_lower = name.to_lowercase();
+        let ty_lower = ty.to_lowercase();
+        if !ty_lower.is_empty() {
+            map.insert(name_lower, ty_lower);
+        }
+    }
+    for (name, ty) in &chunk.field_types {
+        let name_lower = name.to_lowercase();
+        let ty_lower = ty.to_lowercase();
+        if !ty_lower.is_empty() {
+            map.insert(name_lower, ty_lower);
+        }
+    }
+    map
+}
+
+/// Infer local variable types from `Foo::bar()` calls + return type map.
+///
+/// Scans calls for `Foo::new`, `Foo::open`, etc. patterns and uses the return_type_map
+/// to infer that the result variable is of type Foo (or the actual return type).
+/// This enables resolution of `x.method()` when `x = Foo::new()`.
+fn infer_local_types_from_calls(
+    calls: &[String],
+    return_type_map: &BTreeMap<String, String>,
+    receiver_types: &mut BTreeMap<String, String>,
+) {
+    for call in calls {
+        // Only process `Type::method` patterns (constructors/static methods)
+        let Some((prefix, _suffix)) = call.split_once("::") else { continue };
+        let leaf_type = prefix.rsplit("::").next().unwrap_or(prefix);
+        let call_lower = call.to_lowercase();
+        // Look up return type of this function call
+        if let Some(ret_type) = return_type_map.get(&call_lower) {
+            // The return type is the inferred type for any variable assigned from this call.
+            // We use the type prefix as a potential receiver name hint.
+            // E.g. `let engine = StorageEngine::open()` → engine: storageengine
+            let type_lower = leaf_type.to_lowercase();
+            // Add the type itself as a known "callable type" — this helps when
+            // the variable name matches the type pattern (engine ~ StorageEngine).
+            receiver_types.entry(type_lower).or_insert_with(|| ret_type.clone());
+        }
+    }
 }
 
 fn owning_type(name: &str) -> Option<String> {

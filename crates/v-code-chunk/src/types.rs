@@ -193,6 +193,11 @@ impl CodeChunk {
             parts.push(format!("Fields: {}", fields.join(", ")));
         }
 
+        // Return type
+        if let Some(ref ret) = self.return_type {
+            parts.push(format!("Returns: {ret}"));
+        }
+
         // Type references
         if !self.type_refs.is_empty() {
             parts.push(format!("Types: {}", self.type_refs.join(", ")));

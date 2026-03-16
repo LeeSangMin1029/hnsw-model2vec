@@ -20,6 +20,7 @@ fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> CodeChunk {
         param_types: vec![],
         field_types: vec![],
         local_types: vec![],
+        return_type: None,
     }
 }
 

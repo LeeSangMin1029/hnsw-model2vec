@@ -62,6 +62,7 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            return_type: None,
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -78,6 +79,7 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            return_type: None,
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -94,6 +96,7 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            return_type: None,
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -110,6 +113,7 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            return_type: None,
         },
         CodeChunk {
             kind: "function".to_owned(),
@@ -126,6 +130,7 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            return_type: None,
         },
     ];
     CallGraph::build(&chunks)
