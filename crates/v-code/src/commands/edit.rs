@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use v_code_intel::loader::load_chunks;
-use v_code_intel::lsp::find_project_root;
+use v_code_intel::helpers::find_project_root;
 use v_code_intel::parse::CodeChunk;
 
 // ── Symbol location ─────────────────────────────────────────────────────

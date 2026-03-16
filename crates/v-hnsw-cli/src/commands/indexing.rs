@@ -144,6 +144,39 @@ pub fn update_indexes_incremental(
     Ok(())
 }
 
+/// Update BM25 index only (skip HNSW/SQ8 which require real vectors).
+///
+/// Used by `v-code add` when inserting with zero vectors (text-only mode).
+pub fn update_bm25_only(
+    path: &Path,
+    engine: &StorageEngine,
+    _config: &DbConfig,
+    added_ids: &[u64],
+    removed_ids: &[u64],
+) -> Result<()> {
+    let bm25_path = path.join("bm25.bin");
+    let bm25_exists = bm25_path.exists()
+        || v_hnsw_search::bm25_fst_exists(path);
+    let total_changes = added_ids.len() + removed_ids.len();
+
+    let payload_store = engine.payload_store();
+
+    if !bm25_exists {
+        // Full BM25 build
+        println!("  Building BM25 index (code=true)...");
+        let bm25_path = path.join("bm25.bin");
+        let ids: Vec<u64> = engine.vector_store().id_map().keys().copied().collect();
+        build_bm25(CodeTokenizer::new(), &bm25_path, payload_store, &ids)?;
+        println!("  BM25 index saved: {}", bm25_path.display());
+    } else if total_changes > 0 {
+        update_bm25::<CodeTokenizer>(&bm25_path, path, payload_store, added_ids, removed_ids)?;
+        println!("  BM25 index updated ({total_changes} changes) + snapshot.");
+    }
+
+    tracing::info!("BM25-only index update completed");
+    Ok(())
+}
+
 /// Build SQ8 quantized vector index from the f32 vector store.
 ///
 /// Trains per-dimension min/max parameters, then quantizes all vectors.

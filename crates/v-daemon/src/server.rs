@@ -88,7 +88,7 @@ pub fn run(
         .as_deref()
         .and_then(|db| {
             let db_canon = db.canonicalize().ok()?;
-            let project_root = v_code_intel::lsp::find_project_root(&db_canon)?;
+            let project_root = v_code_intel::helpers::find_project_root(&db_canon)?;
             eprintln!("[daemon] Project root: {}", project_root.display());
             // Read input_path from DB config for auto-reindex.
             let input_path = v_hnsw_storage::DbConfig::load(&db_canon)
@@ -110,7 +110,6 @@ pub fn run(
 
         state.maybe_unload_model();
         state.maybe_evict_databases();
-        state.maybe_evict_lsp();
 
         // Poll file watcher for source changes → invalidate graph cache + auto-reindex.
         if let Some(ref mut w) = watcher {

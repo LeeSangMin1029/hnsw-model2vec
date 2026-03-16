@@ -31,7 +31,12 @@ pub struct DbConfig {
     /// Original input path used during `add` (for `update` default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_path: Option<String>,
+    /// Whether vectors have been embedded (false = text-only, zero vectors).
+    #[serde(default = "default_true")]
+    pub embedded: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for DbConfig {
     fn default() -> Self {
@@ -45,6 +50,7 @@ impl Default for DbConfig {
             embed_model: None,
             code: false,
             input_path: None,
+            embedded: true,
         }
     }
 }

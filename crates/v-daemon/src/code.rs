@@ -1,21 +1,15 @@
 //! Code intelligence (v-code) daemon handler: graph/build.
 //!
-//! Uses the daemon's persistent LSP server (rust-analyzer) to resolve
-//! call graphs without cold-start overhead.
-//! Supports incremental resolution — only re-queries LSP for changed files.
+//! Builds call graphs using tree-sitter + rustdoc type enrichment.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-
-use crate::state::DaemonState;
-use v_code_intel::call_map_cache::CallMapCache;
 
 /// Serializes concurrent `graph/build` requests so only one runs at a time.
 static GRAPH_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn handle_graph_build(
     params: serde_json::Value,
-    state: &mut DaemonState,
 ) -> anyhow::Result<serde_json::Value> {
     let _guard = GRAPH_LOCK
         .lock()
@@ -34,67 +28,30 @@ pub fn handle_graph_build(
         .unwrap_or_else(|_| db_path.clone());
 
     let chunks = v_code_intel::loader::load_chunks(&db)?;
-    let project_root = v_code_intel::lsp::find_project_root(&db)
+    let project_root = v_code_intel::helpers::find_project_root(&db)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // Load cached CallMap for incremental resolution.
-    let old_cache = CallMapCache::load(&db);
-    let changed_files = match &old_cache {
-        Some(cache) => cache.changed_files(&chunks, &project_root),
-        None => chunks.iter().map(|c| c.file.as_str()).collect(),
-    };
+    // Try loading cached rustdoc types, or generate if not available.
+    let rustdoc = v_code_intel::rustdoc::load_cached(&db)
+        .or_else(|| {
+            let types = v_code_intel::rustdoc::generate_and_load(&project_root)?;
+            v_code_intel::rustdoc::save_to_cache(&db, &project_root);
+            Some(types)
+        });
 
-    let total_files: std::collections::HashSet<&str> =
-        chunks.iter().map(|c| c.file.as_str()).collect();
-
-    let resolved_calls = if changed_files.is_empty() {
-        eprintln!("[daemon] All files unchanged — using cached CallMap");
-        old_cache.as_ref().map(CallMapCache::to_call_map).unwrap_or_default()
-    } else {
-        eprintln!("[daemon] {}/{} files changed — incremental LSP resolution",
-            changed_files.len(), total_files.len());
-
-        // Use daemon's persistent LSP server (no cold start).
-        let resolver = state.ensure_lsp(&project_root)?;
-        let new_calls = resolver
-            .resolve_calls_for_files(&chunks, &project_root, &changed_files)
-            .unwrap_or_default();
-
-        // Build and save updated cache.
-        let new_cache = CallMapCache::build(
-            &chunks,
-            old_cache.as_ref(),
-            &new_calls,
-            &changed_files,
-            &project_root,
-        );
-        new_cache.save(&db);
-
-        new_cache.to_call_map()
-    };
-
-    let entry_count = resolved_calls.len();
-
-    let graph = if resolved_calls.is_empty() {
-        v_code_intel::graph::CallGraph::build(&chunks)
-    } else {
-        v_code_intel::graph::CallGraph::build_with_resolved_calls(&chunks, &resolved_calls)
-    };
-
+    let graph = v_code_intel::graph::CallGraph::build_with_rustdoc(&chunks, rustdoc.as_ref());
     let _ = graph.save(&db);
 
+    let has_rustdoc = rustdoc.is_some();
     eprintln!(
-        "[daemon] Graph built: {} nodes, {} LSP entries ({} files re-resolved)",
+        "[daemon] Graph built: {} nodes, rustdoc={}",
         graph.len(),
-        entry_count,
-        changed_files.len(),
+        has_rustdoc,
     );
 
     Ok(serde_json::json!({
         "status": "ok",
         "nodes": graph.len(),
-        "lsp_entries": entry_count,
-        "files_resolved": changed_files.len(),
-        "files_cached": total_files.len() - changed_files.len(),
+        "rustdoc": has_rustdoc,
     }))
 }

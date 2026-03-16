@@ -1,2 +1,2 @@
 mod graph;
-mod lsp;
+mod rustdoc;

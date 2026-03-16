@@ -13,8 +13,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::lsp::CallMap;
 use crate::parse::CodeChunk;
+use crate::rustdoc::RustdocTypes;
 
 /// Cache format version — bump when struct layout changes.
 const CACHE_VERSION: u8 = 6;
@@ -163,6 +163,11 @@ impl CallGraph {
     /// Resolution strategy: exact match on lowercase name first, then
     /// short name (last `::` segment) fallback.
     pub fn build(chunks: &[CodeChunk]) -> Self {
+        Self::build_with_rustdoc(chunks, None)
+    }
+
+    /// Build the call graph, optionally enriched with rustdoc JSON type info.
+    pub fn build_with_rustdoc(chunks: &[CodeChunk], rustdoc: Option<&RustdocTypes>) -> Self {
         let meta = ChunkMeta::collect(chunks);
         let mut adj = AdjState::new(chunks.len());
         let owner_types = collect_owner_types(chunks, &meta);
@@ -171,90 +176,7 @@ impl CallGraph {
         let trait_methods = collect_trait_methods(chunks);
 
         for (src, c) in chunks.iter().enumerate() {
-            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &mut adj, &HashSet::new());
-        }
-
-        adj.dedup();
-        Self::from_parts(meta, adj, chunks)
-    }
-
-    /// Build the call graph using language-resolved calls (LSP definition, etc.)
-    /// when available, falling back to tree-sitter heuristics for unmatched calls.
-    pub fn build_with_resolved_calls(chunks: &[CodeChunk], resolved_calls: &CallMap) -> Self {
-        let meta = ChunkMeta::collect(chunks);
-        let len = chunks.len();
-
-        // Multi-map: name → all chunk indices (for LSP resolved call matching).
-        let mut exact_multi: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        for (i, c) in chunks.iter().enumerate() {
-            let idx = i as u32;
-            let lower = c.name.to_lowercase();
-            exact_multi.entry(lower.clone()).or_default().push(idx);
-            let stripped = strip_generics_from_key(&lower);
-            if stripped != lower {
-                exact_multi.entry(stripped.clone()).or_default().push(idx);
-                // Also add stripped to single-value map (meta.exact doesn't have it).
-            }
-        }
-
-        let mut adj = AdjState::new(len);
-        let owner_types = collect_owner_types(chunks, &meta);
-        let owner_field_types = collect_owner_field_types(chunks);
-        let return_type_map = build_return_type_map(chunks);
-        let trait_methods = collect_trait_methods(chunks);
-
-        // Build chunk-index → resolved callee list lookup.
-        let resolved_for_chunk: Vec<Option<Vec<String>>> = {
-            let mut per_chunk: Vec<Option<Vec<String>>> = vec![None; len];
-            for (fn_name, callees_list) in resolved_calls {
-                let fn_lower = fn_name.to_lowercase();
-                let fn_module = fn_lower.rsplit_once("::").map(|(prefix, _)| prefix);
-                if let Some(idx) = find_best_chunk_match(&fn_lower, fn_module, &exact_multi, chunks) {
-                    per_chunk[idx as usize]
-                        .get_or_insert_with(Vec::new)
-                        .extend(callees_list.iter().cloned());
-                }
-            }
-            per_chunk
-        };
-
-        // Also build exact_single with stripped generics for tree-sitter fallback.
-        let mut exact_single = meta.exact.clone();
-        for (i, c) in chunks.iter().enumerate() {
-            let lower = c.name.to_lowercase();
-            let stripped = strip_generics_from_key(&lower);
-            if stripped != lower {
-                exact_single.insert(stripped, i as u32);
-            }
-        }
-
-        for (src, c) in chunks.iter().enumerate() {
-            let mut resolved_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-            // Build a short-name → call_line lookup from tree-sitter data.
-            let ts_call_lines: BTreeMap<String, u32> = c.calls.iter().enumerate().map(|(i, name)| {
-                let short = name.rsplit("::").next().unwrap_or(name).to_lowercase();
-                let line = c.call_lines.get(i).copied().unwrap_or(0);
-                (short, line)
-            }).collect();
-
-            // Try LSP-resolved calls first.
-            if let Some(resolved_callees) = resolved_for_chunk[src].as_ref() {
-                for callee_name in resolved_callees {
-                    let callee_lower = callee_name.to_lowercase();
-                    let callee_module = callee_lower.rsplit_once("::").map(|(p, _)| p);
-                    if let Some(tgt) = find_best_chunk_match(&callee_lower, callee_module, &exact_multi, chunks) {
-                        let short_name = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
-                        let call_line = ts_call_lines.get(short_name).copied().unwrap_or(0);
-                        adj.add_edge(src, tgt, call_line);
-                    }
-                    let short_name = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
-                    resolved_names.insert(short_name.to_owned());
-                }
-            }
-
-            // Tree-sitter fallback for calls NOT covered by LSP resolution.
-            Self::resolve_chunk_edges(src, c, &exact_single, &meta.short, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &mut adj, &resolved_names);
+            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &owner_types, &owner_field_types, &return_type_map, &trait_methods, rustdoc, &mut adj, &HashSet::new());
         }
 
         adj.dedup();
@@ -263,8 +185,7 @@ impl CallGraph {
 
     /// Resolve tree-sitter edges for a single chunk.
     ///
-    /// Shared by `build()` and `build_with_resolved_calls()` (fallback path).
-    /// `skip_calls` contains short names already resolved by LSP — those are skipped.
+    /// `skip_calls` contains short names already resolved — those are skipped.
     fn resolve_chunk_edges(
         src: usize,
         chunk: &CodeChunk,
@@ -274,6 +195,7 @@ impl CallGraph {
         owner_field_types: &BTreeMap<String, BTreeMap<String, String>>,
         return_type_map: &BTreeMap<String, String>,
         trait_methods: &BTreeSet<String>,
+        rustdoc: Option<&RustdocTypes>,
         adj: &mut AdjState,
         skip_calls: &HashSet<String>,
     ) {
@@ -314,7 +236,7 @@ impl CallGraph {
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &imports,
                 self_type.as_deref(), &enriched_types, &call_types,
-                &receiver_types, trait_methods,
+                &receiver_types, trait_methods, rustdoc,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 adj.add_edge(src, tgt, call_line);
@@ -474,6 +396,7 @@ fn resolve_with_imports(
     call_types: &[String],
     receiver_types: &BTreeMap<String, String>,
     trait_methods: &BTreeSet<String>,
+    rustdoc: Option<&RustdocTypes>,
 ) -> Option<u32> {
     let lower = call.to_lowercase();
 
@@ -591,13 +514,35 @@ fn resolve_with_imports(
             // Type is external (File, OpenOptions, etc.) → skip
             return None;
         }
-        // 6c. Unknown receiver → check if method is a trait method.
-        // Trait methods (clone, next, into, etc.) are too ambiguous without
-        // type info → skip. Non-trait methods are likely project-specific → allow.
-        if trait_methods.contains(method) {
-            return None;
+        // 6c. Unknown receiver → try rustdoc method→owner disambiguation.
+        //     Only resolve if the owner type appears in the function's type context
+        //     (source_types or call_types). This prevents false positives like
+        //     resolving HashMap::get() to Sq8VectorStore::get() just because
+        //     Sq8VectorStore is the only project type with a `get` method.
+        if let Some(rdoc) = rustdoc {
+            if let Some(owners) = rdoc.owners_of(method) {
+                // Check if any owner type appears in the function's type context.
+                let ctx_owner = owners.iter().find(|o| {
+                    let ol = o.to_lowercase();
+                    source_types.iter().chain(call_types.iter())
+                        .any(|t| t.to_lowercase() == ol)
+                });
+                if let Some(owner) = ctx_owner {
+                    let qualified = format!("{owner}::{method}");
+                    if let Some(&idx) = exact.get(&qualified) {
+                        return Some(idx);
+                    }
+                }
+                // Rustdoc knows this method exists on project types but none are
+                // in context → likely called on an external type (HashMap, Vec, etc.)
+                // → skip short fallback to avoid false positives.
+                return None;
+            }
         }
-        return short.get(method).copied();
+        // 6d. Unknown receiver + unknown method → too ambiguous for short fallback.
+        // Without type info, `.method()` could be on any std type (HashMap, Vec, etc.)
+        // → skip entirely to avoid false positives.
+        return None;
     }
     None
 }
@@ -881,79 +826,6 @@ fn build_import_map(imports: &[String]) -> BTreeMap<String, String> {
         }
     }
     map
-}
-
-/// Pick the best index from `indices` by matching module name against file path.
-/// Prefers `.rs` files; returns first file-match or `None`.
-fn disambiguate_by_module(
-    indices: &[u32],
-    mod_prefix: &str,
-    chunks: &[CodeChunk],
-) -> Option<u32> {
-    let last_mod = mod_prefix.rsplit("::").next().unwrap_or(mod_prefix);
-    let last_mod_no_us = last_mod.replace('_', "");
-    let mut fallback: Option<u32> = None;
-    for &idx in indices {
-        let file_lower = chunks[idx as usize].file.to_lowercase();
-        let file_no_us = file_lower.replace('_', "");
-        if file_lower.contains(last_mod) || file_no_us.contains(&last_mod_no_us) {
-            if file_lower.ends_with(".rs") {
-                return Some(idx);
-            }
-            if fallback.is_none() {
-                fallback = Some(idx);
-            }
-        }
-    }
-    fallback
-}
-
-/// Find the best chunk match for a resolved function name.
-///
-/// Tries exact match first, then suffix match with module-to-file disambiguation.
-fn find_best_chunk_match(
-    fn_lower: &str,
-    fn_module: Option<&str>,
-    exact: &BTreeMap<String, Vec<u32>>,
-    chunks: &[CodeChunk],
-) -> Option<u32> {
-    // Exact match: resolved name == chunk name.
-    if let Some(indices) = exact.get(fn_lower) {
-        if indices.len() == 1 {
-            return Some(indices[0]);
-        }
-        if let Some(mod_prefix) = fn_module
-            && let Some(idx) = disambiguate_by_module(indices, mod_prefix, chunks) {
-            return Some(idx);
-        }
-        return Some(indices[0]);
-    }
-
-    // Suffix match: "graph::CallGraph::build" → chunk "CallGraph::build".
-    let mut best: Option<u32> = None;
-    for (chunk_name, indices) in exact {
-        if !fn_lower.ends_with(chunk_name.as_str()) {
-            continue;
-        }
-        let prefix_len = fn_lower.len() - chunk_name.len();
-        if prefix_len > 0 && fn_lower.as_bytes()[prefix_len - 1] != b':' {
-            continue;
-        }
-
-        if let Some(mod_prefix) = fn_module {
-            if let Some(idx) = disambiguate_by_module(indices, mod_prefix, chunks) {
-                return Some(idx);
-            }
-        }
-        // Bare names without "::" skip unless module-disambiguated above.
-        if !chunk_name.contains("::") {
-            continue;
-        }
-        if best.is_none() {
-            best = Some(indices[0]);
-        }
-    }
-    best
 }
 
 /// Check if a file path looks like a test file.

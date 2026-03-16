@@ -530,7 +530,7 @@ fn run_analyze(db: &Path, pair_names: &[(String, String)]) -> Result<()> {
     use v_code_intel::dupe_analyze;
     use super::intel::load_or_build_graph;
 
-    let graph = load_or_build_graph(db, None)?;
+    let graph = load_or_build_graph(db)?;
 
     // Resolve each name pair to graph indices.
     let mut resolved_pairs: Vec<(u32, u32, &str, &str)> = Vec::new();

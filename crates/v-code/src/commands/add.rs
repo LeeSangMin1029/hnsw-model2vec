@@ -1,34 +1,27 @@
 //! Code-specific add/update command.
 //!
-//! Chunks code files via tree-sitter, embeds with Model2Vec,
-//! and stores in a v-hnsw database. Uses shared infrastructure
-//! from v-hnsw-cli for ingestion, payload building, and file indexing.
+//! Chunks code files via tree-sitter, stores text + payload only.
+//! No embedding or index building — those are deferred to `v-code embed`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 
 use v_code_chunk as chunk_code;
-use v_hnsw_cli::commands::common;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::scan_files;
 use super::ingest::{CodeChunkEntry, entries_to_records};
-use v_hnsw_cli::commands::add::ingest::finalize_ingest;
+use v_hnsw_cli::commands::add::ingest::finalize_ingest_text_only;
 use v_hnsw_cli::is_interrupted;
+use v_hnsw_core::VectorStore;
+use v_hnsw_storage::{StorageConfig, StorageEngine};
 
-// ── Model loading ────────────────────────────────────────────────────────
-
-/// Load the embedding model (Model2Vec / potion).
-fn load_code_model() -> Result<Model2VecModel> {
-    let model = Model2VecModel::new()
-        .context("Failed to load Model2Vec embedding model")?;
-
-    println!("Embed model: {} (dim={})", model.name(), model.dim());
-    Ok(model)
-}
+/// Placeholder dimension for text-only storage (no real vectors).
+const TEXT_ONLY_DIM: usize = 1;
+/// Model name stored in config for later `v-code embed` to detect.
+const TEXT_ONLY_MODEL: &str = "text-only";
 
 
 // ── Public entry points ──────────────────────────────────────────────────
@@ -48,6 +41,12 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             input_path.display()
         );
     }
+
+    // Build set of current source paths for deleted-file detection.
+    let current_sources: std::collections::HashSet<String> = all_files
+        .iter()
+        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source(f))
+        .collect();
 
     // Filter to changed files only (mtime check)
     let file_idx = file_index::load_file_index(&db_path)?;
@@ -79,15 +78,33 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let summary: Vec<String> = lang_summary.iter().map(|(l, n)| format!("{l}:{n}")).collect();
     println!("Files: {} ({})", code_files.len(), summary.join(", "));
 
-    // Load model
-    let model = load_code_model()?;
-
-    // Open/create database
-    let mut engine = common::ensure_database(&db_path, model.dim(), model.name(), false, true)?;
+    // Open/create database (text-only, dim=1 placeholder)
+    let mut engine = if db_path.exists() {
+        StorageEngine::open_exclusive(&db_path)
+            .with_context(|| format!("Failed to open database at {}", db_path.display()))?
+    } else {
+        println!("New database: {} (dim={TEXT_ONLY_DIM})", db_path.display());
+        let config = StorageConfig {
+            dim: TEXT_ONLY_DIM,
+            initial_capacity: 10_000,
+            checkpoint_threshold: 50_000,
+        };
+        let engine = StorageEngine::create(&db_path, config)
+            .with_context(|| format!("Failed to create database at {}", db_path.display()))?;
+        DbConfig {
+            dim: TEXT_ONLY_DIM,
+            code: true,
+            embedded: false,
+            embed_model: Some(TEXT_ONLY_MODEL.to_owned()),
+            ..DbConfig::default()
+        }.save(&db_path)?;
+        engine
+    };
 
     // Update config
     if let Ok(mut config) = DbConfig::load(&db_path) {
         config.code = true;
+        config.embedded = false;
         if let Ok(canonical) = input_path.canonicalize() {
             config.input_path = Some(canonical.to_string_lossy().into_owned());
         }
@@ -108,11 +125,33 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let records = entries_to_records(&entries);
     println!("Symbols: {} (functions, structs, enums, ...)", records.len());
 
-    // === Remove stale + embed + insert + update file index ===
-    let result = finalize_ingest(&db_path, records, &model, &mut engine, file_metadata_map)?;
+    // === Remove stale + insert text-only (no embedding) + update file index ===
+    let dim = engine.vector_store().dim();
+    let result = finalize_ingest_text_only(&db_path, records, dim, &mut engine, file_metadata_map)?;
     let inserted = result.inserted;
-    let removed_ids = result.removed_ids;
-    let _inserted_ids = result.added_ids;
+
+    // === Remove chunks from deleted files ===
+    let mut file_idx = file_index::load_file_index(&db_path)?;
+    let deleted: Vec<String> = file_idx.files.keys()
+        .filter(|p| !current_sources.contains(p.as_str()))
+        .cloned()
+        .collect();
+    if !deleted.is_empty() {
+        let mut del_count = 0usize;
+        for path in &deleted {
+            if let Some(entry) = file_idx.files.remove(path) {
+                for id in &entry.chunk_ids {
+                    let _ = engine.remove(*id);
+                    del_count += 1;
+                }
+            }
+        }
+        if del_count > 0 {
+            engine.checkpoint().ok();
+            file_index::save_file_index(&db_path, &file_idx)?;
+            eprintln!("Removed {del_count} chunks from {n} deleted file(s)", n = deleted.len());
+        }
+    }
 
     if is_interrupted() {
         println!();
@@ -123,12 +162,6 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     if inserted == 0 {
         println!("No symbols to index.");
     } else {
-        // Build HNSW + BM25 indexes
-        let config = DbConfig::load(&db_path)?;
-        v_hnsw_cli::commands::indexing::update_indexes_incremental(
-            &db_path, &engine, &config, &_inserted_ids, &removed_ids,
-        )?;
-
         // Notify daemon to reload if running
         if v_hnsw_storage::daemon_client::notify_reload(&db_path).is_ok() {
             println!("Daemon notified to reload indexes.");
@@ -136,7 +169,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 
         println!();
         println!("Done! Code DB ready: {}", db_path.display());
-        println!("Use: v-code find/symbols/def/refs/impact/gather/dupes {}", db_path.display());
+        println!("Use: v-code context/blast/jump/symbols/dupes {}", db_path.display());
     }
 
     Ok(())

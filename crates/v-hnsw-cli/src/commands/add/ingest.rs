@@ -162,6 +162,61 @@ pub fn finalize_ingest(
     })
 }
 
+/// Finalize ingest with zero vectors (text-only, no embedding).
+///
+/// Same as [`finalize_ingest`] but skips the embedding step for fast indexing.
+/// Real vectors can be filled in later via `v-code embed`.
+pub fn finalize_ingest_text_only(
+    db_path: &Path,
+    records: Vec<IngestRecord>,
+    dim: usize,
+    engine: &mut StorageEngine,
+    file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
+) -> Result<IngestResult> {
+    // Remove stale chunks for files being re-added
+    let mut removed_ids = Vec::new();
+    let file_index = file_index::load_file_index(db_path)?;
+    for (path, (_, _, new_ids)) in &file_metadata_map {
+        if let Some(existing) = file_index.get_file(path) {
+            for &old_id in &existing.chunk_ids {
+                if !new_ids.contains(&old_id) {
+                    let _ = engine.remove(old_id);
+                    removed_ids.push(old_id);
+                }
+            }
+        }
+    }
+    if !removed_ids.is_empty() {
+        engine.checkpoint().ok();
+        eprintln!(
+            "Removed {} stale chunks from re-added files",
+            removed_ids.len()
+        );
+    }
+
+    // Early cutoff: skip records whose body_hash matches existing payload.
+    let (records, skipped) = filter_unchanged_records(records, engine);
+    if skipped > 0 {
+        eprintln!("Skipped {skipped} unchanged symbols (body_hash match)");
+    }
+
+    let (inserted, errors, inserted_ids) =
+        crate::commands::pipeline::process_records_text_only(records, dim, engine)?;
+
+    let mut file_index = file_index::load_file_index(db_path)?;
+    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
+        file_index.update_file(path, mtime, size, chunk_ids);
+    }
+    file_index::save_file_index(db_path, &file_index)?;
+
+    Ok(IngestResult {
+        inserted,
+        errors,
+        added_ids: inserted_ids,
+        removed_ids,
+    })
+}
+
 /// Extract `body_hash` (i64) from a payload's custom fields.
 fn payload_body_hash(payload: &v_hnsw_core::Payload) -> Option<i64> {
     payload.custom.get("body_hash").and_then(|v| {

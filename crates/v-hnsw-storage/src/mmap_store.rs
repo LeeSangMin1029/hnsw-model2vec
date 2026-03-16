@@ -61,8 +61,10 @@ pub(crate) fn create_mmap_file(path: &Path, file_size: usize) -> Result<(File, M
 pub struct MmapVectorStore {
     #[allow(dead_code)]
     path: PathBuf,
-    file: File,
+    /// mmap MUST be declared before file so it drops first on Windows.
+    /// (Rust drops fields in declaration order.)
     mmap: MmapMut,
+    file: File,
     dim: Dim,
     slot_size: usize,
     capacity: u32,

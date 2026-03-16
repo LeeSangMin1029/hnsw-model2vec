@@ -169,7 +169,7 @@ pub fn run_context(
     use v_code_intel::context_cmd;
 
     let chunks = load_chunks(&db)?;
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let result = context_cmd::build_context(&graph, &chunks, &symbol, depth);
 
     if result.seeds.is_empty() {
@@ -294,7 +294,7 @@ pub fn run_blast(
     if matches!(format, OutputFormat::Json) {
         let key = format!("blast:{symbol}:{depth}:{include_tests}");
         return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db, None)?;
+            let graph = load_or_build_graph(&db)?;
             let seeds = graph.resolve(&symbol);
             let all_entries = impact::bfs_reverse(&graph, &seeds, depth);
             let summary = blast::summarize_blast(&graph, &all_entries);
@@ -310,7 +310,7 @@ pub fn run_blast(
         });
     }
 
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
 
     let all_entries = impact::bfs_reverse(&graph, &seeds, depth);
@@ -348,7 +348,7 @@ pub fn run_jump(
     if matches!(format, OutputFormat::Json) {
         let key = format!("jump:{symbol}:{depth}");
         return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db, None)?;
+            let graph = load_or_build_graph(&db)?;
             let seeds = graph.resolve(&symbol);
             let tree = jump::build_flow_tree(&graph, &seeds, depth);
             let json = jump::tree_to_json(&graph, &tree);
@@ -356,7 +356,7 @@ pub fn run_jump(
         });
     }
 
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
 
     println!("=== Execution Flow: {symbol} ===\n");
@@ -396,7 +396,7 @@ pub fn run_trace(
     if matches!(format, OutputFormat::Json) {
         let key = format!("trace:{from}:{to}");
         return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db, None)?;
+            let graph = load_or_build_graph(&db)?;
             let sources = graph.resolve(&from);
             let targets = graph.resolve(&to);
             let json = match trace::bfs_shortest_path(&graph, &sources, &targets) {
@@ -407,7 +407,7 @@ pub fn run_trace(
         });
     }
 
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let Some(sources) = resolve_symbol(&graph, &from) else { return Ok(()) };
     let Some(targets) = resolve_symbol(&graph, &to) else { return Ok(()) };
 
@@ -433,7 +433,7 @@ pub fn run_strings(
     use std::collections::BTreeMap;
     use v_code_intel::helpers::{apply_alias, build_path_aliases};
 
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let lower = query.to_lowercase();
     let callee_lower = callee_filter.as_ref().map(|f| f.to_lowercase());
 
@@ -500,7 +500,7 @@ pub fn run_flow(
     use v_code_intel::flow_cmd;
     use v_code_intel::helpers::{apply_alias, build_path_aliases};
 
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let paths = flow_cmd::trace_string_flow(&graph, &query, depth);
 
     if paths.is_empty() {
@@ -730,7 +730,7 @@ pub fn run_untested(
 ) -> Result<()> {
     use std::collections::VecDeque;
 
-    let graph = load_or_build_graph(&db, None)?;
+    let graph = load_or_build_graph(&db)?;
     let n = graph.names.len();
 
     // BFS from all test nodes, following callees up to `depth` levels.

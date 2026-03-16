@@ -16,16 +16,16 @@ fn parse_simple_function() {
 
 #[test]
 fn parse_pub_method() {
-    let text = "[function] pub ReadyQueue::pop_batch\n\
-                 File: .\\crates\\swarm-core\\src\\ready_queue.rs:99-137\n\
+    let text = "[function] pub CodeChunk::parse\n\
+                 File: crates/v-code-intel/src/parse.rs:51-120\n\
                  Doc comment here\n\
-                 Signature: pub fn pop_batch(&mut self, dag: &Dag) -> Vec<String>\n\
-                 Types: Dag, Reverse\n\
-                 Calls: Vec::new, batch.push";
+                 Signature: pub fn parse(text: &str) -> Option<CodeChunk>\n\
+                 Types: CodeChunk, String\n\
+                 Calls: String::new, lines.next";
     let chunk = parse_chunk(text).unwrap();
-    assert_eq!(chunk.name, "ReadyQueue::pop_batch");
-    assert_eq!(chunk.types, vec!["Dag", "Reverse"]);
-    assert_eq!(chunk.calls, vec!["Vec::new", "batch.push"]);
+    assert_eq!(chunk.name, "CodeChunk::parse");
+    assert_eq!(chunk.types, vec!["CodeChunk", "String"]);
+    assert_eq!(chunk.calls, vec!["String::new", "lines.next"]);
 }
 
 #[test]

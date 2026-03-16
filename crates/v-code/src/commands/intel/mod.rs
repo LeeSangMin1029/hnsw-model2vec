@@ -40,13 +40,12 @@ use v_code_intel::loader::{DaemonBuildResult, DaemonHooks};
 /// Load or build call graph with daemon support.
 pub fn load_or_build_graph(
     db: &std::path::Path,
-    lsp: Option<&mut v_code_intel::lsp::LspCallResolver>,
 ) -> anyhow::Result<v_code_intel::graph::CallGraph> {
     let hooks = DaemonHooks {
         try_graph_build: daemon_try_graph_build,
         spawn: daemon_spawn_and_wait,
     };
-    v_code_intel::loader::load_or_build_graph(db, lsp, Some(&hooks))
+    v_code_intel::loader::load_or_build_graph(db, Some(&hooks))
 }
 
 fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {

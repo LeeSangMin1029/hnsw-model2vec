@@ -233,7 +233,9 @@ fn run(x: i32) {
 }
 
 #[test]
-fn non_trait_method_matched_on_unknown_receiver() {
+fn unknown_receiver_dot_method_not_resolved() {
+    // `.method()` on unknown receiver should NOT resolve via short fallback
+    // to avoid false positives (e.g., `.get()` → Sq8VectorStore::get).
     let chunks = chunks_from_src(r#"
 struct Widget;
 impl Widget {
@@ -246,8 +248,7 @@ fn run() {
 fn unknown_fn() -> i32 { 0 }
     "#);
     let g = build_graph(&chunks);
-    // render is NOT a trait method → short fallback should match
-    assert!(has_edge(&g, "run", "Widget::render"));
+    assert!(!has_edge(&g, "run", "Widget::render"));
 }
 
 #[test]

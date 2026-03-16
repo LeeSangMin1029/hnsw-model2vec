@@ -127,7 +127,7 @@ fn dispatch(
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -4, e.to_string())),
         },
-        "graph/build" => match crate::code::handle_graph_build(request.params.clone(), state) {
+        "graph/build" => match crate::code::handle_graph_build(request.params.clone()) {
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -4, e.to_string())),
         },

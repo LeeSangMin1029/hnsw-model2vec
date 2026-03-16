@@ -373,6 +373,16 @@ pub enum Commands {
         #[arg(long)]
         body_file: Option<PathBuf>,
     },
+    /// Embed vectors for semantic search (fills in zero vectors from `add`).
+    Embed {
+        /// Path to the database directory.
+        db: PathBuf,
+    },
+    /// Verify call-site accuracy of the call graph.
+    Verify {
+        /// Path to the database directory.
+        db: PathBuf,
+    },
     /// Create a new file at a project-relative path.
     #[command(visible_alias = "cf")]
     CreateFile {

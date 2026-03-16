@@ -1,11 +1,41 @@
 //! Shared helper functions for code intelligence.
 //!
-//! Format utilities, path normalization, and JSON grouping helpers
-//! used across multiple modules.
+//! Format utilities, path normalization, JSON grouping helpers,
+//! and project root detection used across multiple modules.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::parse::CodeChunk;
+
+// ── Project Root Detection ──────────────────────────────────────────
+
+/// Walk up from the DB path to find a project root directory.
+pub fn find_project_root(db: &Path) -> Option<PathBuf> {
+    let abs = db.canonicalize().ok()?;
+    let start = if abs.is_dir() {
+        abs
+    } else {
+        abs.parent()?.to_path_buf()
+    };
+    let markers = [
+        "Cargo.toml",
+        ".git",
+        "pyproject.toml",
+        "setup.py",
+        "go.mod",
+        "package.json",
+        "tsconfig.json",
+    ];
+    let mut dir = start.as_path();
+    for _ in 0..10 {
+        if markers.iter().any(|m| dir.join(m).exists()) {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
 
 /// Format an optional line range as `"start-end"` or empty string.
 pub fn format_lines_str_opt(lines: Option<(usize, usize)>) -> String {

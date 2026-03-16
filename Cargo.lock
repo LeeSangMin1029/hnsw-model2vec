@@ -3882,6 +3882,7 @@ name = "v-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "clap",
  "serde",
  "serde_json",

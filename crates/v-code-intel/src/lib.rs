@@ -7,7 +7,6 @@
 //! the pure analysis logic.
 
 pub mod bfs;
-pub mod call_map_cache;
 pub mod blast;
 pub mod clones;
 pub mod context;
@@ -21,9 +20,9 @@ pub mod helpers;
 pub mod impact;
 pub mod jump;
 pub mod loader;
-pub mod lsp;
 pub mod parse;
 pub mod reason;
+pub mod rustdoc;
 pub mod stats;
 pub mod trace;
 

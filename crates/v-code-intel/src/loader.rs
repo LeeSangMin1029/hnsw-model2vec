@@ -7,8 +7,6 @@ use anyhow::{Context, Result};
 use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_storage::StorageEngine;
 
-use crate::call_map_cache::CallMapCache;
-use crate::lsp::{self, CallMap, LspCallResolver};
 use crate::parse::{self, CodeChunk};
 
 /// Load all code chunks from the database, using a bincode cache.
@@ -85,7 +83,7 @@ pub enum DaemonBuildResult {
 /// Optional daemon hooks for graph building.
 ///
 /// Callers that have access to `v-daemon` can provide these to enable
-/// daemon-assisted graph builds (persistent LSP, no cold start).
+/// daemon-assisted graph builds (rustdoc + tree-sitter, no LSP).
 pub struct DaemonHooks {
     /// Try to build graph via running daemon.
     pub try_graph_build: fn(&Path) -> DaemonBuildResult,
@@ -97,128 +95,37 @@ pub struct DaemonHooks {
 ///
 /// Resolution strategy (in order):
 /// 1. Graph cache hit → return immediately
-/// 2. Daemon running → delegate `graph/build` (uses persistent LSP, no cold start)
-/// 3. CallMap cache + incremental LSP → re-resolve only changed files
-/// 4. LSP resolver provided → use it directly
-/// 5. Auto-start LSP → spawn, resolve, shutdown
-/// 6. Tree-sitter only → heuristic fallback
+/// 2. Daemon running → delegate `graph/build`
+/// 3. Tree-sitter + rustdoc heuristic fallback
 pub fn load_or_build_graph(
     db: &Path,
-    lsp: Option<&mut LspCallResolver>,
     daemon: Option<&DaemonHooks>,
 ) -> Result<crate::graph::CallGraph> {
     if let Some(g) = crate::graph::CallGraph::load(db) {
         return Ok(g);
     }
 
-    // Try daemon first (persistent LSP, no cold start).
+    // Try daemon first.
     let mut daemon_building = false;
-    if lsp.is_none() {
-        if let Some(hooks) = daemon {
-            match (hooks.try_graph_build)(db) {
-                DaemonBuildResult::Ready(g) => return Ok(g),
-                DaemonBuildResult::Building => daemon_building = true,
-                DaemonBuildResult::Unavailable => (hooks.spawn)(db),
-            }
+    if let Some(hooks) = daemon {
+        match (hooks.try_graph_build)(db) {
+            DaemonBuildResult::Ready(g) => return Ok(g),
+            DaemonBuildResult::Building => daemon_building = true,
+            DaemonBuildResult::Unavailable => (hooks.spawn)(db),
         }
     }
 
     let chunks = load_chunks(db)?;
-    let project_root = lsp::find_project_root(db)
-        .unwrap_or_else(|| PathBuf::from("."));
 
-    // Try LSP-based call resolution with incremental caching.
-    let resolved_calls: CallMap = if let Some(resolver) = lsp {
-        resolve_incremental(db, &chunks, &project_root, resolver)
-    } else {
-        auto_resolve_incremental(db, &chunks, &project_root)
-    };
+    // Try loading cached rustdoc type info for enrichment.
+    let rustdoc = crate::rustdoc::load_cached(db);
 
-    let g = if resolved_calls.is_empty() {
-        crate::graph::CallGraph::build(&chunks)
-    } else {
-        crate::graph::CallGraph::build_with_resolved_calls(&chunks, &resolved_calls)
-    };
+    let g = crate::graph::CallGraph::build_with_rustdoc(&chunks, rustdoc.as_ref());
 
-    // Don't persist tree-sitter fallback when daemon is building LSP graph —
+    // Don't persist tree-sitter fallback when daemon is building —
     // daemon will save the accurate graph.bin when done.
     if !daemon_building {
         let _ = g.save(db);
     }
     Ok(g)
-}
-
-/// Incremental call resolution using CallMap cache + LSP resolver.
-///
-/// Only re-resolves files that changed since last resolution.
-fn resolve_incremental(
-    db: &Path,
-    chunks: &[CodeChunk],
-    project_root: &Path,
-    resolver: &mut LspCallResolver,
-) -> CallMap {
-    let old_cache = CallMapCache::load(db);
-
-    let changed_files = match &old_cache {
-        Some(cache) => cache.changed_files(chunks, project_root),
-        None => chunks.iter().map(|c| c.file.as_str()).collect(),
-    };
-
-    if changed_files.is_empty() {
-        if let Some(cache) = &old_cache {
-            eprintln!("[graph] All files unchanged — using cached CallMap");
-            return cache.to_call_map();
-        }
-    }
-
-    let total_files: std::collections::HashSet<&str> =
-        chunks.iter().map(|c| c.file.as_str()).collect();
-    eprintln!("[graph] {}/{} files changed — incremental LSP resolution",
-        changed_files.len(), total_files.len());
-
-    // Resolve only changed files via LSP
-    let new_calls = resolver
-        .resolve_calls_for_files(chunks, project_root, &changed_files)
-        .unwrap_or_default();
-
-    // Build new cache merging old (unchanged) + new (changed)
-    let new_cache = CallMapCache::build(
-        chunks,
-        old_cache.as_ref(),
-        &new_calls,
-        &changed_files,
-        project_root,
-    );
-    new_cache.save(db);
-
-    new_cache.to_call_map()
-}
-
-/// Check cache; if stale, require daemon for LSP resolution instead of spawning directly.
-fn auto_resolve_incremental(
-    db: &Path,
-    chunks: &[parse::CodeChunk],
-    project_root: &Path,
-) -> CallMap {
-    // If we have a complete cache with no changes, skip LSP entirely.
-    if let Some(cache) = CallMapCache::load(db) {
-        let changed = cache.changed_files(chunks, project_root);
-        if changed.is_empty() {
-            eprintln!("[graph] All files unchanged — using cached CallMap (no LSP needed)");
-            return cache.to_call_map();
-        }
-        eprintln!(
-            "[graph] {}/{} files changed — daemon required for LSP resolution",
-            changed.len(),
-            chunks
-                .iter()
-                .map(|c| c.file.as_str())
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-        );
-    }
-
-    // No daemon available and no complete cache — fall back to tree-sitter only.
-    eprintln!("[graph] No daemon available — using tree-sitter heuristic (run v-daemon for accurate results)");
-    CallMap::new()
 }

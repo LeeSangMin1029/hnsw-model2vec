@@ -74,6 +74,8 @@ fn run() -> anyhow::Result<()> {
         Commands::Strings { db, query, callee } => intel::run_strings(db, query, callee),
         Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
+        Commands::Embed { db } => commands::embed::run(db),
+        Commands::Verify { db } => commands::verify::run(db),
         Commands::Replace { db, symbol, file, body, body_file } => {
             let body = read_body(body, body_file)?;
             commands::edit::replace(db, symbol, file, body)

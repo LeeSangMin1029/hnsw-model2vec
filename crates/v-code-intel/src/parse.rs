@@ -42,11 +42,11 @@ pub struct CodeChunk {
 ///
 /// Expected format (first line is `[kind] [vis] name`):
 /// ```text
-/// [function] pub ReadyQueue::pop_batch
-/// File: .\crates\swarm-core\src\ready_queue.rs:99-137
-/// Signature: pub fn pop_batch(&mut self, dag: &Dag) -> Vec<String>
-/// Types: Dag, Reverse, String, Vec
-/// Calls: Reverse, Vec::new, batch.push
+/// [function] pub CodeChunk::parse
+/// File: crates/v-code-intel/src/parse.rs:51-120
+/// Signature: pub fn parse(text: &str) -> Option<CodeChunk>
+/// Types: CodeChunk, String
+/// Calls: String::new, lines.next
 /// ```
 pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
     let mut lines_iter = text.lines();

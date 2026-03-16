@@ -32,8 +32,9 @@ const HEADER_SIZE: usize = 64;
 pub struct Sq8VectorStore {
     #[allow(dead_code)]
     path: PathBuf,
-    file: File,
+    /// mmap MUST be declared before file so it drops first on Windows.
     mmap: MmapMut,
+    file: File,
     dim: Dim,
     capacity: u32,
     id_to_slot: HashMap<PointId, u32>,

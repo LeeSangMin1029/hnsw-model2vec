@@ -142,16 +142,7 @@ pub struct SearchResponse {
     pub elapsed_ms: f64,
 }
 
-/// Seconds of idle time before shutting down an LSP server.
-const LSP_IDLE_SECS: u64 = 600;
-
-/// LSP server entry with idle tracking.
-struct LspEntry {
-    resolver: v_code_intel::lsp::LspCallResolver,
-    last_used: Instant,
-}
-
-/// Loaded daemon state: shared model + per-DB indexes + LSP server pool.
+/// Loaded daemon state: shared model + per-DB indexes.
 pub struct DaemonState {
     model: Option<Model2VecModel>,
     model_name: Option<String>,
@@ -159,7 +150,6 @@ pub struct DaemonState {
     last_embed_at: Instant,
     databases: HashMap<PathBuf, DbIndexes>,
     query_cache: QueryCache,
-    lsp_servers: HashMap<PathBuf, LspEntry>,
 }
 
 impl DaemonState {
@@ -171,7 +161,6 @@ impl DaemonState {
             last_embed_at: Instant::now(),
             databases: HashMap::new(),
             query_cache: QueryCache::global(),
-            lsp_servers: HashMap::new(),
         };
 
         // Store the initial DB path but don't load it yet.
@@ -285,53 +274,6 @@ impl DaemonState {
     }
 
     pub fn save_cache(&self) -> Result<()> { self.query_cache.save() }
-
-    pub fn ensure_lsp(
-        &mut self,
-        project_root: &Path,
-    ) -> Result<&mut v_code_intel::lsp::LspCallResolver> {
-        let key = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
-
-        if !self.lsp_servers.contains_key(&key) {
-            eprintln!("[daemon] Starting LSP server for: {}", key.display());
-            let resolver = v_code_intel::lsp::LspCallResolver::start(&key)?;
-            self.lsp_servers.insert(
-                key.clone(),
-                LspEntry {
-                    resolver,
-                    last_used: Instant::now(),
-                },
-            );
-            eprintln!("[daemon] LSP server started ({} active)", self.lsp_servers.len());
-        }
-
-        let entry = self.lsp_servers.get_mut(&key)
-            .context("LSP server disappeared after insert")?;
-        entry.last_used = Instant::now();
-        Ok(&mut entry.resolver)
-    }
-
-    pub fn maybe_evict_lsp(&mut self) {
-        let before = self.lsp_servers.len();
-        let to_remove: Vec<PathBuf> = self
-            .lsp_servers
-            .iter()
-            .filter(|(_, e)| e.last_used.elapsed().as_secs() > LSP_IDLE_SECS)
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for key in to_remove {
-            if let Some(entry) = self.lsp_servers.remove(&key) {
-                eprintln!("[daemon] LSP evicted (idle > {}s): {}", LSP_IDLE_SECS, key.display());
-                let _ = entry.resolver.shutdown();
-            }
-        }
-        if self.lsp_servers.len() < before {
-            eprintln!("[daemon] {} LSP server(s) active", self.lsp_servers.len());
-        }
-    }
 
     pub fn evict_db(&mut self, db_path: &Path) -> Result<PathBuf> {
         let key = canonicalize(db_path)?;
