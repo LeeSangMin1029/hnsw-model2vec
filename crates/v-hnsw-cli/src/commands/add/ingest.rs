@@ -185,11 +185,14 @@ fn filter_unchanged_records(
             if let PayloadValue::Integer(h) = v { Some(*h) } else { None }
         });
 
-        // If we can read the existing payload and body_hash matches, skip re-embedding.
+        // If body_hash matches AND text is unchanged, skip re-embedding.
+        // Text includes line numbers, so even if body_hash is the same,
+        // line shifts (from edits above) will change the text and trigger re-indexing.
         if let Some(new_h) = new_hash
             && let Ok(Some(existing)) = store.get_payload(rec.id)
             && let Some(old_h) = payload_body_hash(&existing)
             && old_h == new_h
+            && store.get_text(rec.id).ok().flatten().as_deref() == Some(&rec.text)
         {
             skipped += 1;
             continue;
