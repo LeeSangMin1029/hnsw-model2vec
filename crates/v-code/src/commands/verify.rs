@@ -63,33 +63,17 @@ pub fn run(db: PathBuf) -> Result<()> {
         }
     }
 
-    // Build owner_field_types + return_type_map from DB chunks.
-    // When struct chunks lack field_types (tree-sitter extraction gap), fall back to
-    // parsing the source file directly to extract `name: Type` field declarations.
+    // Build owner_field_types + return_type_map from DB chunks (no file I/O).
     let mut owner_field_types: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut return_type_map: BTreeMap<String, String> = BTreeMap::new();
-    let mut source_cache: HashMap<String, Vec<String>> = HashMap::new();
     for c in &chunks {
         if c.kind == "struct" {
             let lower = c.name.to_lowercase();
             let leaf = lower.rsplit("::").next().unwrap_or(&lower);
             let key = leaf.split('<').next().unwrap_or(leaf);
             let entry = owner_field_types.entry(key.to_owned()).or_default();
-            if !c.field_types.is_empty() {
-                for (fname, ftype) in &c.field_types {
-                    entry.insert(fname.to_lowercase(), ftype.to_lowercase());
-                }
-            } else if let Some((start, end)) = c.lines {
-                // Fallback: extract field types from source
-                let resolved = resolve_path(&c.file, project_root.as_deref());
-                let lines = source_cache
-                    .entry(resolved.clone())
-                    .or_insert_with(|| load_lines(&resolved));
-                if !lines.is_empty() {
-                    for (fname, ftype) in extract_field_types_from_source(lines, start.saturating_sub(1), end) {
-                        entry.entry(fname).or_insert(ftype);
-                    }
-                }
+            for (fname, ftype) in &c.field_types {
+                entry.insert(fname.to_lowercase(), ftype.to_lowercase());
             }
         }
         if c.kind == "function"
@@ -112,8 +96,8 @@ pub fn run(db: PathBuf) -> Result<()> {
     let t_index = start.elapsed();
 
     // ── Precision ────────────────────────────────────────────────────
-    // Reuse source_cache (populated during field_types extraction) for precision.
-    let file_cache = &mut source_cache;
+    // Only precision needs source files (to verify call-site lines).
+    let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
     let mut prec_total = 0usize;
     let mut prec_ok = 0usize;
     let mut prec_wrong = 0usize;
@@ -460,27 +444,12 @@ fn check_extern_reason(
     if receiver.starts_with("self.") {
         let field = receiver.strip_prefix("self.").unwrap_or(receiver);
         let field_leaf = field.rsplit_once('.').map_or(field, |p| p.1);
-        let mut field_is_project_type = false;
         if let Some(field_type) = receiver_types.get(field_leaf) {
             let lowered = field_type.to_lowercase();
             let leaf = extract_leaf_type(&lowered);
             if extern_index.has_method(leaf, method) {
                 return Some(format!("self.field: {field_leaf}:{leaf}.{method}"));
             }
-            // Field type is known but method not in extern → check if it's
-            // a project type (trait/struct). If so, this is an internal call
-            // the graph should have resolved — keep as unresolved.
-            field_is_project_type = project_type_shorts.contains(leaf);
-        }
-        // Fallback for self.field.method when field type is unknown or
-        // non-project: receiver_leaf is a field name (not a type name),
-        // so the project_type_shorts check from the general fallback is
-        // too conservative — field names like `symbols` or `types` often
-        // collide with project type names. When the method exists on any
-        // extern type, classify as extern.
-        // Skip when field type IS a known project type — that's a real miss.
-        if !field_is_project_type && extern_index.any_type_has_method(method) {
-            return Some(format!("self.field-untyped: {field_leaf}.{method}"));
         }
     }
 
@@ -543,96 +512,6 @@ fn build_db_chunk_receiver_types(
         }
     }
     map
-}
-
-/// Extract struct field types from source lines within the struct's line range.
-///
-/// Parses lines like `pub(crate) db: &'db dyn HirDatabase,` into `("db", "hirdatabase")`.
-/// Only used as a fallback when `ParsedChunk.field_types` is empty.
-fn extract_field_types_from_source(
-    lines: &[String],
-    start: usize,
-    end: usize,
-) -> Vec<(String, String)> {
-    let mut fields = Vec::new();
-    // Iterate through lines within the struct body
-    for line_idx in start..end.min(lines.len()) {
-        let line = lines[line_idx].trim();
-        // Skip comments, attributes, empty lines, braces
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with('#')
-            || line.starts_with('{')
-            || line.starts_with('}')
-            || line.starts_with("pub") && line.contains("struct ")
-        {
-            continue;
-        }
-        // Strip visibility: pub, pub(crate), pub(super), pub(in ...)
-        let stripped = strip_visibility(line);
-        // Expect "name: Type," pattern
-        if let Some(colon) = stripped.find(": ") {
-            let name = stripped[..colon].trim();
-            // Validate field name: should be a simple identifier
-            if name.is_empty() || name.contains(' ') || name.contains('(') {
-                continue;
-            }
-            let ty = stripped[colon + 2..].trim_end_matches(',').trim();
-            if ty.is_empty() {
-                continue;
-            }
-            // Extract leaf type from the type string
-            let leaf = extract_leaf_type_from_text(ty);
-            if !leaf.is_empty() {
-                fields.push((name.to_lowercase(), leaf.to_lowercase()));
-            }
-        }
-    }
-    fields
-}
-
-/// Strip Rust visibility prefix from a field declaration.
-fn strip_visibility(s: &str) -> &str {
-    if let Some(rest) = s.strip_prefix("pub(") {
-        // Find matching close paren
-        if let Some(close) = rest.find(") ") {
-            return rest[close + 2..].trim();
-        }
-    }
-    if let Some(rest) = s.strip_prefix("pub ") {
-        return rest.trim();
-    }
-    s
-}
-
-/// Extract the leaf type name from a type annotation string.
-///
-/// Handles references (`&'a dyn Foo`), generics (`Vec<T>`), paths (`a::b::Foo`),
-/// and `dyn Trait` patterns. Returns the rightmost type identifier.
-fn extract_leaf_type_from_text(ty: &str) -> String {
-    let ty = ty.trim();
-    // Strip leading reference: &, &mut, &'lifetime
-    let ty = if let Some(rest) = ty.strip_prefix('&') {
-        let rest = rest.trim();
-        // Skip 'lifetime
-        let rest = if rest.starts_with('\'') {
-            rest.split_once(' ').map_or(rest, |p| p.1).trim()
-        } else if let Some(r) = rest.strip_prefix("mut ") {
-            r.trim()
-        } else {
-            rest
-        };
-        rest
-    } else {
-        ty
-    };
-    // Strip "dyn "
-    let ty = ty.strip_prefix("dyn ").unwrap_or(ty);
-    // Strip generic params: take everything before '<'
-    let ty = ty.split('<').next().unwrap_or(ty);
-    // Take last path segment: a::b::Foo → Foo
-    let leaf = ty.rsplit("::").next().unwrap_or(ty);
-    leaf.trim().to_owned()
 }
 
 fn resolve_path(rel: &str, project_root: Option<&Path>) -> String {
