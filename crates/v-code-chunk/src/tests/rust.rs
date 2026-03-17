@@ -510,3 +510,95 @@ fn private_enum_has_empty_visibility() {
     let e = chunks.iter().find(|c| c.name == "PaymentStatus").unwrap();
     assert_eq!(e.visibility, "", "PaymentStatus should have empty visibility (private)");
 }
+
+#[test]
+fn infer_local_types_from_constructor_calls() {
+    let code = r#"
+struct Engine { dim: usize }
+impl Engine {
+    fn new() -> Self { Engine { dim: 0 } }
+    fn dim(&self) -> usize { self.dim }
+}
+struct Config { val: u32 }
+fn run() {
+    let engine = Engine::new();
+    let cfg: Config = Config { val: 1 };
+    let items = Vec::new();
+    let name = String::from("hello");
+    engine.dim();
+}
+"#;
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(code);
+    let run_fn = chunks.iter().find(|c| c.name == "run").expect("should find run");
+
+    // `let engine = Engine::new()` → ("engine", "Engine")
+    assert!(
+        run_fn.local_types.contains(&("engine".to_owned(), "Engine".to_owned())),
+        "should infer engine: Engine from Engine::new(), got: {:?}",
+        run_fn.local_types
+    );
+
+    // `let cfg: Config = ...` → ("cfg", "Config") — explicit annotation still works
+    assert!(
+        run_fn.local_types.contains(&("cfg".to_owned(), "Config".to_owned())),
+        "should extract cfg: Config from annotation, got: {:?}",
+        run_fn.local_types
+    );
+
+    // `let items = Vec::new()` → ("items", "Vec")
+    assert!(
+        run_fn.local_types.contains(&("items".to_owned(), "Vec".to_owned())),
+        "should infer items: Vec from Vec::new(), got: {:?}",
+        run_fn.local_types
+    );
+
+    // `let name = String::from("hello")` → ("name", "String")
+    assert!(
+        run_fn.local_types.contains(&("name".to_owned(), "String".to_owned())),
+        "should infer name: String from String::from(), got: {:?}",
+        run_fn.local_types
+    );
+}
+
+#[test]
+fn infer_local_types_struct_literal() {
+    let code = r#"
+struct Opts { verbose: bool }
+fn build() {
+    let opts = Opts { verbose: true };
+}
+"#;
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(code);
+    let build_fn = chunks.iter().find(|c| c.name == "build").expect("should find build");
+
+    assert!(
+        build_fn.local_types.contains(&("opts".to_owned(), "Opts".to_owned())),
+        "should infer opts: Opts from struct literal, got: {:?}",
+        build_fn.local_types
+    );
+}
+
+#[test]
+fn infer_local_types_try_expression() {
+    let code = r#"
+struct Connection {}
+impl Connection {
+    fn open(path: &str) -> Result<Self, Error> { todo!() }
+}
+fn connect() -> Result<(), Error> {
+    let conn = Connection::open("db.sqlite")?;
+    Ok(())
+}
+"#;
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(code);
+    let func = chunks.iter().find(|c| c.name == "connect").expect("should find connect");
+
+    assert!(
+        func.local_types.contains(&("conn".to_owned(), "Connection".to_owned())),
+        "should infer conn: Connection through try expr (?), got: {:?}",
+        func.local_types
+    );
+}

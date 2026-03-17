@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use rayon::prelude::*;
 use v_code_chunk as chunk_code;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::{generate_id, get_file_mtime, normalize_source};
@@ -178,44 +179,38 @@ pub fn entries_to_records(entries: &[CodeChunkEntry]) -> Vec<IngestRecord> {
 ///
 /// `is_interrupted` is polled before each file to support graceful shutdown.
 pub fn chunk_code_files(
-    code_files: &[impl AsRef<Path>],
+    code_files: &[impl AsRef<Path> + Sync],
     is_interrupted: impl Fn() -> bool,
     entries: &mut Vec<CodeChunkEntry>,
     file_metadata_map: &mut HashMap<String, (u64, u64, Vec<u64>)>,
 ) {
-    for code_path in code_files {
-        if is_interrupted() {
-            break;
-        }
-        let code_path = code_path.as_ref();
+    if is_interrupted() {
+        return;
+    }
 
-        let source_code = match std::fs::read_to_string(code_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading {}: {e}", code_path.display());
-                continue;
+    // Parallel phase: read + parse all files concurrently.
+    let per_file: Vec<_> = code_files
+        .par_iter()
+        .filter_map(|code_path| {
+            let code_path = code_path.as_ref();
+            let source_code = std::fs::read_to_string(code_path).ok()?;
+            let ext = code_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let chunks = chunk_code::chunk_for_language(ext, &source_code)?;
+            if chunks.is_empty() {
+                return None;
             }
-        };
+            let source = normalize_source(code_path);
+            let file_path_str = code_path.to_string_lossy().to_string();
+            let mtime = get_file_mtime(code_path).unwrap_or(0);
+            let size = file_index::get_file_size(code_path).unwrap_or(0);
+            let lang = chunk_code::lang_for_extension(ext).unwrap_or("unknown");
+            Some((chunks, source, file_path_str, mtime, size, lang))
+        })
+        .collect();
 
-        let ext = code_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let chunks = match chunk_code::chunk_for_language(ext, &source_code) {
-            Some(c) => c,
-            None => continue,
-        };
-        if chunks.is_empty() {
-            continue;
-        }
-
-        let source = normalize_source(code_path);
-        let file_path_str = code_path.to_string_lossy().to_string();
-        let mtime = get_file_mtime(code_path).unwrap_or(0);
-        let size = file_index::get_file_size(code_path).unwrap_or(0);
-        let mut chunk_ids = Vec::new();
-
-        let lang = chunk_code::lang_for_extension(ext).unwrap_or("unknown");
+    // Sequential merge (cheap: just moves data).
+    for (chunks, source, file_path_str, mtime, size, lang) in per_file {
+        let mut chunk_ids = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let id = generate_id(&source, chunk.chunk_index);
             chunk_ids.push(id);
@@ -227,7 +222,6 @@ pub fn chunk_code_files(
                 lang,
             });
         }
-
         file_metadata_map.insert(source, (mtime, size, chunk_ids));
     }
 }

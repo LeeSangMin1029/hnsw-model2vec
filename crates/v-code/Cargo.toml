@@ -26,6 +26,7 @@ v-hnsw-graph.workspace = true
 v-hnsw-search.workspace = true
 
 bincode.workspace = true
+rayon.workspace = true
 clap = { workspace = true, features = ["derive"] }
 anyhow = "1"
 serde = { workspace = true, features = ["derive"] }

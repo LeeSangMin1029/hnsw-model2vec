@@ -3884,6 +3884,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

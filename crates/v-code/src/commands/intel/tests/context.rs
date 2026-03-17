@@ -62,6 +62,8 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            let_call_bindings: vec![],
+            field_accesses: vec![],
             return_type: None,
         },
         CodeChunk {
@@ -79,6 +81,8 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            let_call_bindings: vec![],
+            field_accesses: vec![],
             return_type: None,
         },
         CodeChunk {
@@ -96,6 +100,8 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            let_call_bindings: vec![],
+            field_accesses: vec![],
             return_type: None,
         },
         CodeChunk {
@@ -113,6 +119,8 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            let_call_bindings: vec![],
+            field_accesses: vec![],
             return_type: None,
         },
         CodeChunk {
@@ -130,6 +138,8 @@ fn build_test_graph() -> CallGraph {
             param_types: vec![],
             field_types: vec![],
             local_types: vec![],
+            let_call_bindings: vec![],
+            field_accesses: vec![],
             return_type: None,
         },
     ];

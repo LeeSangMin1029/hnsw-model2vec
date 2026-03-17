@@ -138,6 +138,14 @@ pub struct CodeChunk {
     /// Local variable type annotations: `(variable_name, type_name)`.
     /// Collected from `let x: Type = ...` patterns.
     pub local_types: Vec<(String, String)>,
+    /// Let-binding-to-call mappings: `(variable_name, callee_name)`.
+    /// Collected from `let x = some_fn()` / `let x = some_fn()?` patterns.
+    /// Used for 1-hop return type propagation in the call graph.
+    pub let_call_bindings: Vec<(String, String)>,
+    /// Field accesses (non-call): `(receiver, field_name)`.
+    /// Collected from `payload.source`, `self.engine`, `node.incoming` etc.
+    /// Used for field-level blast radius analysis.
+    pub field_accesses: Vec<(String, String)>,
 }
 
 impl CodeChunk {
@@ -241,6 +249,25 @@ impl CodeChunk {
                 .map(|(name, ty)| format!("{name}: {ty}"))
                 .collect();
             parts.push(format!("Locals: {}", items.join(", ")));
+        }
+
+        if !self.let_call_bindings.is_empty() {
+            let items: Vec<String> = self
+                .let_call_bindings
+                .iter()
+                .map(|(var, callee)| format!("{var}={callee}"))
+                .collect();
+            parts.push(format!("Bindings: {}", items.join(", ")));
+        }
+
+        // Field accesses (non-call)
+        if !self.field_accesses.is_empty() {
+            let items: Vec<String> = self
+                .field_accesses
+                .iter()
+                .map(|(recv, field)| format!("{recv}.{field}"))
+                .collect();
+            parts.push(format!("FieldAccesses: {}", items.join(", ")));
         }
 
         // Called by (reverse references)

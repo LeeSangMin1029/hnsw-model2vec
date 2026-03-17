@@ -739,3 +739,606 @@ fn run() {
         "should resolve Builder::new, got: {callees:?}"
     );
 }
+
+// ── 31. Inferred local type enables method resolution ────────────────
+
+#[test]
+fn inferred_local_type_from_constructor() {
+    let chunks = chunks_from_src(r#"
+struct Engine { dim: usize }
+impl Engine {
+    fn new() -> Self { Engine { dim: 0 } }
+    fn process(&self) -> usize { self.dim }
+}
+fn run() {
+    let engine = Engine::new();
+    engine.process();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert!(has_edge(&g, "run", "Engine::new"));
+    assert!(
+        has_edge(&g, "run", "Engine::process"),
+        "should resolve engine.process() via inferred type from Engine::new(), callees: {:?}",
+        callee_names(&g, "run")
+    );
+}
+
+#[test]
+fn inferred_local_type_from_struct_literal() {
+    let chunks = chunks_from_src(r#"
+struct Opts { verbose: bool }
+impl Opts {
+    fn apply(&self) {}
+}
+fn setup() {
+    let opts = Opts { verbose: true };
+    opts.apply();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert!(
+        has_edge(&g, "setup", "Opts::apply"),
+        "should resolve opts.apply() via struct literal type, callees: {:?}",
+        callee_names(&g, "setup")
+    );
+}
+
+#[test]
+fn inferred_local_type_with_try_operator() {
+    let chunks = chunks_from_src(r#"
+struct Connection {}
+impl Connection {
+    fn open(path: &str) -> Result<Self, Error> { todo!() }
+    fn query(&self, sql: &str) {}
+}
+fn run() -> Result<(), Error> {
+    let conn = Connection::open("db.sqlite")?;
+    conn.query("SELECT 1");
+    Ok(())
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert!(has_edge(&g, "run", "Connection::open"));
+    assert!(
+        has_edge(&g, "run", "Connection::query"),
+        "should resolve conn.query() via inferred type through ?, callees: {:?}",
+        callee_names(&g, "run")
+    );
+}
+
+#[test]
+fn inferred_type_does_not_false_positive_on_lowercase_fn() {
+    // `let result = compute();` — compute is not PascalCase, should NOT infer type
+    let chunks = chunks_from_src(r#"
+struct Widget {}
+impl Widget {
+    fn render(&self) {}
+}
+fn compute() -> i32 { 42 }
+fn run() {
+    let result = compute();
+    result.render();
+}
+    "#);
+    let g = build_graph(&chunks);
+    // result.render() should NOT resolve to Widget::render because compute() is not Type::method()
+    assert!(
+        !has_edge(&g, "run", "Widget::render"),
+        "should NOT resolve result.render() to Widget::render, callees: {:?}",
+        callee_names(&g, "run")
+    );
+}
+
+// ── 35. Enum variant constructor should not match function ───────────
+
+#[test]
+fn enum_variant_does_not_match_function() {
+    let chunks = chunks_from_src(r#"
+enum MyError {
+    Embed(String),
+}
+fn embed(text: &str) -> Vec<f32> { vec![] }
+fn run() {
+    let err = MyError::Embed("fail".into());
+}
+    "#);
+    let g = build_graph(&chunks);
+    // MyError::Embed is an enum variant, not a function call.
+    // Should NOT resolve to the standalone `embed` function.
+    assert!(
+        !has_edge(&g, "run", "embed"),
+        "enum variant MyError::Embed should NOT match function embed, callees: {:?}",
+        callee_names(&g, "run")
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Coverage audit: test every Rust call pattern for precision AND recall
+// ══════════════════════════════════════════════════════════════════════
+
+/// Helper: assert edge exists (recall check).
+fn assert_edge(g: &CallGraph, caller: &str, callee: &str) {
+    assert!(
+        has_edge(g, caller, callee),
+        "[RECALL] expected {caller} → {callee}, got: {:?}",
+        callee_names(g, caller)
+    );
+}
+
+/// Helper: assert edge does NOT exist (precision check).
+fn assert_no_edge(g: &CallGraph, caller: &str, callee: &str) {
+    assert!(
+        !has_edge(g, caller, callee),
+        "[PRECISION] unexpected {caller} → {callee}",
+    );
+}
+
+// ── P1. trait object dispatch ────────────────────────────────────────
+
+#[test]
+fn trait_object_dispatch() {
+    let chunks = chunks_from_src(r#"
+trait Processor {
+    fn process(&self) -> i32;
+}
+struct FastProcessor;
+impl Processor for FastProcessor {
+    fn process(&self) -> i32 { 42 }
+}
+fn run(p: &dyn Processor) {
+    p.process();
+}
+    "#);
+    let g = build_graph(&chunks);
+    // dyn Processor → can we resolve p.process() to Processor::process or FastProcessor::process?
+    let callees = callee_names(&g, "run");
+    let has_any = callees.iter().any(|c| c.to_lowercase().contains("process"));
+    assert!(has_any, "[RECALL] trait object p.process() not resolved, got: {callees:?}");
+}
+
+// ── P2. generic bound method ─────────────────────────────────────────
+
+#[test]
+fn generic_bound_method_call() {
+    let chunks = chunks_from_src(r#"
+trait Encoder {
+    fn encode(&self, text: &str) -> Vec<u8>;
+}
+struct Utf8Encoder;
+impl Encoder for Utf8Encoder {
+    fn encode(&self, text: &str) -> Vec<u8> { text.as_bytes().to_vec() }
+}
+fn process<E: Encoder>(enc: &E, text: &str) -> Vec<u8> {
+    enc.encode(text)
+}
+    "#);
+    let g = build_graph(&chunks);
+    let callees = callee_names(&g, "process");
+    let has_encode = callees.iter().any(|c| c.to_lowercase().contains("encode"));
+    assert!(has_encode, "[RECALL] generic enc.encode() not resolved, got: {callees:?}");
+}
+
+// ── P3. closure internal calls ───────────────────────────────────────
+
+#[test]
+fn closure_internal_call() {
+    let chunks = chunks_from_src(r#"
+fn transform(x: i32) -> i32 { x * 2 }
+fn run() {
+    let items = vec![1, 2, 3];
+    let result: Vec<i32> = items.iter().map(|x| transform(*x)).collect();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "transform");
+}
+
+// ── P4. multi-hop method chain ───────────────────────────────────────
+
+#[test]
+fn multi_hop_method_chain() {
+    let chunks = chunks_from_src(r#"
+struct Builder { val: i32 }
+impl Builder {
+    fn new() -> Self { Builder { val: 0 } }
+    fn with_val(mut self, v: i32) -> Self { self.val = v; self }
+    fn build(self) -> Product { Product { val: self.val } }
+}
+struct Product { val: i32 }
+impl Product {
+    fn run(&self) -> i32 { self.val }
+}
+fn main_fn() {
+    let p = Builder::new().with_val(42).build();
+    p.run();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "main_fn", "Builder::new");
+    // Can we resolve chain intermediate methods?
+    let callees = callee_names(&g, "main_fn");
+    let has_with_val = callees.iter().any(|c| c.to_lowercase().contains("with_val"));
+    let has_build = callees.iter().any(|c| c.to_lowercase().contains("build"));
+    let has_run = callees.iter().any(|c| c.to_lowercase().contains("run"));
+    // Record what's resolved vs not
+    eprintln!("[chain] with_val={has_with_val} build={has_build} run={has_run} callees={callees:?}");
+    // At minimum, Builder::new should resolve
+    assert_edge(&g, "main_fn", "Builder::new");
+}
+
+// ── P5. macro calls ─────────────────────────────────────────────────
+
+#[test]
+fn macro_internal_function_call() {
+    // Functions called inside macro invocations
+    let chunks = chunks_from_src(r#"
+fn helper() -> String { "ok".to_owned() }
+fn run() {
+    println!("{}", helper());
+}
+    "#);
+    let g = build_graph(&chunks);
+    // tree-sitter does NOT parse inside macro invocations → known limitation.
+    let callees = callee_names(&g, "run");
+    let has_helper = callees.iter().any(|c| c.to_lowercase().contains("helper"));
+    eprintln!("[macro] helper={has_helper} callees={callees:?}");
+    // Known gap: macro arguments are opaque to tree-sitter.
+    assert!(!has_helper, "[KNOWN GAP] macro internal calls are not detected");
+}
+
+// ── P6. async/await ──────────────────────────────────────────────────
+
+#[test]
+fn async_await_call() {
+    let chunks = chunks_from_src(r#"
+struct Client;
+impl Client {
+    async fn fetch(&self, url: &str) -> String { url.to_owned() }
+}
+async fn run(client: &Client) {
+    let result = client.fetch("http://example.com").await;
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "Client::fetch");
+}
+
+// ── P7. operator overload ────────────────────────────────────────────
+
+#[test]
+fn operator_overload_detection() {
+    let chunks = chunks_from_src(r#"
+use std::ops::Add;
+struct Vec2 { x: f32, y: f32 }
+impl Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 { Vec2 { x: self.x + rhs.x, y: self.y + rhs.y } }
+}
+fn run() {
+    let a = Vec2 { x: 1.0, y: 2.0 };
+    let b = Vec2 { x: 3.0, y: 4.0 };
+    let c = a + b;
+}
+    "#);
+    let g = build_graph(&chunks);
+    let callees = callee_names(&g, "run");
+    let has_add = callees.iter().any(|c| c.to_lowercase().contains("add"));
+    eprintln!("[operator] add={has_add} callees={callees:?}");
+    // Operator overloads are invisible to tree-sitter: `a + b` is not a call node
+}
+
+// ── P8. re-export chain ──────────────────────────────────────────────
+
+#[test]
+fn reexport_resolution() {
+    let chunks = chunks_from_files(&[
+        ("src/types.rs", r#"
+pub struct Config { pub val: i32 }
+impl Config {
+    pub fn load() -> Self { Config { val: 0 } }
+    pub fn validate(&self) -> bool { self.val > 0 }
+}
+        "#),
+        ("src/lib.rs", r#"
+pub use crate::types::Config;
+        "#),
+        ("src/main.rs", r#"
+use crate::types::Config;
+fn run() {
+    let c = Config::load();
+    c.validate();
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "Config::load");
+    assert_edge(&g, "run", "Config::validate");
+}
+
+// ── P9. impl trait return ────────────────────────────────────────────
+
+#[test]
+fn impl_trait_return_type() {
+    let chunks = chunks_from_src(r#"
+trait Filter {
+    fn apply(&self, input: &str) -> String;
+}
+struct Upper;
+impl Filter for Upper {
+    fn apply(&self, input: &str) -> String { input.to_uppercase() }
+}
+fn make_filter() -> impl Filter { Upper }
+fn run() {
+    let f = make_filter();
+    f.apply("hello");
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "make_filter");
+    // impl Trait return → can we resolve f.apply()?
+    let callees = callee_names(&g, "run");
+    let has_apply = callees.iter().any(|c| c.to_lowercase().contains("apply"));
+    eprintln!("[impl_trait] apply={has_apply} callees={callees:?}");
+}
+
+// ── P10. where clause bound ──────────────────────────────────────────
+
+#[test]
+fn where_clause_method_call() {
+    let chunks = chunks_from_src(r#"
+trait Serializer {
+    fn serialize(&self) -> Vec<u8>;
+}
+struct JsonSerializer;
+impl Serializer for JsonSerializer {
+    fn serialize(&self) -> Vec<u8> { vec![123] }
+}
+fn save<S>(s: &S) where S: Serializer {
+    let data = s.serialize();
+}
+    "#);
+    let g = build_graph(&chunks);
+    let callees = callee_names(&g, "save");
+    let has_serialize = callees.iter().any(|c| c.to_lowercase().contains("serialize"));
+    eprintln!("[where] serialize={has_serialize} callees={callees:?}");
+}
+
+// ── P11. if-let / match pattern ──────────────────────────────────────
+
+#[test]
+fn if_let_method_call() {
+    let chunks = chunks_from_src(r#"
+struct Store;
+impl Store {
+    fn get(&self, id: u64) -> Option<String> { None }
+}
+fn process(id: u64) -> String { id.to_string() }
+fn run(store: &Store) {
+    if let Some(val) = store.get(42) {
+        process(42);
+    }
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "Store::get");
+    assert_edge(&g, "run", "process");
+}
+
+// ── P12. nested function ─────────────────────────────────────────────
+
+#[test]
+fn nested_function_call() {
+    let chunks = chunks_from_src(r#"
+fn outer() {
+    fn inner() -> i32 { 42 }
+    let x = inner();
+}
+    "#);
+    let g = build_graph(&chunks);
+    // Inner function is defined inside outer — can we resolve?
+    let callees = callee_names(&g, "outer");
+    let has_inner = callees.iter().any(|c| c.to_lowercase().contains("inner"));
+    eprintln!("[nested] inner={has_inner} callees={callees:?}");
+}
+
+// ── P13. turbofish syntax ────────────────────────────────────────────
+
+#[test]
+fn turbofish_call() {
+    let chunks = chunks_from_src(r#"
+fn parse_number(s: &str) -> i32 { 0 }
+fn run() {
+    let n = "42".parse::<i32>().unwrap();
+    let m = parse_number("42");
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "parse_number");
+}
+
+// ── P14. associated function (not method) ────────────────────────────
+
+#[test]
+fn associated_function_no_self() {
+    let chunks = chunks_from_src(r#"
+struct Registry;
+impl Registry {
+    fn instance() -> Self { Registry }
+    fn count() -> usize { 0 }
+}
+fn run() {
+    let r = Registry::instance();
+    let c = Registry::count();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "Registry::instance");
+    assert_edge(&g, "run", "Registry::count");
+}
+
+// ── P15. Default trait method ────────────────────────────────────────
+
+#[test]
+fn default_trait_method() {
+    let chunks = chunks_from_src(r#"
+trait Configurable {
+    fn name(&self) -> &str;
+    fn display(&self) -> String {
+        format!("Config: {}", self.name())
+    }
+}
+struct App;
+impl Configurable for App {
+    fn name(&self) -> &str { "app" }
+}
+fn run(app: &App) {
+    app.display();
+}
+    "#);
+    let g = build_graph(&chunks);
+    let callees = callee_names(&g, "run");
+    let has_display = callees.iter().any(|c| c.to_lowercase().contains("display"));
+    eprintln!("[default_trait] display={has_display} callees={callees:?}");
+}
+
+// ── P16. tuple struct constructor ────────────────────────────────────
+
+#[test]
+fn tuple_struct_constructor_vs_function() {
+    let chunks = chunks_from_src(r#"
+struct Wrapper(i32);
+impl Wrapper {
+    fn value(&self) -> i32 { self.0 }
+}
+fn run() {
+    let w = Wrapper(42);
+    w.value();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "Wrapper::value");
+}
+
+// ── P17. method call on function return ──────────────────────────────
+
+#[test]
+fn method_on_function_return() {
+    let chunks = chunks_from_src(r#"
+struct Config { val: i32 }
+impl Config {
+    fn load() -> Self { Config { val: 0 } }
+    fn validate(&self) -> bool { self.val > 0 }
+}
+fn get_config() -> Config { Config::load() }
+fn run() {
+    let c = get_config();
+    c.validate();
+}
+    "#);
+    let g = build_graph(&chunks);
+    assert_edge(&g, "run", "get_config");
+    // get_config() returns Config but it's a lowercase function, not Type::method()
+    // → c's type is NOT inferred → c.validate() resolution depends on heuristics
+    let callees = callee_names(&g, "run");
+    let has_validate = callees.iter().any(|c| c.to_lowercase().contains("validate"));
+    eprintln!("[fn_return] validate={has_validate} callees={callees:?}");
+}
+
+// ── Field access index ───────────────────────────────────────────────
+
+#[test]
+fn field_access_index_self_field() {
+    let chunks = chunks_from_src(r#"
+struct App {
+    db: Database,
+    name: String,
+}
+impl App {
+    fn run(&self) -> String {
+        let n = self.name;
+        self.db.query();
+        n
+    }
+}
+struct Database;
+impl Database {
+    fn query(&self) -> i32 { 0 }
+}
+    "#);
+    let g = build_graph(&chunks);
+    // self.db is a field access (receiver in self.db.query())
+    let db_accessors = g.find_field_access("app::db");
+    assert!(
+        !db_accessors.is_empty(),
+        "self.db should be in field_access_index as app::db, index: {:?}",
+        g.field_access_index
+    );
+    let accessor_names: Vec<&str> = db_accessors.iter()
+        .map(|&i| g.names[i as usize].as_str())
+        .collect();
+    assert!(
+        accessor_names.iter().any(|n| n.contains("run")),
+        "App::run should access self.db, got: {accessor_names:?}"
+    );
+    // self.name is a field access (let n = self.name)
+    let name_accessors = g.find_field_access("app::name");
+    assert!(
+        !name_accessors.is_empty(),
+        "self.name should be in field_access_index as app::name, index: {:?}",
+        g.field_access_index
+    );
+}
+
+#[test]
+fn field_access_index_param_field() {
+    let chunks = chunks_from_src(r#"
+struct Config {
+    verbose: bool,
+    output: String,
+}
+fn process(cfg: Config) -> bool {
+    let v = cfg.verbose;
+    let o = cfg.output;
+    v
+}
+    "#);
+    let g = build_graph(&chunks);
+    let verbose_accessors = g.find_field_access("config::verbose");
+    assert!(
+        !verbose_accessors.is_empty(),
+        "cfg.verbose should be in field_access_index as config::verbose, index: {:?}",
+        g.field_access_index
+    );
+    let output_accessors = g.find_field_access("config::output");
+    assert!(
+        !output_accessors.is_empty(),
+        "cfg.output should be in field_access_index as config::output, index: {:?}",
+        g.field_access_index
+    );
+}
+
+#[test]
+fn field_access_index_type_lookup() {
+    let chunks = chunks_from_src(r#"
+struct Payload {
+    source: String,
+    tags: Vec<String>,
+}
+fn check_source(p: Payload) {
+    let s = p.source;
+}
+fn check_tags(p: Payload) {
+    let t = p.tags;
+}
+    "#);
+    let g = build_graph(&chunks);
+    let entries = g.find_field_accesses_for_type("payload");
+    assert!(
+        entries.len() >= 2,
+        "should find at least source and tags field accesses, got: {entries:?}"
+    );
+    let field_names: Vec<&str> = entries.iter().map(|(f, _)| *f).collect();
+    assert!(field_names.contains(&"source"), "should have source: {field_names:?}");
+    assert!(field_names.contains(&"tags"), "should have tags: {field_names:?}");
+}

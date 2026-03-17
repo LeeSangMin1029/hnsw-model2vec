@@ -111,7 +111,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         let _ = config.save(&db_path);
     }
 
-    // === Pass 1: Chunk all files ===
+    // === Pass 1: Chunk all files (parallel via rayon) ===
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
     super::ingest::chunk_code_files(
@@ -162,8 +162,14 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     if inserted == 0 {
         println!("No symbols to index.");
     } else {
-        // Notify daemon to reload if running
-        if v_hnsw_storage::daemon_client::notify_reload(&db_path).is_ok() {
+        // Notify daemon to reload if running (non-blocking).
+        if v_hnsw_storage::daemon_client::is_running() {
+            v_hnsw_storage::daemon_client::daemon_rpc_fire_and_forget(
+                "reload",
+                serde_json::json!({"db": db_path.canonicalize()
+                    .unwrap_or_else(|_| db_path.clone())
+                    .to_string_lossy().as_ref()}),
+            );
             println!("Daemon notified to reload indexes.");
         }
 
@@ -174,4 +180,3 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 
     Ok(())
 }
-

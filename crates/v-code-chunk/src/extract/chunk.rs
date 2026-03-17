@@ -2,7 +2,7 @@
 
 use crate::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 use super::ParsedSource;
-use super::common::{extract_function_signature, extract_struct_fields, extract_struct_field_types, collect_sorted_unique, walk_for_calls_with_lines, walk_for_let_types, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
+use super::common::{extract_function_signature, extract_struct_fields, extract_struct_field_types, collect_sorted_unique, walk_for_calls_with_lines, walk_for_field_accesses, walk_for_let_call_bindings, walk_for_let_types, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
 
 /// Walk calls with line info and deduplicate, preserving first occurrence's line.
 pub(crate) fn extract_calls_deduped(
@@ -81,6 +81,8 @@ pub fn simple_type_chunk(
         string_args: Vec::new(),
         param_flows: Vec::new(),
         local_types: Vec::new(),
+        let_call_bindings: Vec::new(),
+        field_accesses: Vec::new(),
     })
 }
 
@@ -186,6 +188,16 @@ pub fn build_chunk(
     } else {
         Vec::new()
     };
+    let let_call_bindings = if is_func {
+        walk_for_let_call_bindings(node, src)
+    } else {
+        Vec::new()
+    };
+    let field_accesses = if is_func {
+        walk_for_field_accesses(node, src)
+    } else {
+        Vec::new()
+    };
 
     Some(CodeChunk {
         text,
@@ -212,6 +224,8 @@ pub fn build_chunk(
         string_args,
         param_flows,
         local_types,
+        let_call_bindings,
+        field_accesses,
     })
 }
 
@@ -297,6 +311,8 @@ pub fn extract_methods(
         let param_types = (lang.extract_params_fn)(&actual_child, src);
         let return_type = (lang.extract_return_fn)(&actual_child, src);
         let local_types = walk_for_let_types(&actual_child, src);
+        let let_call_bindings = walk_for_let_call_bindings(&actual_child, src);
+        let field_accesses = walk_for_field_accesses(&actual_child, src);
 
         chunks.push(CodeChunk {
             text,
@@ -323,6 +339,8 @@ pub fn extract_methods(
             string_args,
             param_flows,
             local_types,
+            let_call_bindings,
+            field_accesses,
         });
     }
 }

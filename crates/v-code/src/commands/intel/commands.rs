@@ -239,6 +239,28 @@ pub fn run_context(
         println!();
     }
 
+    // Show field access summary for struct seeds.
+    let is_struct_seed = result.seeds.iter().any(|&s| graph.kinds[s as usize] == "struct");
+    if is_struct_seed {
+        // Use the struct name (lowercase) to look up field accesses
+        let type_name = result.seeds.iter()
+            .find(|&&s| graph.kinds[s as usize] == "struct")
+            .map(|&s| &graph.names[s as usize]);
+        if let Some(tn) = type_name {
+            let field_entries = graph.find_field_accesses_for_type(tn);
+            if !field_entries.is_empty() {
+                println!("@ [field accesses]");
+                for (field, indices) in &field_entries {
+                    let accessors: Vec<&str> = indices.iter()
+                        .map(|&i| graph.names[i as usize].as_str())
+                        .collect();
+                    println!("  .{field} ← {}", accessors.join(", "));
+                }
+                println!();
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -311,6 +333,41 @@ pub fn run_blast(
     }
 
     let graph = load_or_build_graph(&db)?;
+
+    // Field-level blast: "Type.field" notation
+    if let Some(dot) = symbol.find('.') {
+        let type_name = &symbol[..dot];
+        let field_name = &symbol[dot + 1..];
+        let key = format!("{}::{}", type_name.to_lowercase(), field_name.to_lowercase());
+        let field_chunks = graph.find_field_access(&key);
+        if field_chunks.is_empty() {
+            println!("No field accesses found for {symbol}");
+            return Ok(());
+        }
+        // BFS reverse from field-accessing chunks
+        let all_entries = impact::bfs_reverse(&graph, &field_chunks, depth);
+        let summary = blast::summarize_blast(&graph, &all_entries);
+        let entries = filter_test_entries(all_entries, include_tests);
+        let mut tagged: Vec<TaggedEntry> = Vec::new();
+        for e in &entries {
+            let tag = if field_chunks.contains(&e.idx) {
+                "field"
+            } else {
+                match e.depth {
+                    0 => "target",
+                    1 => "d1",
+                    2 => "d2",
+                    _ => "d3+",
+                }
+            };
+            tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
+        }
+        println!("=== blast: {symbol} ({} field accessors, {} affected, {} prod, {} test) ===\n",
+            field_chunks.len(), summary.total_affected, summary.prod_count, summary.test_count);
+        print_file_grouped(&graph, &tagged, false);
+        return Ok(());
+    }
+
     let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
 
     let all_entries = impact::bfs_reverse(&graph, &seeds, depth);

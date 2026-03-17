@@ -8,6 +8,7 @@
 //! appropriate tree-sitter grammar crate.
 
 pub mod extract;
+pub mod extern_impl;
 mod types;
 mod dispatch;
 mod rust;

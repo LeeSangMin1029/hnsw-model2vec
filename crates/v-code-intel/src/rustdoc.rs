@@ -9,11 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 
 /// Type information extracted from rustdoc JSON output.
 ///
 /// All keys are lowercase for case-insensitive matching.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
 pub struct RustdocTypes {
     /// `function_name → return_type` (fully resolved, leaf only).
     /// E.g. `"callgraph::build" → "callgraph"`, `"graph_cache_path" → "pathbuf"`
@@ -168,19 +169,24 @@ impl RustdocTypes {
         }
     }
 
-    /// Load and merge all `*.json` files from a directory.
+    /// Load and merge all `*.json` files from a directory (parallel).
     pub fn from_dir(dir: &Path) -> Result<Self> {
-        let mut combined = Self::default();
         let entries = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read dir: {}", dir.display()))?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                match Self::from_file(&path) {
-                    Ok(types) => combined.merge(types),
-                    Err(e) => eprintln!("[rustdoc] skip {}: {e}", path.display()),
-                }
-            }
+        let paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+
+        let parts: Vec<Self> = paths
+            .par_iter()
+            .filter_map(|path| Self::from_file(path).ok())
+            .collect();
+
+        let mut combined = Self::default();
+        for part in parts {
+            combined.merge(part);
         }
         Ok(combined)
     }
@@ -442,28 +448,40 @@ fn list_workspace_lib_crates(project_root: &Path) -> Vec<String> {
 /// 2. `<db>/cache/rustdoc.json` (single file, legacy)
 /// 3. `<project_root>/target/doc/` (directly from cargo rustdoc output)
 pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
-    // 1. Multi-file cache directory
+    let bin_cache = db_path.join("cache").join("rustdoc_types.bin");
+
+    // 1. Bincode cache (fastest — single file, pre-parsed)
+    if let Some(types) = load_bincode_cache(&bin_cache) {
+        return Some(types);
+    }
+
+    // 2. Multi-file JSON cache directory
     let cache_dir = db_path.join("cache").join("rustdoc");
     if cache_dir.is_dir() {
         if let Ok(types) = RustdocTypes::from_dir(&cache_dir) {
             if !types.fn_return_types.is_empty() {
+                save_bincode_cache(&bin_cache, &types);
                 return Some(types);
             }
         }
     }
 
-    // 2. Single file cache (legacy)
+    // 3. Single file cache (legacy)
     let cache_path = db_path.join("cache").join("rustdoc.json");
     if cache_path.exists() {
-        return RustdocTypes::from_file(&cache_path).ok();
+        if let Ok(types) = RustdocTypes::from_file(&cache_path) {
+            save_bincode_cache(&bin_cache, &types);
+            return Some(types);
+        }
     }
 
-    // 3. Try target/doc/ from project root
+    // 4. Try target/doc/ from project root
     if let Some(project_root) = crate::helpers::find_project_root(db_path) {
         let doc_dir = project_root.join("target").join("doc");
         if doc_dir.is_dir() {
             if let Ok(types) = RustdocTypes::from_dir(&doc_dir) {
                 if !types.fn_return_types.is_empty() {
+                    save_bincode_cache(&bin_cache, &types);
                     return Some(types);
                 }
             }
@@ -471,6 +489,25 @@ pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
     }
 
     None
+}
+
+/// Load `RustdocTypes` from a bincode cache file.
+fn load_bincode_cache(path: &Path) -> Option<RustdocTypes> {
+    let data = std::fs::read(path).ok()?;
+    let config = bincode::config::standard();
+    let (types, _): (RustdocTypes, _) = bincode::decode_from_slice(&data, config).ok()?;
+    if types.fn_return_types.is_empty() { None } else { Some(types) }
+}
+
+/// Save `RustdocTypes` to a bincode cache file.
+fn save_bincode_cache(path: &Path, types: &RustdocTypes) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let config = bincode::config::standard();
+    if let Ok(data) = bincode::encode_to_vec(types, config) {
+        let _ = std::fs::write(path, data);
+    }
 }
 
 /// Save all rustdoc JSON files from `target/doc/` to the cache directory.

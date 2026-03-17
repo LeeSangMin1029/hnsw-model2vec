@@ -77,6 +77,34 @@ pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<Stri
     walk_for_calls_with_lines(node, src, calls, &mut lines);
 }
 
+/// Return the best source line for a call node.
+///
+/// For method calls (`call_expression` with `field_expression` function),
+/// returns the line of the method name (field), not the receiver.
+/// This correctly handles multiline chains:
+/// ```text
+/// engine          ← line 5 (receiver)
+///     .checkpoint() ← line 6 (method name — we return this)
+/// ```
+fn call_site_line(node: &tree_sitter::Node) -> u32 {
+    if node.kind() == "call_expression" || node.kind() == "call" {
+        if let Some(func) = node.child_by_field_name("function") {
+            if func.kind() == "field_expression" {
+                if let Some(field) = func.child_by_field_name("field") {
+                    return field.start_position().row as u32;
+                }
+            }
+            // For scoped_identifier (Type::method), use the name part
+            if func.kind() == "scoped_identifier" {
+                if let Some(name) = func.child_by_field_name("name") {
+                    return name.start_position().row as u32;
+                }
+            }
+        }
+    }
+    node.start_position().row as u32
+}
+
 /// Recursively walk to find call nodes, recording the 0-based source line of each call.
 /// Extract and normalize the callee name from a call/method-invocation node.
 ///
@@ -119,7 +147,12 @@ pub fn walk_for_calls_with_lines(
     lines: &mut Vec<u32>,
 ) {
     if let Some(name) = extract_callee_from_node(node, src) {
-        lines.push(node.start_position().row as u32);
+        // For method calls (field_expression), use the method name's line,
+        // not the receiver's line. This handles multiline chains like:
+        //   engine
+        //       .checkpoint()   ← method name is on this line
+        let line = call_site_line(node);
+        lines.push(line);
         calls.push(name);
     }
 
@@ -181,7 +214,13 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                             return Some(format!("{recv}.{method}"));
                         }
                     }
-                    // chained call: a(x).b(y) → receiver is call_expression, just return method
+                    // chained call: a(x).b(y) → receiver type is unknown.
+                    // Skip entirely to avoid false positives (e.g. `.create(true)` on
+                    // OpenOptions matching `collection::create`). The first call in
+                    // the chain (`OpenOptions::new`) is already extracted separately.
+                    "call_expression" => {
+                        return None;
+                    }
                     _ => {}
                 }
             }
@@ -676,18 +715,12 @@ pub fn extract_return_type(node: &tree_sitter::Node, src: &[u8]) -> Option<Strin
 pub(super) fn extract_return_type_skip(
     node: &tree_sitter::Node,
     src: &[u8],
-    skip_kind: &str,
+    _skip_kind: &str,
     strip_prefix: &str,
 ) -> Option<String> {
     let ret = node.child_by_field_name("return_type")?;
 
-    let mut cursor = ret.walk();
-    for child in ret.children(&mut cursor) {
-        if child.kind() != skip_kind {
-            return child.utf8_text(src).ok().map(|s| s.to_owned());
-        }
-    }
-
+    // Return the full type text (e.g. "Result<Vec<Item>>") not just the leaf.
     ret.utf8_text(src)
         .ok()
         .map(|s| s.strip_prefix(strip_prefix).unwrap_or(s).to_owned())
@@ -716,10 +749,18 @@ fn walk_let_types_inner(
         if let Some(pat) = node.child_by_field_name("pattern")
             && pat.kind() == "identifier"
             && let Ok(name) = pat.utf8_text(src)
-            && let Some(ty) = node.child_by_field_name("type")
-            && let Some(leaf) = extract_leaf_type_name(&ty, src)
         {
-            out.push((name.to_owned(), leaf));
+            if let Some(ty) = node.child_by_field_name("type")
+                && let Some(leaf) = extract_leaf_type_name(&ty, src)
+            {
+                // Explicit type annotation: `let x: Type = ...`
+                out.push((name.to_owned(), leaf));
+            } else if let Some(val) = node.child_by_field_name("value")
+                && let Some(leaf) = infer_type_from_rhs(&val, src)
+            {
+                // Inferred from RHS: `let x = Type::new()` or `let x = Type { .. }`
+                out.push((name.to_owned(), leaf));
+            }
         }
     }
     // Go: short_var_declaration (x := expr) has no type; var_declaration with type
@@ -773,6 +814,175 @@ fn walk_let_types_inner(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_let_types_inner(&child, src, out);
+    }
+}
+
+/// Walk a function body to collect `let x = callee()` bindings.
+///
+/// Returns `(variable_name, callee_name)` pairs for 1-hop return type propagation.
+/// Handles `let x = foo()`, `let x = foo()?`, `let x = self.method()`, `let x = recv.method()`.
+pub(crate) fn walk_for_let_call_bindings(
+    node: &tree_sitter::Node,
+    src: &[u8],
+) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    walk_let_call_bindings_inner(node, src, &mut result);
+    result
+}
+
+fn walk_let_call_bindings_inner(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "let_declaration" {
+        if let Some(pat) = node.child_by_field_name("pattern")
+            && pat.kind() == "identifier"
+            && let Ok(var_name) = pat.utf8_text(src)
+        {
+            if let Some(val) = node.child_by_field_name("value") {
+                if let Some(callee) = extract_rhs_callee(&val, src) {
+                    out.push((var_name.to_owned(), callee));
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_let_call_bindings_inner(&child, src, out);
+    }
+}
+
+/// Extract the callee name from a `let` RHS expression.
+///
+/// Peels `?` / `.await`, then extracts:
+/// - `foo()` → `"foo"`
+/// - `self.method()` → `"self.method"`
+/// - `receiver.method()` → `"receiver.method"`
+/// - `Type::new()` → `"Type::new"`
+fn extract_rhs_callee(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    // Peel off `?` (try_expression) and `.await` (await_expression)
+    let inner = match node.kind() {
+        "try_expression" | "await_expression" => node.child(0)?,
+        _ => *node,
+    };
+
+    if inner.kind() != "call_expression" {
+        return None;
+    }
+
+    let func = inner.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => func.utf8_text(src).ok().map(|s| s.to_owned()),
+        "scoped_identifier" => func.utf8_text(src).ok().map(|s| s.to_owned()),
+        "field_expression" => {
+            // receiver.method — extract "receiver.method"
+            let obj = func.child_by_field_name("value")?;
+            let field = func.child_by_field_name("field")?;
+            let obj_text = obj.utf8_text(src).ok()?;
+            let field_text = field.utf8_text(src).ok()?;
+            if obj.kind() == "identifier" || obj.kind() == "self" {
+                Some(format!("{obj_text}.{field_text}"))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Walk a function body to collect non-call field accesses: `recv.field`.
+///
+/// Excludes method calls (`recv.method()`) — those are in `calls`.
+/// Returns deduplicated `(receiver, field_name)` pairs.
+pub(crate) fn walk_for_field_accesses(
+    node: &tree_sitter::Node,
+    src: &[u8],
+) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    walk_field_accesses_inner(node, src, &mut result);
+    result.sort();
+    result.dedup();
+    result
+}
+
+fn walk_field_accesses_inner(
+    node: &tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "field_expression" {
+        // Skip if this field_expression is the function part of a call_expression
+        // (that's a method call, not a field access).
+        let is_call_func = node.parent().is_some_and(|p| {
+            p.kind() == "call_expression"
+                && p.child_by_field_name("function")
+                    .is_some_and(|f| f.id() == node.id())
+        });
+        if !is_call_func {
+            if let Some(obj) = node.child_by_field_name("value") {
+                if let Some(field) = node.child_by_field_name("field") {
+                    if let (Ok(recv), Ok(fname)) = (obj.utf8_text(src), field.utf8_text(src)) {
+                        // Only simple receivers (identifier, self) — not chains
+                        if obj.kind() == "identifier" || obj.kind() == "self" {
+                            out.push((recv.to_owned(), fname.to_owned()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_field_accesses_inner(&child, src, out);
+    }
+}
+
+/// Infer type from RHS expression of a `let` binding.
+///
+/// Handles:
+/// - `Type::new()` / `Type::default()` / `Type::from(x)` → "Type"
+/// - `Type { field: val }` (struct literal) → "Type"
+/// - `Type(val)` (tuple struct constructor) → "Type"
+/// - Unwrap wrappers: `Type::new()?.method()` ignores trailing `?`/`.await`
+fn infer_type_from_rhs(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    // Peel off `?` (try_expression) and `.await` (await_expression)
+    let inner = match node.kind() {
+        "try_expression" | "await_expression" => {
+            node.child(0)?
+        }
+        _ => *node,
+    };
+
+    match inner.kind() {
+        // `Type::new()` — call_expression with scoped_identifier function
+        "call_expression" => {
+            let func = inner.child_by_field_name("function")?;
+            match func.kind() {
+                // Type::method() — scoped_identifier path=Type, name=method
+                "scoped_identifier" => {
+                    let path = func.child_by_field_name("path")?;
+                    extract_leaf_type_name(&path, src)
+                }
+                // Type(val) — tuple struct or enum variant constructor
+                "identifier" => {
+                    let text = func.utf8_text(src).ok()?;
+                    // Only PascalCase names (starts with uppercase) are types
+                    if text.starts_with(|c: char| c.is_uppercase()) {
+                        Some(text.to_owned())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        // `Type { field: val }` — struct expression
+        "struct_expression" => {
+            let name_node = inner.child_by_field_name("name")?;
+            extract_leaf_type_name(&name_node, src)
+        }
+        _ => None,
     }
 }
 

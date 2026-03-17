@@ -8,6 +8,7 @@
 
 pub mod bfs;
 pub mod blast;
+pub mod extern_types;
 pub mod clones;
 pub mod context;
 pub mod context_cmd;

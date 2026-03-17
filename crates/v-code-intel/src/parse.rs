@@ -4,7 +4,7 @@
 //! [`CodeChunk`] struct for structural queries.
 
 /// Structured representation of a code chunk's text field.
-#[derive(Debug, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
 pub struct CodeChunk {
     pub kind: String,
     pub name: String,
@@ -33,9 +33,16 @@ pub struct CodeChunk {
     /// Local variable type annotations (e.g., `("x", "Vec")`).
     #[serde(default)]
     pub local_types: Vec<(String, String)>,
+    /// Let-binding-to-call mappings: `(variable_name, callee_name)`.
+    /// Used for 1-hop return type propagation.
+    #[serde(default)]
+    pub let_call_bindings: Vec<(String, String)>,
     /// Return type (e.g., `"Result<Vec<Item>>"`, `"Self"`).
     #[serde(default)]
     pub return_type: Option<String>,
+    /// Field accesses (non-call): `(receiver, field_name)`.
+    #[serde(default)]
+    pub field_accesses: Vec<(String, String)>,
 }
 
 /// Parse the text field of a code chunk into a [`CodeChunk`].
@@ -92,6 +99,8 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
     let mut param_types: Vec<(String, String)> = Vec::new();
     let mut field_types: Vec<(String, String)> = Vec::new();
     let mut local_types: Vec<(String, String)> = Vec::new();
+    let mut let_call_bindings: Vec<(String, String)> = Vec::new();
+    let mut field_accesses: Vec<(String, String)> = Vec::new();
     let mut return_type: Option<String> = None;
 
     for line in lines_iter {
@@ -186,6 +195,24 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
                     local_types.push((name, ty));
                 }
             }
+        } else if let Some(b) = line.strip_prefix("Bindings: ") {
+            for token in b.split(", ") {
+                let token = token.trim();
+                if let Some(eq) = token.find('=') {
+                    let var = token[..eq].to_owned();
+                    let callee = token[eq + 1..].to_owned();
+                    let_call_bindings.push((var, callee));
+                }
+            }
+        } else if let Some(fa) = line.strip_prefix("FieldAccesses: ") {
+            for token in fa.split(", ") {
+                let token = token.trim();
+                if let Some(dot) = token.find('.') {
+                    let recv = token[..dot].to_owned();
+                    let field = token[dot + 1..].to_owned();
+                    field_accesses.push((recv, field));
+                }
+            }
         }
     }
 
@@ -208,6 +235,8 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         param_types,
         field_types,
         local_types,
+        let_call_bindings,
+        field_accesses,
         return_type,
     })
 }
