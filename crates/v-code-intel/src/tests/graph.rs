@@ -897,6 +897,28 @@ fn run(p: &dyn Processor) {
     assert!(has_any, "[RECALL] trait object p.process() not resolved, got: {callees:?}");
 }
 
+// ── P1b. dyn Trait with lifetime ──────────────────────────────────────
+
+#[test]
+fn dyn_trait_with_lifetime_dispatch() {
+    let chunks = chunks_from_src(r#"
+trait HirDatabase {
+    fn generic_params(&self) -> Vec<String>;
+}
+struct RealDb;
+impl HirDatabase for RealDb {
+    fn generic_params(&self) -> Vec<String> { vec![] }
+}
+fn analyze<'db>(db: &'db dyn HirDatabase) {
+    db.generic_params();
+}
+    "#);
+    let g = build_graph(&chunks);
+    let callees = callee_names(&g, "analyze");
+    let has_generic_params = callees.iter().any(|c| c.to_lowercase().contains("generic_params"));
+    assert!(has_generic_params, "[RECALL] dyn trait with lifetime db.generic_params() not resolved, got: {callees:?}");
+}
+
 // ── P2. generic bound method ─────────────────────────────────────────
 
 #[test]
@@ -1368,6 +1390,24 @@ fn leaf_type_reference() {
 fn leaf_type_dyn_impl() {
     assert_eq!(extract_leaf_type("dyn processor"), "processor");
     assert_eq!(extract_leaf_type("impl filter"), "filter");
+}
+
+#[test]
+fn leaf_type_ref_dyn_trait() {
+    // &dyn HirDatabase → hirdatabase
+    assert_eq!(extract_leaf_type("&dyn hirdatabase"), "hirdatabase");
+    // &mut dyn Iterator → iterator
+    assert_eq!(extract_leaf_type("&mut dyn iterator"), "iterator");
+}
+
+#[test]
+fn leaf_type_lifetime_dyn_trait() {
+    // &'db dyn Trait → trait
+    assert_eq!(extract_leaf_type("&'db dyn trait"), "trait");
+    // &'a mut dyn Processor → processor
+    assert_eq!(extract_leaf_type("&'a mut dyn processor"), "processor");
+    // &'static dyn Foo → foo
+    assert_eq!(extract_leaf_type("&'static dyn foo"), "foo");
 }
 
 #[test]

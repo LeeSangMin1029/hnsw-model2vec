@@ -992,8 +992,9 @@ fn extract_leaf_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String
             let child = node.child(0)?;
             extract_leaf_type_name(&child, src)
         }
-        "reference_type" | "pointer_type" | "mutable_specifier" => {
-            // Skip & / &mut / * and get the inner type
+        "reference_type" | "pointer_type" | "mutable_specifier"
+        | "dynamic_type" | "abstract_type" => {
+            // Skip & / &mut / * / dyn / impl and get the inner type
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if let Some(name) = extract_leaf_type_name(&child, src) {

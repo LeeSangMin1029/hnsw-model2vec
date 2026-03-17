@@ -1254,6 +1254,12 @@ fn collect_trait_methods(chunks: &[ParsedChunk]) -> BTreeSet<String> {
 /// `"result<vec<item>>"` → `"result"`, `"&mut foo"` → `"foo"`, `"Self"` → `"self"`
 pub fn extract_leaf_type(ty: &str) -> &str {
     let ty = ty.strip_prefix('&').unwrap_or(ty);
+    // Strip lifetime: 'a , 'db , 'static  etc.
+    let ty = if ty.starts_with('\'') {
+        ty.find(' ').map_or(ty, |i| &ty[i + 1..])
+    } else {
+        ty
+    };
     let ty = ty.strip_prefix("mut ").unwrap_or(ty);
     let ty = ty.strip_prefix("dyn ").unwrap_or(ty);
     let ty = ty.strip_prefix("impl ").unwrap_or(ty);

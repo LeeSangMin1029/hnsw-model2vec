@@ -650,3 +650,88 @@ fn connect() -> Result<(), Error> {
         func.local_types
     );
 }
+
+#[test]
+fn dyn_trait_param_types_extracted() {
+    let config = CodeChunkConfig { min_lines: 1, extract_calls: true, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let code = r#"
+fn foo(db: &dyn HirDatabase, y: &mut dyn Iterator) {
+    db.generic_params();
+    y.next();
+}
+"#;
+    let chunks = chunker.chunk(code);
+    let func = find_chunk!(chunks, "foo");
+
+    // &dyn HirDatabase → should extract type text containing "HirDatabase"
+    let db_type = func.param_types.iter()
+        .find(|(name, _)| name == "db")
+        .map(|(_, ty)| ty.as_str());
+    assert!(
+        db_type.is_some(),
+        "should extract db param, got: {:?}",
+        func.param_types
+    );
+    assert!(
+        db_type.unwrap().contains("HirDatabase"),
+        "db param type should contain HirDatabase, got: {:?}",
+        db_type
+    );
+
+    let y_type = func.param_types.iter()
+        .find(|(name, _)| name == "y")
+        .map(|(_, ty)| ty.as_str());
+    assert!(
+        y_type.is_some(),
+        "should extract y param, got: {:?}",
+        func.param_types
+    );
+    assert!(
+        y_type.unwrap().contains("Iterator"),
+        "y param type should contain Iterator, got: {:?}",
+        y_type
+    );
+}
+
+#[test]
+fn dyn_trait_with_lifetime_param_types() {
+    let config = CodeChunkConfig { min_lines: 1, extract_calls: true, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let code = r#"
+fn analyze<'db>(db: &'db dyn HirDatabase, x: &'a mut dyn Iterator) {
+    db.generic_params();
+}
+"#;
+    let chunks = chunker.chunk(code);
+    let func = find_chunk!(chunks, "analyze");
+
+    let db_type = func.param_types.iter()
+        .find(|(name, _)| name == "db")
+        .map(|(_, ty)| ty.as_str());
+    assert!(
+        db_type.is_some(),
+        "should extract db param, got: {:?}",
+        func.param_types
+    );
+    // Verify the raw type text includes "dyn HirDatabase"
+    assert!(
+        db_type.unwrap().contains("HirDatabase"),
+        "db param type should contain HirDatabase, got: {:?}",
+        db_type
+    );
+
+    let x_type = func.param_types.iter()
+        .find(|(name, _)| name == "x")
+        .map(|(_, ty)| ty.as_str());
+    assert!(
+        x_type.is_some(),
+        "should extract x param, got: {:?}",
+        func.param_types
+    );
+    assert!(
+        x_type.unwrap().contains("Iterator"),
+        "x param type should contain Iterator, got: {:?}",
+        x_type
+    );
+}
