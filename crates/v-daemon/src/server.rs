@@ -180,15 +180,12 @@ fn write_daemon_files(port: u16) -> Result<()> {
     write("v-daemon.port", &port.to_string())?;
 
     // Store current exe mtime so clients can detect stale binaries.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Ok(meta) = exe.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+    if let Ok(exe) = std::env::current_exe()
+        && let Ok(meta) = exe.metadata()
+            && let Ok(modified) = meta.modified()
+                && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
                     let _ = write("v-daemon.mtime", &dur.as_secs().to_string());
                 }
-            }
-        }
-    }
 
     Ok(())
 }

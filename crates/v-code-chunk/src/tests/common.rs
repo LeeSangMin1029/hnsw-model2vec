@@ -297,6 +297,7 @@ fn embed_text_no_visibility_no_extra_space() {
         local_types: vec![],
         let_call_bindings: vec![],
         field_accesses: vec![],
+        enum_variants: vec![],
         return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![], string_args: vec![], param_flows: vec![],
     };
     let embed = chunk.to_embed_text("test.rs", &[]);
@@ -331,6 +332,7 @@ fn embed_text_with_visibility_prefix() {
         local_types: vec![],
         let_call_bindings: vec![],
         field_accesses: vec![],
+        enum_variants: vec![],
         return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![], string_args: vec![], param_flows: vec![],
     };
     let embed = chunk.to_embed_text("test.rs", &[]);
@@ -364,6 +366,7 @@ fn custom_fields_empty_collections_omitted() {
         local_types: vec![],
         let_call_bindings: vec![],
         field_accesses: vec![],
+        enum_variants: vec![],
         return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: vec![], string_args: vec![], param_flows: vec![],
     };
     let custom = chunk.to_custom_fields(&[]);

@@ -22,6 +22,7 @@ pub(crate) fn short_name(full: &str) -> &str {
 }
 
 /// Verify call-site accuracy for all function chunks in the database.
+#[expect(clippy::needless_range_loop, clippy::type_complexity, reason = "multiple parallel arrays indexed together")]
 pub fn run(db: PathBuf) -> Result<()> {
     let start = std::time::Instant::now();
     let graph = super::intel::load_or_build_graph(&db)?;
@@ -43,8 +44,7 @@ pub fn run(db: PathBuf) -> Result<()> {
     let mut project_type_shorts: HashSet<String> = HashSet::new();
     let mut chunk_callee_shorts: Vec<HashSet<String>> = vec![HashSet::new(); n];
 
-    for i in 0..n {
-        let kind = &graph.kinds[i];
+    for (i, kind) in graph.kinds.iter().enumerate().take(n) {
         if kind == "function" {
             let short = short_name(&graph.names[i]);
             *name_counts.entry(short).or_default() += 1;
@@ -76,8 +76,8 @@ pub fn run(db: PathBuf) -> Result<()> {
                 entry.insert(fname.to_lowercase(), ftype.to_lowercase());
             }
         }
-        if c.kind == "function" {
-            if let Some(ref ret) = c.return_type {
+        if c.kind == "function"
+            && let Some(ref ret) = c.return_type {
                 let ret_lower = ret.to_lowercase();
                 let leaf = extract_leaf_type(&ret_lower);
                 let resolved_type = if leaf == "self" || leaf == "&self" {
@@ -87,7 +87,6 @@ pub fn run(db: PathBuf) -> Result<()> {
                 };
                 return_type_map.insert(c.name.to_lowercase(), resolved_type);
             }
-        }
     }
 
     // Build extern index (cached — fast on repeat runs).
@@ -190,6 +189,20 @@ pub fn run(db: PathBuf) -> Result<()> {
         .map(|c| ((c.name.as_str(), c.lines), c))
         .collect();
 
+    // Build enum variant set for recall exclusion: "type::variant" (lowercase).
+    let enum_variant_set: HashSet<String> = {
+        let mut set = HashSet::new();
+        for c in &chunks {
+            if c.kind == "enum" {
+                let leaf = c.name.rsplit("::").next().unwrap_or(&c.name).to_lowercase();
+                for v in &c.enum_variants {
+                    set.insert(format!("{leaf}::{v}"));
+                }
+            }
+        }
+        set
+    };
+
     let mut recall_total = 0usize;
     let mut recall_resolved = 0usize;
     let mut recall_unresolved = 0usize;
@@ -226,6 +239,19 @@ pub fn run(db: PathBuf) -> Result<()> {
             if !project_shorts.contains(short) {
                 continue;
             }
+
+            // Skip enum variant constructors: these look like calls to tree-sitter
+            // but are not function calls.  Prelude variants (Ok, Err, Some, None)
+            // and project-defined variants are excluded from recall counting.
+            static PRELUDE_VARIANTS: &[&str] = &["ok", "err", "some", "none"];
+            if call.starts_with(char::is_uppercase) && PRELUDE_VARIANTS.contains(&call_lower.as_str()) {
+                continue;
+            }
+            // Qualified enum variant: `Type::Variant(args)` where Variant starts uppercase
+            if let Some((_, last)) = call.rsplit_once("::")
+                && last.starts_with(char::is_uppercase) && enum_variant_set.contains(&call_lower) {
+                    continue;
+                }
 
             recall_total += 1;
 

@@ -65,6 +65,7 @@ fn build_test_graph() -> CallGraph {
             let_call_bindings: vec![],
             field_accesses: vec![],
             return_type: None,
+            enum_variants: vec![],
         },
         ParsedChunk {
             kind: "function".to_owned(),
@@ -84,6 +85,7 @@ fn build_test_graph() -> CallGraph {
             let_call_bindings: vec![],
             field_accesses: vec![],
             return_type: None,
+            enum_variants: vec![],
         },
         ParsedChunk {
             kind: "function".to_owned(),
@@ -103,6 +105,7 @@ fn build_test_graph() -> CallGraph {
             let_call_bindings: vec![],
             field_accesses: vec![],
             return_type: None,
+            enum_variants: vec![],
         },
         ParsedChunk {
             kind: "function".to_owned(),
@@ -122,6 +125,7 @@ fn build_test_graph() -> CallGraph {
             let_call_bindings: vec![],
             field_accesses: vec![],
             return_type: None,
+            enum_variants: vec![],
         },
         ParsedChunk {
             kind: "function".to_owned(),
@@ -141,6 +145,7 @@ fn build_test_graph() -> CallGraph {
             let_call_bindings: vec![],
             field_accesses: vec![],
             return_type: None,
+            enum_variants: vec![],
         },
     ];
     CallGraph::build(&chunks)

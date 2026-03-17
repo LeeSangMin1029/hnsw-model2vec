@@ -106,16 +106,14 @@ fn collect_methods_in_impl(
         if child.kind() == "declaration_list" {
             let mut inner = child.walk();
             for item in child.children(&mut inner) {
-                if item.kind() == "function_item" {
-                    if let Some(name_node) = item.child_by_field_name("name") {
-                        if let Ok(method_name) = name_node.utf8_text(src) {
+                if item.kind() == "function_item"
+                    && let Some(name_node) = item.child_by_field_name("name")
+                        && let Ok(method_name) = name_node.utf8_text(src) {
                             results.push((
                                 type_name.to_owned(),
                                 method_name.to_lowercase(),
                             ));
                         }
-                    }
-                }
             }
         }
     }

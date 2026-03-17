@@ -84,7 +84,7 @@ fn cache_path(db: &Path) -> PathBuf {
 /// Result of a daemon graph build attempt.
 pub enum DaemonBuildResult {
     /// Daemon returned a completed graph.
-    Ready(crate::graph::CallGraph),
+    Ready(Box<crate::graph::CallGraph>),
     /// Daemon is building asynchronously — don't cache the tree-sitter fallback.
     Building,
     /// Daemon not available.
@@ -120,7 +120,7 @@ pub fn load_or_build_graph(
     let mut daemon_building = false;
     if let Some(hooks) = daemon {
         match (hooks.try_graph_build)(db) {
-            DaemonBuildResult::Ready(g) => return Ok(g),
+            DaemonBuildResult::Ready(g) => return Ok(*g),
             DaemonBuildResult::Building => daemon_building = true,
             DaemonBuildResult::Unavailable => (hooks.spawn)(db),
         }

@@ -73,6 +73,13 @@ struct ChunkMeta {
     exact: BTreeMap<String, u32>,
     /// Short (last `::` segment) → index map.
     short: BTreeMap<String, u32>,
+    /// Enum type short names (lowercase). Used to identify enum variant
+    /// constructors (`Type::Variant(args)`) that look like function calls
+    /// to tree-sitter but are not actual call edges.
+    enum_types: HashSet<String>,
+    /// Known enum variant qualified names (lowercase): `"cfgexpr::any"`, `"hltag::symbol"`.
+    /// Extracted from enum definition text.  Calls matching these are skipped.
+    enum_variants: HashSet<String>,
 }
 
 impl ChunkMeta {
@@ -135,7 +142,22 @@ impl ChunkMeta {
 
         name_index.sort_by(|a, b| a.0.cmp(&b.0));
 
-        Self { names, files, kinds, lines, signatures, is_test, name_index, exact, short }
+        // Collect enum type short names and variant names for variant detection.
+        let mut enum_types = HashSet::new();
+        let mut enum_variants = HashSet::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            if kinds[i] == "enum" {
+                let leaf = names[i].rsplit("::").next().unwrap_or(&names[i]).to_lowercase();
+                enum_types.insert(leaf.clone());
+                // Use pre-extracted variant names from tree-sitter (via Variants: line).
+                for v in &chunk.enum_variants {
+                    let qualified = format!("{leaf}::{v}");
+                    enum_variants.insert(qualified);
+                }
+            }
+        }
+
+        Self { names, files, kinds, lines, signatures, is_test, name_index, exact, short, enum_types, enum_variants }
     }
 }
 
@@ -205,7 +227,7 @@ impl CallGraph {
 
         // Pass 1: resolve with static type info.
         for (src, c) in chunks.iter().enumerate() {
-            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &meta.kinds, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &mut adj, &HashSet::new());
+            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &meta.kinds, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &mut adj, &HashSet::new(), &meta.enum_types, &meta.enum_variants);
         }
 
         // Pass 2+: iterative convergence.
@@ -237,13 +259,12 @@ impl CallGraph {
                         let resolved_short = resolved_lower.rsplit("::").next().unwrap_or(&resolved_lower);
                         let callee_short = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
                         let callee_leaf = callee_short.rsplit('.').next().unwrap_or(callee_short);
-                        if resolved_short == callee_leaf {
-                            if let Some(ret) = return_type_map.get(&resolved_lower) {
+                        if resolved_short == callee_leaf
+                            && let Some(ret) = return_type_map.get(&resolved_lower) {
                                 extra_receiver_types[src]
                                     .entry(var_name.to_lowercase())
                                     .or_insert_with(|| ret.clone());
                             }
-                        }
                     }
                 }
 
@@ -262,13 +283,12 @@ impl CallGraph {
                         if resolved_short != callee_leaf { continue; }
                         // callee_arg is 0-based; +1 to skip self for methods
                         let param_idx = *callee_arg;
-                        if let Some(ty) = callee_param_index[ci].get(&param_idx) {
-                            if !ty.is_empty() {
+                        if let Some(ty) = callee_param_index[ci].get(&param_idx)
+                            && !ty.is_empty() {
                                 extra_receiver_types[src]
                                     .entry(param_name.to_lowercase())
                                     .or_insert_with(|| ty.clone());
                             }
-                        }
                     }
                 }
             }
@@ -294,7 +314,7 @@ impl CallGraph {
                 for (var, ty) in &extra_receiver_types[src] {
                     enriched.local_types.push((var.clone(), ty.clone()));
                 }
-                Self::resolve_chunk_edges(src, &enriched, &meta.exact, &meta.short, &meta.kinds, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &mut new_adj, &skip);
+                Self::resolve_chunk_edges(src, &enriched, &meta.exact, &meta.short, &meta.kinds, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &mut new_adj, &skip, &meta.enum_types, &meta.enum_variants);
                 // Merge with existing edges.
                 for &callee in &adj.callees[src] {
                     if !new_adj.callees[src].contains(&callee) {
@@ -326,6 +346,7 @@ impl CallGraph {
     /// Resolve tree-sitter edges for a single chunk.
     ///
     /// `skip_calls` contains short names already resolved — those are skipped.
+    #[expect(clippy::too_many_arguments, reason = "graph resolution needs all lookup tables")]
     fn resolve_chunk_edges(
         src: usize,
         chunk: &ParsedChunk,
@@ -342,20 +363,21 @@ impl CallGraph {
         rustdoc: Option<&RustdocTypes>,
         adj: &mut AdjState,
         skip_calls: &HashSet<String>,
+        enum_types: &HashSet<String>,
+        enum_variants: &HashSet<String>,
     ) {
         let imports = build_import_map(&chunk.imports);
         let self_type = owning_type(&chunk.name);
         let call_types = extract_call_types(&chunk.calls);
         let mut enriched_types = chunk.types.clone();
-        if let Some(ref owner) = self_type {
-            if let Some(extra) = owner_types.get(owner.as_str()) {
+        if let Some(ref owner) = self_type
+            && let Some(extra) = owner_types.get(owner.as_str()) {
                 for t in extra {
                     if !enriched_types.contains(t) {
                         enriched_types.push(t.clone());
                     }
                 }
             }
-        }
         // Build receiver name → type lookup from param/local/field types.
         let mut receiver_types = build_receiver_type_map(chunk);
         // Register self type so chained access (self.field.method) can resolve.
@@ -397,7 +419,7 @@ impl CallGraph {
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &imports,
                 self_type.as_deref(), &enriched_types, &call_types,
-                &receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds,
+                &receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 adj.add_edge(src, tgt, call_line);
@@ -582,6 +604,7 @@ fn graph_cache_path(db: &Path) -> std::path::PathBuf {
 /// 5. Type-reference heuristic: `var.method` where source chunk references
 ///    a type that has `::method` → resolve to that type's method
 /// 6. Short name fallback for `::` calls; type-gated for `.` calls (no hardcoded blocklist)
+#[expect(clippy::too_many_arguments, reason = "graph resolution needs all lookup tables")]
 fn resolve_with_imports(
     call: &str,
     exact: &BTreeMap<String, u32>,
@@ -597,8 +620,34 @@ fn resolve_with_imports(
     trait_impl_methods: &BTreeMap<String, Vec<String>>,
     rustdoc: Option<&RustdocTypes>,
     kinds: &[String],
+    _enum_types: &HashSet<String>,
+    enum_variants: &HashSet<String>,
 ) -> Option<u32> {
     let lower = call.to_lowercase();
+
+    // Skip Rust prelude enum variant constructors that tree-sitter sees as calls.
+    // `Ok(v)`, `Err(e)`, `Some(v)` are bare calls starting with uppercase.
+    // Only skip when original call starts with uppercase (preserves real `ok()` functions).
+    static PRELUDE_VARIANTS: &[&str] = &["ok", "err", "some", "none"];
+    if call.starts_with(char::is_uppercase) && PRELUDE_VARIANTS.contains(&lower.as_str()) {
+        return None;
+    }
+
+    // Skip enum variant constructors: `Type::Variant(args)` looks like a call
+    // to tree-sitter but isn't a function call.  Check against the extracted
+    // enum_variants set which contains `"type::variant"` pairs parsed from
+    // enum definitions.  Also require the original call's last segment to start
+    // with uppercase to avoid skipping real `Type::method()` calls.
+    if let Some((prefix, _name)) = lower.rsplit_once("::") {
+        let orig_last = call.rsplit_once("::").map_or(call, |p| p.1);
+        if orig_last.starts_with(char::is_uppercase) {
+            let type_leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
+            let variant_key = format!("{type_leaf}::{}", _name);
+            if enum_variants.contains(&variant_key) {
+                return None;
+            }
+        }
+    }
 
     // 1. Exact match.
     if let Some(&idx) = exact.get(&lower) {
@@ -628,11 +677,10 @@ fn resolve_with_imports(
                     return Some(idx);
                 }
                 // Field type exists in project → allow short fallback
-                if short.contains_key(field_type) || exact.contains_key(field_type) {
-                    if let Some(&idx) = short.get(leaf_method) {
+                if (short.contains_key(field_type) || exact.contains_key(field_type))
+                    && let Some(&idx) = short.get(leaf_method) {
                         return Some(idx);
                     }
-                }
                 // Field type is external → skip to avoid false positive
                 return None;
             }
@@ -707,13 +755,11 @@ fn resolve_with_imports(
     if let Some((prefix, suffix)) = lower.rsplit_once("::") {
         // Skip enum variant constructors: `CliError::Embed(...)` is not a function call.
         let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix);
-        if let Some(&idx) = exact.get(prefix_leaf) {
-            if let Some(kind) = kinds.get(idx as usize) {
-                if kind == "enum" {
+        if let Some(&idx) = exact.get(prefix_leaf)
+            && let Some(kind) = kinds.get(idx as usize)
+                && kind == "enum" {
                     return None;
                 }
-            }
-        }
         return short.get(suffix).copied();
     }
     if let Some((receiver, method)) = lower.rsplit_once('.') {
@@ -756,14 +802,13 @@ fn resolve_with_imports(
                 }
             }
             // Also check method_owners (non-trait methods)
-            if let Some(owners) = method_owners.get(method) {
-                if let Some(owner) = owners.iter().find(|o| **o == ty_lower) {
+            if let Some(owners) = method_owners.get(method)
+                && let Some(owner) = owners.iter().find(|o| **o == ty_lower) {
                     let qualified = format!("{owner}::{method}");
                     if let Some(&idx) = exact.get(&qualified) {
                         return Some(idx);
                     }
                 }
-            }
             // Type is in project (exact or short map) → allow short fallback
             if short.contains_key(&ty_lower) || exact.contains_key(&ty_lower) {
                 return short.get(method).copied();
@@ -776,8 +821,8 @@ fn resolve_with_imports(
         //     (source_types or call_types). This prevents false positives like
         //     resolving HashMap::get() to Sq8VectorStore::get() just because
         //     Sq8VectorStore is the only project type with a `get` method.
-        if let Some(rdoc) = rustdoc {
-            if let Some(owners) = rdoc.owners_of(method) {
+        if let Some(rdoc) = rustdoc
+            && let Some(owners) = rdoc.owners_of(method) {
                 // Check if any owner type appears in the function's type context.
                 let ctx_owner = owners.iter().find(|o| {
                     let ol = o.to_lowercase();
@@ -794,7 +839,6 @@ fn resolve_with_imports(
                 // Fall through to 6d — method_owners has its own guards (unique owner,
                 // receiver name match, self_type, receiver_types, type context).
             }
-        }
         // 6d. Project-internal method→owner disambiguation.
         //     method_name → [owner_types] reverse index from all project functions.
         //     Resolution priority:
@@ -829,23 +873,21 @@ fn resolve_with_imports(
                     }
                 }
                 // (3) Self type — method on the same struct we're in
-                if let Some(st) = self_type {
-                    if owners.contains(&st.to_owned()) {
+                if let Some(st) = self_type
+                    && owners.contains(&st.to_owned()) {
                         let qualified = format!("{st}::{method}");
                         if let Some(&idx) = exact.get(&qualified) {
                             return Some(idx);
                         }
                     }
-                }
                 // (4) Known receiver type from receiver_types
-                if let Some(recv_type) = receiver_types.get(receiver_leaf) {
-                    if owners.contains(recv_type) {
+                if let Some(recv_type) = receiver_types.get(receiver_leaf)
+                    && owners.contains(recv_type) {
                         let qualified = format!("{recv_type}::{method}");
                         if let Some(&idx) = exact.get(&qualified) {
                             return Some(idx);
                         }
                     }
-                }
                 // (5) Type context — source_types, call_types, imports
                 let ctx_owner = owners.iter().find(|o| {
                     source_types.iter().chain(call_types.iter())
@@ -865,8 +907,8 @@ fn resolve_with_imports(
         }
         // 6e. Trait impl method fallback: if method is known only through
         //      trait impls (not in method_owners), try unique impl resolution.
-        if method_owners.get(method).is_none() {
-            if let Some(impl_types) = trait_impl_methods.get(method) {
+        if method_owners.get(method).is_none()
+            && let Some(impl_types) = trait_impl_methods.get(method) {
                 if impl_types.len() == 1 {
                     let qualified = format!("{}::{}", impl_types[0], method);
                     if let Some(&idx) = exact.get(&qualified) {
@@ -888,7 +930,6 @@ fn resolve_with_imports(
                     }
                 }
             }
-        }
         // Unknown receiver + unknown method → too ambiguous → skip.
         return None;
     }
@@ -1142,7 +1183,7 @@ fn extract_project_type_from_return(
     project_types: &std::collections::HashSet<String>,
 ) -> Option<String> {
     // Split by common delimiters and look for project types
-    for token in ret.split(|c: char| matches!(c, '<' | '>' | ',' | '(' | ')' | '&' | ' ')) {
+    for token in ret.split(['<', '>', ',', '(', ')', '&', ' ']) {
         let token = token.trim();
         if token.is_empty() {
             continue;

@@ -35,11 +35,11 @@ impl RustdocTypes {
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read rustdoc JSON: {}", path.display()))?;
-        Self::from_str(&content)
+        Self::parse(&content)
     }
 
     /// Parse rustdoc JSON from a string.
-    pub fn from_str(json: &str) -> Result<Self> {
+    pub fn parse(json: &str) -> Result<Self> {
         let doc: serde_json::Value =
             serde_json::from_str(json).context("failed to parse rustdoc JSON")?;
 
@@ -215,11 +215,10 @@ fn extract_type_name(ty: &serde_json::Value) -> Option<String> {
         if let Some(arr) = obj.get("array").and_then(|v| v.as_object()) {
             return arr.get("type").and_then(extract_type_name);
         }
-        if let Some(tup) = obj.get("tuple").and_then(|v| v.as_array()) {
-            if tup.is_empty() {
+        if let Some(tup) = obj.get("tuple").and_then(|v| v.as_array())
+            && tup.is_empty() {
                 return Some("()".to_owned());
             }
-        }
     }
     None
 }
@@ -457,35 +456,30 @@ pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
 
     // 2. Multi-file JSON cache directory
     let cache_dir = db_path.join("cache").join("rustdoc");
-    if cache_dir.is_dir() {
-        if let Ok(types) = RustdocTypes::from_dir(&cache_dir) {
-            if !types.fn_return_types.is_empty() {
+    if cache_dir.is_dir()
+        && let Ok(types) = RustdocTypes::from_dir(&cache_dir)
+            && !types.fn_return_types.is_empty() {
                 save_bincode_cache(&bin_cache, &types);
                 return Some(types);
             }
-        }
-    }
 
     // 3. Single file cache (legacy)
     let cache_path = db_path.join("cache").join("rustdoc.json");
-    if cache_path.exists() {
-        if let Ok(types) = RustdocTypes::from_file(&cache_path) {
+    if cache_path.exists()
+        && let Ok(types) = RustdocTypes::from_file(&cache_path) {
             save_bincode_cache(&bin_cache, &types);
             return Some(types);
         }
-    }
 
     // 4. Try target/doc/ from project root
     if let Some(project_root) = crate::helpers::find_project_root(db_path) {
         let doc_dir = project_root.join("target").join("doc");
-        if doc_dir.is_dir() {
-            if let Ok(types) = RustdocTypes::from_dir(&doc_dir) {
-                if !types.fn_return_types.is_empty() {
+        if doc_dir.is_dir()
+            && let Ok(types) = RustdocTypes::from_dir(&doc_dir)
+                && !types.fn_return_types.is_empty() {
                     save_bincode_cache(&bin_cache, &types);
                     return Some(types);
                 }
-            }
-        }
     }
 
     None
@@ -550,6 +544,7 @@ pub fn save_to_cache(db_path: &Path, project_root: &Path) -> Option<()> {
 /// Find the rustdoc JSON output file in `target/doc/`.
 ///
 /// Looks for `*.json` files, preferring the most recently modified one.
+#[expect(dead_code, reason = "reserved for future rustdoc integration")]
 fn find_rustdoc_json(project_root: &Path) -> Option<PathBuf> {
     let doc_dir = project_root.join("target").join("doc");
     if !doc_dir.exists() {

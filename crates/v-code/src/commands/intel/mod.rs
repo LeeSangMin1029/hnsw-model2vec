@@ -59,7 +59,7 @@ fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
 
     // If daemon already built the graph (cached), use it immediately.
     if let Some(g) = v_code_intel::graph::CallGraph::load(&canonical) {
-        return DaemonBuildResult::Ready(g);
+        return DaemonBuildResult::Ready(Box::new(g));
     }
 
     // No cached graph — fire-and-forget build request to daemon.

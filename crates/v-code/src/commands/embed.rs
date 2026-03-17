@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use v_hnsw_core::{PayloadStore, VectorStore};
+use v_hnsw_core::PayloadStore;
 use v_hnsw_embed::{EmbeddingModel, Model2VecModel};
 use v_hnsw_storage::{MmapVectorStore, StorageEngine};
 

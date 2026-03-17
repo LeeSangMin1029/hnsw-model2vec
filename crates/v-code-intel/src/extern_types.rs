@@ -287,7 +287,7 @@ fn parse_cargo_toml_deps(content: &str) -> Vec<String> {
         }
         if in_deps_section && !trimmed.is_empty() && !trimmed.starts_with('#') {
             // "serde = ..." or "serde.workspace = true"
-            if let Some(name) = trimmed.split(|c| c == '=' || c == '.').next() {
+            if let Some(name) = trimmed.split(['=', '.']).next() {
                 let name = name.trim();
                 if !name.is_empty() && name != "workspace" {
                     // Normalize underscores to hyphens (cargo convention)

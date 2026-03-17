@@ -299,6 +299,7 @@ fn get_or_insert_idx<T>(
     }
 }
 
+#[expect(clippy::type_complexity, reason = "return type is consumed locally")]
 fn group_by_file(
     ids: &[(u64, u64)],
     pstore: &impl PayloadStore,

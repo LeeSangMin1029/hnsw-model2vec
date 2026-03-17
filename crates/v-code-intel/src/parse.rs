@@ -47,6 +47,10 @@ pub struct ParsedChunk {
     /// Field accesses (non-call): `(receiver, field_name)`.
     #[serde(default)]
     pub field_accesses: Vec<(String, String)>,
+    /// Enum variant names (lowercase, for enum chunks only).
+    /// Used to distinguish `Type::Variant(args)` from `Type::method(args)`.
+    #[serde(default)]
+    pub enum_variants: Vec<String>,
 }
 
 /// Parse the text field of a code chunk into a [`ParsedChunk`].
@@ -106,6 +110,7 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
     let mut let_call_bindings: Vec<(String, String)> = Vec::new();
     let mut field_accesses: Vec<(String, String)> = Vec::new();
     let mut return_type: Option<String> = None;
+    let mut enum_variants: Vec<String> = Vec::new();
 
     for line in lines_iter {
         if let Some(f) = line.strip_prefix("File: ") {
@@ -137,13 +142,12 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
             // Parse "name@line" annotations: split off @N suffix
             for token in c.split(", ") {
                 let token = token.trim();
-                if let Some(at) = token.rfind('@') {
-                    if let Ok(line_num) = token[at + 1..].parse::<u32>() {
+                if let Some(at) = token.rfind('@')
+                    && let Ok(line_num) = token[at + 1..].parse::<u32>() {
                         calls.push(token[..at].to_owned());
                         call_lines.push(line_num);
                         continue;
                     }
-                }
                 calls.push(token.to_owned());
                 call_lines.push(0);
             }
@@ -217,6 +221,8 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
                     field_accesses.push((recv, field));
                 }
             }
+        } else if let Some(v) = line.strip_prefix("Variants: ") {
+            enum_variants = v.split(", ").map(|s| s.trim().to_owned()).collect();
         }
     }
 
@@ -242,6 +248,7 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
         let_call_bindings,
         field_accesses,
         return_type,
+        enum_variants,
     })
 }
 

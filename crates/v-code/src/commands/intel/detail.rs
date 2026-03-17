@@ -248,6 +248,7 @@ fn run_mutate(params: &DetailParams) -> Result<()> {
     Ok(())
 }
 
+#[expect(clippy::too_many_arguments, reason = "history entry fields")]
 fn push_history(
     entry: &mut ReasonEntry, today: &str, commit: &Option<String>,
     action: &str, note: Option<String>,

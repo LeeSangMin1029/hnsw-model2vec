@@ -23,6 +23,7 @@ fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> ParsedChunk 
         let_call_bindings: vec![],
         field_accesses: vec![],
         return_type: None,
+        enum_variants: vec![],
     }
 }
 

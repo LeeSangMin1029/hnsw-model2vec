@@ -92,8 +92,8 @@ where
         k: usize,
     ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
         let sparse = self.sparse_index.search(query_text, self.config.sparse_limit);
-        let all_sparse = enrich_sparse(&dense, sparse, |ids| self.sparse_index.score_documents(query_text, ids));
-        Ok(self.fusion.fuse(&dense, &all_sparse, k))
+        let all_sparse = enrich_sparse(dense, sparse, |ids| self.sparse_index.score_documents(query_text, ids));
+        Ok(self.fusion.fuse(dense, &all_sparse, k))
     }
 
     /// Perform dense-only search.

@@ -121,7 +121,7 @@ fn minimal_json() -> String {
 
 #[test]
 fn parse_fn_return_types() {
-    let types = RustdocTypes::from_str(&minimal_json()).unwrap();
+    let types = RustdocTypes::parse(&minimal_json()).unwrap();
 
     // MyStruct::new returns Self → resolved to "mystruct"
     assert_eq!(types.fn_return_types.get("mystruct::new").map(String::as_str), Some("mystruct"));
@@ -138,7 +138,7 @@ fn parse_fn_return_types() {
 
 #[test]
 fn parse_method_owners() {
-    let types = RustdocTypes::from_str(&minimal_json()).unwrap();
+    let types = RustdocTypes::parse(&minimal_json()).unwrap();
 
     // "new" is owned by MyStruct
     assert!(types.method_owner.get("new").unwrap().contains(&"mystruct".to_owned()));
@@ -152,7 +152,7 @@ fn parse_method_owners() {
 
 #[test]
 fn parse_struct_fields() {
-    let types = RustdocTypes::from_str(&minimal_json()).unwrap();
+    let types = RustdocTypes::parse(&minimal_json()).unwrap();
 
     assert_eq!(types.field_type("mystruct", "name"), Some("str"));
     assert_eq!(types.field_type("mystruct", "db"), Some("database"));
@@ -161,7 +161,7 @@ fn parse_struct_fields() {
 
 #[test]
 fn blanket_traits_excluded() {
-    let types = RustdocTypes::from_str(&minimal_json()).unwrap();
+    let types = RustdocTypes::parse(&minimal_json()).unwrap();
 
     // "from", "clone", etc. should not appear in method_owner
     assert!(types.method_owner.get("from").is_none());
@@ -170,7 +170,7 @@ fn blanket_traits_excluded() {
 
 #[test]
 fn return_type_self_resolution() {
-    let types = RustdocTypes::from_str(&minimal_json()).unwrap();
+    let types = RustdocTypes::parse(&minimal_json()).unwrap();
 
     // new() returns Self → should be resolved to owner type "mystruct"
     let ret = types.return_type("mystruct::new");

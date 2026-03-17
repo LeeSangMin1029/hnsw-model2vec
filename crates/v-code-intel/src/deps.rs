@@ -145,8 +145,8 @@ pub fn collect_transitive_files(graph: &DepGraph, start: &str, depth: usize) -> 
         visited.insert(file.clone());
 
         // Only expand neighbors if we haven't reached the depth limit.
-        if level < depth {
-            if let Some(node) = graph.nodes.get(&file) {
+        if level < depth
+            && let Some(node) = graph.nodes.get(&file) {
                 for (target, _) in &node.outgoing {
                     if !visited.contains(target) {
                         queue.push_back((target.clone(), level + 1));
@@ -158,7 +158,6 @@ pub fn collect_transitive_files(graph: &DepGraph, start: &str, depth: usize) -> 
                     }
                 }
             }
-        }
     }
 
     visited

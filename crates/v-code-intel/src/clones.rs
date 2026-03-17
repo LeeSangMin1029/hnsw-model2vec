@@ -433,8 +433,8 @@ fn deduplicate_contained_entries(
             if id_a == id_b {
                 continue;
             }
-            if let (Some(a), Some(b)) = (ranges.get(&id_a), ranges.get(&id_b)) {
-                if a.0 == b.0 {
+            if let (Some(a), Some(b)) = (ranges.get(&id_a), ranges.get(&id_b))
+                && a.0 == b.0 {
                     // Same file: remove the larger (parent) chunk entry
                     let a_size = a.2 - a.1;
                     let b_size = b.2 - b.1;
@@ -448,7 +448,6 @@ fn deduplicate_contained_entries(
                         to_remove.push(j);
                     }
                 }
-            }
         }
     }
     to_remove.sort_unstable();

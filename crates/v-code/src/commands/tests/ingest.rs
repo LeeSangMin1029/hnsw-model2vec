@@ -29,6 +29,7 @@
                 local_types: vec![],
                 let_call_bindings: vec![],
                 field_accesses: vec![],
+                enum_variants: vec![],
             },
             source: "test.rs".to_string(),
             file_path_str: "test.rs".to_string(),

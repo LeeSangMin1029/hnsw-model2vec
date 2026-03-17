@@ -165,17 +165,15 @@ impl DaemonState {
 
         // Store the initial DB path but don't load it yet.
         // Indexes are loaded lazily on first request (ensure_db).
-        if let Some(db_path) = initial_db {
-            if let Ok(key) = db_path.canonicalize() {
+        if let Some(db_path) = initial_db
+            && let Ok(key) = db_path.canonicalize() {
                 let config = DbConfig::load(&key).ok();
-                if let Some(ref c) = config {
-                    if let Some(ref name) = c.embed_model {
+                if let Some(ref c) = config
+                    && let Some(ref name) = c.embed_model {
                         state.model_name = Some(name.clone());
                         state.model_dim = Some(c.dim);
                     }
-                }
             }
-        }
 
         eprintln!("[daemon] Idle — indexes load on first request");
         Ok(state)

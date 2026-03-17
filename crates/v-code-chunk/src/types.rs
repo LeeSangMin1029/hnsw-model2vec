@@ -146,6 +146,9 @@ pub struct CodeChunk {
     /// Collected from `payload.source`, `self.engine`, `node.incoming` etc.
     /// Used for field-level blast radius analysis.
     pub field_accesses: Vec<(String, String)>,
+    /// Enum variant names (for enum chunks only).
+    /// Used to distinguish `Type::Variant(args)` from `Type::method(args)`.
+    pub enum_variants: Vec<String>,
 }
 
 impl CodeChunk {
@@ -268,6 +271,11 @@ impl CodeChunk {
                 .map(|(recv, field)| format!("{recv}.{field}"))
                 .collect();
             parts.push(format!("FieldAccesses: {}", items.join(", ")));
+        }
+
+        // Enum variant names
+        if !self.enum_variants.is_empty() {
+            parts.push(format!("Variants: {}", self.enum_variants.join(", ")));
         }
 
         // Called by (reverse references)

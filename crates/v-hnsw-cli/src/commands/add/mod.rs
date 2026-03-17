@@ -42,12 +42,11 @@ fn detect_input_type(path: &Path, exclude: &[String]) -> Result<InputType> {
             })
             .filter_map(|e| e.ok())
         {
-            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                if ext == "md" || ext == "markdown" {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str())
+                && (ext == "md" || ext == "markdown") {
                     has_md = true;
                     break;
                 }
-            }
         }
         if has_md {
             Ok(InputType::MarkdownFolder)

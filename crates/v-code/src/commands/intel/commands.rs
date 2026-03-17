@@ -501,11 +501,10 @@ pub fn run_strings(
             if !value.to_lowercase().contains(&lower) {
                 continue;
             }
-            if let Some(ref filter) = callee_lower {
-                if !callee.to_lowercase().contains(filter) {
+            if let Some(ref filter) = callee_lower
+                && !callee.to_lowercase().contains(filter) {
                     continue;
                 }
-            }
             matches.push((chunk_idx as u32, callee, value, *line, *pos));
         }
     }
@@ -523,7 +522,8 @@ pub fn run_strings(
         .collect();
     let (alias_map, legend) = build_path_aliases(&files);
 
-    let mut groups: BTreeMap<&str, Vec<&(u32, &str, &str, u32, u8)>> = BTreeMap::new();
+    type MatchRef<'a> = &'a (u32, &'a str, &'a str, u32, u8);
+    let mut groups: BTreeMap<&str, Vec<MatchRef<'_>>> = BTreeMap::new();
     for (m, file) in matches.iter().zip(files.iter()) {
         groups.entry(file).or_default().push(m);
     }
@@ -720,16 +720,14 @@ fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry], show_so
                 String::new()
             };
             println!("  [{}] {lines} {kind} {name}{test_marker}{call_site}", e.tag);
-            if e.sig {
-                if let Some(s) = &graph.signatures[i] {
+            if e.sig
+                && let Some(s) = &graph.signatures[i] {
                     println!("    {s}");
                 }
-            }
-            if show_source && (e.tag == "def" || e.sig) {
-                if let Some((start, end)) = graph.lines[i] {
+            if show_source && (e.tag == "def" || e.sig)
+                && let Some((start, end)) = graph.lines[i] {
                     print_source_lines(&graph.files[i], start, end);
                 }
-            }
         }
         println!();
     }
@@ -779,6 +777,7 @@ fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
 /// `v-code untested <db> [--depth N] [--file <suffix>]`
 ///
 /// Find functions not covered by any test (directly or transitively).
+#[expect(clippy::needless_range_loop, reason = "multiple parallel arrays indexed together")]
 pub fn run_untested(
     db: PathBuf,
     depth: u32,
@@ -822,11 +821,10 @@ pub fn run_untested(
         if graph.kinds[i] != "function" {
             continue;
         }
-        if let Some(ref suffix) = file_filter {
-            if !graph.files[i].ends_with(suffix.as_str()) {
+        if let Some(ref suffix) = file_filter
+            && !graph.files[i].ends_with(suffix.as_str()) {
                 continue;
             }
-        }
         untested.push(i as u32);
     }
 

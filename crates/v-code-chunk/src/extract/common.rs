@@ -87,21 +87,18 @@ pub fn walk_for_calls(node: &tree_sitter::Node, src: &[u8], calls: &mut Vec<Stri
 ///     .checkpoint() ← line 6 (method name — we return this)
 /// ```
 fn call_site_line(node: &tree_sitter::Node) -> u32 {
-    if node.kind() == "call_expression" || node.kind() == "call" {
-        if let Some(func) = node.child_by_field_name("function") {
-            if func.kind() == "field_expression" {
-                if let Some(field) = func.child_by_field_name("field") {
+    if (node.kind() == "call_expression" || node.kind() == "call")
+        && let Some(func) = node.child_by_field_name("function") {
+            if func.kind() == "field_expression"
+                && let Some(field) = func.child_by_field_name("field") {
                     return field.start_position().row as u32;
                 }
-            }
             // For scoped_identifier (Type::method), use the name part
-            if func.kind() == "scoped_identifier" {
-                if let Some(name) = func.child_by_field_name("name") {
+            if func.kind() == "scoped_identifier"
+                && let Some(name) = func.child_by_field_name("name") {
                     return name.start_position().row as u32;
                 }
-            }
         }
-    }
     node.start_position().row as u32
 }
 
@@ -667,9 +664,9 @@ pub(crate) fn walk_param_flows_inner(
     params: &[(String, u8)],
     flows: &mut Vec<ParamFlow>,
 ) {
-    if let Some(callee_name) = extract_callee_from_node(node, src) {
-        if !is_noise_callee(&callee_name) {
-            if let Some(args_node) = node.child_by_field_name("arguments") {
+    if let Some(callee_name) = extract_callee_from_node(node, src)
+        && !is_noise_callee(&callee_name)
+            && let Some(args_node) = node.child_by_field_name("arguments") {
                 let mut cursor = args_node.walk();
                 let mut arg_pos: u8 = 0;
                 for arg in args_node.children(&mut cursor) {
@@ -695,8 +692,6 @@ pub(crate) fn walk_param_flows_inner(
                     }
                 }
             }
-        }
-    }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -835,18 +830,14 @@ fn walk_let_call_bindings_inner(
     src: &[u8],
     out: &mut Vec<(String, String)>,
 ) {
-    if node.kind() == "let_declaration" {
-        if let Some(pat) = node.child_by_field_name("pattern")
+    if node.kind() == "let_declaration"
+        && let Some(pat) = node.child_by_field_name("pattern")
             && pat.kind() == "identifier"
             && let Ok(var_name) = pat.utf8_text(src)
-        {
-            if let Some(val) = node.child_by_field_name("value") {
-                if let Some(callee) = extract_rhs_callee(&val, src) {
+            && let Some(val) = node.child_by_field_name("value")
+                && let Some(callee) = extract_rhs_callee(&val, src) {
                     out.push((var_name.to_owned(), callee));
                 }
-            }
-        }
-    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_let_call_bindings_inner(&child, src, out);
@@ -919,18 +910,15 @@ fn walk_field_accesses_inner(
                 && p.child_by_field_name("function")
                     .is_some_and(|f| f.id() == node.id())
         });
-        if !is_call_func {
-            if let Some(obj) = node.child_by_field_name("value") {
-                if let Some(field) = node.child_by_field_name("field") {
-                    if let (Ok(recv), Ok(fname)) = (obj.utf8_text(src), field.utf8_text(src)) {
+        if !is_call_func
+            && let Some(obj) = node.child_by_field_name("value")
+                && let Some(field) = node.child_by_field_name("field")
+                    && let (Ok(recv), Ok(fname)) = (obj.utf8_text(src), field.utf8_text(src)) {
                         // Only simple receivers (identifier, self) — not chains
                         if obj.kind() == "identifier" || obj.kind() == "self" {
                             out.push((recv.to_owned(), fname.to_owned()));
                         }
                     }
-                }
-            }
-        }
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -1057,4 +1045,45 @@ fn find_identifier_in_declarator(node: &tree_sitter::Node, src: &[u8]) -> Option
         }
     }
     None
+}
+
+/// Extract variant names from an enum definition node.
+///
+/// Walks children of the enum body (`enum_variant_list` in Rust) and collects
+/// identifier names of each variant.  Returns lowercase names suitable for
+/// matching against call targets.
+pub(crate) fn extract_enum_variant_names(node: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
+    let mut variants = Vec::new();
+    // Rust: body is `enum_variant_list`, children are `enum_variant` nodes.
+    // Other langs: `enum_body` or similar — fall through gracefully.
+    let body = node.child_by_field_name("body")
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).find(|c| {
+                let k = c.kind();
+                k.contains("variant_list") || k.contains("enum_body")
+            })
+        });
+    let Some(body) = body else { return variants; };
+
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        let kind = child.kind();
+        // Rust: "enum_variant", TS: "enum_member", etc.
+        if !kind.contains("variant") && !kind.contains("member") {
+            continue;
+        }
+        // The name is typically the first `identifier` or `type_identifier` child,
+        // or the `name` field.
+        let name_node = child.child_by_field_name("name")
+            .or_else(|| {
+                let mut c2 = child.walk();
+                child.children(&mut c2).find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
+            });
+        if let Some(n) = name_node
+            && let Ok(text) = n.utf8_text(src) {
+                variants.push(text.to_lowercase());
+            }
+    }
+    variants
 }

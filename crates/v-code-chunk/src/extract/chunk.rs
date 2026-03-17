@@ -2,7 +2,7 @@
 
 use crate::{CodeChunk, CodeChunkConfig, CodeNodeKind};
 use super::ParsedSource;
-use super::common::{extract_function_signature, extract_struct_fields, extract_struct_field_types, collect_sorted_unique, walk_for_calls_with_lines, walk_for_field_accesses, walk_for_let_call_bindings, walk_for_let_types, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
+use super::common::{extract_enum_variant_names, extract_function_signature, extract_struct_fields, extract_struct_field_types, collect_sorted_unique, walk_for_calls_with_lines, walk_for_field_accesses, walk_for_let_call_bindings, walk_for_let_types, walk_for_param_flows, walk_for_string_args, walk_for_type_ids, extract_name};
 
 /// Walk calls with line info and deduplicate, preserving first occurrence's line.
 pub(crate) fn extract_calls_deduped(
@@ -83,6 +83,7 @@ pub fn simple_type_chunk(
         local_types: Vec::new(),
         let_call_bindings: Vec::new(),
         field_accesses: Vec::new(),
+        enum_variants: Vec::new(),
     })
 }
 
@@ -198,6 +199,11 @@ pub fn build_chunk(
     } else {
         Vec::new()
     };
+    let enum_variants = if kind == CodeNodeKind::Enum {
+        extract_enum_variant_names(node, src)
+    } else {
+        Vec::new()
+    };
 
     Some(CodeChunk {
         text,
@@ -226,6 +232,7 @@ pub fn build_chunk(
         local_types,
         let_call_bindings,
         field_accesses,
+        enum_variants,
     })
 }
 
@@ -341,6 +348,7 @@ pub fn extract_methods(
             local_types,
             let_call_bindings,
             field_accesses,
+            enum_variants: Vec::new(),
         });
     }
 }
