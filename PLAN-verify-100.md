@@ -1,103 +1,96 @@
-# v-code verify 100% 정확도 달성 계획
+# v-code verify 100% — 남은 5개 패턴 해결 계획
 
-## 현황 (rust-analyzer 22K 심볼, 자체 프로젝트 1.6K)
+## 현황 (P1+R1 완료 후)
 
-| 지표 | 자체 프로젝트 | rust-analyzer |
+| 지표 | 자체 (1.6K) | rust-analyzer (22K) |
 |---|---|---|
-| Precision | 100% (0 wrong) | 99.8% (109 wrong) |
-| Recall | 99.8% (16 unresolved) | 97.5% (1420 unresolved) |
+| Precision | 100% | 100.0% (13 wrong) |
+| Recall | 99.8% (16) | 97.5% (1383 unresolved) |
 
-## Precision Wrong 109개 분석
+## 미해결 5개 패턴
 
-| 패턴 | 건수 | 원인 | 범용성 |
+### 1. receiver 타입 미추론 (615건, 44%)
+```rust
+let x = some_complex_expr();
+x.krate()  // x의 타입 불명 → krate 매칭 불가
+```
+**해결**: `graph.rs` resolve_chunk_edges — multi-hop 반환 타입 전파
+- 현재: `let x = foo()` → foo 반환타입으로 x 타입 추론 (1-hop, 2nd pass)
+- 개선: iterative fixpoint — 새 타입이 추론될 때까지 반복 (최대 3회)
+- `let db = self.db()` → db:Db → `db.generic_params()` → Db::generic_params
+- **파일**: `graph.rs` build_with_rustdoc 2nd pass → iterative pass
+- **영향**: 615 → ~200 (추정 67% 해소)
+- **범용성**: ★★★★★ 언어 무관, 모든 Rust 프로젝트 동작
+
+### 2. 매크로 호출 (bare ~30건, 2%)
+```rust
+assert_eq!(a, b);  // tree-sitter: "assert_eq" 함수 호출로 추출
+```
+**해결**: `extract/common.rs` — macro_invocation node 감지
+- tree-sitter Rust에서 매크로 호출은 `macro_invocation` node type
+- `extract_callee_from_node`에서 `macro_invocation` → skip
+- 또는 `!` 포함 여부로 매크로 판별 (tree-sitter가 `!` 보존)
+- **파일**: `extract/common.rs` walk_for_calls_with_lines
+- **영향**: bare function 460 → ~430
+- **범용성**: ★★★★★ tree-sitter 문법 기반
+
+### 3. 외부 crate qualified 호출 (105건, 8%)
+```rust
+Command::new("test")              // std::process::Command
+lsp_server::Response::new_ok()    // 외부 crate
+```
+**해결**: `graph.rs` + `verify.rs` — cargo dep extern index 확장
+- 현재 extern_index가 direct dep만 파싱 — transitive dep 미포함
+- `lsp_server`는 transitive dep → extern index에 없음
+- **구현**: discover_cargo_deps에서 Cargo.lock 기반 전체 dep 파싱
+- **파일**: `extern_types.rs` discover_cargo_deps
+- **영향**: 105 → ~30
+- **범용성**: ★★★★☆ Cargo 프로젝트 전용 (대부분의 Rust)
+
+### 4. self.field 체인 (106건, 8%)
+```rust
+self.output.push_str("x")  // output: String이지만 제네릭 추론 못함
+self.map.get(&key)          // map: HashMap<K,V> → leaf "hashmap" 추론 필요
+```
+**해결**: `graph.rs` resolve_chunk_edges — 제네릭 필드 타입 전파
+- 현재: owner_field_types에서 `output: string` 추출은 가능
+- 문제: `push_str`이 extern index의 `string::push_str`로 매칭되어야 하는데 안 됨
+- **구현**: self.field.method에서 field 타입 → extern_index.has_method 체크 추가
+- **파일**: `graph.rs` resolve_with_imports (self.field.method 분기)
+- **영향**: 106 → ~30
+- **범용성**: ★★★★★ struct 정의에서 필드 타입 추출, 언어 무관
+
+### 5. trait impl self 타입 (97건, 7%)
+```rust
+impl SomeTrait for ConcreteType {
+    fn method(&self) {
+        self.concrete_method()  // self = ConcreteType
+    }
+}
+```
+**해결**: `graph.rs` ChunkMeta — trait impl의 concrete type 추출
+- 현재 owning_type이 `impl` chunk에서 첫 번째 타입만 추출
+- trait impl: `impl Trait for Type` → Type이 concrete, Trait은 아님
+- `impl<'db> InferenceContext<'db>` 같은 경우 이미 작동 — 문제는 trait impl
+- **구현**: loader/parse에서 impl chunk의 `for` 뒤 타입을 ParsedChunk에 저장
+- **파일**: `parse.rs` ParsedChunk + `extract/chunk.rs` impl 파싱
+- **영향**: 97 → ~20
+- **범용성**: ★★★★★ Rust trait impl 문법 기반
+
+## 구현 순서 (영향도 순)
+
+| 순서 | 패턴 | 예상 해소 | 누적 recall |
 |---|---|---|---|
-| `Cow::Borrowed`/`Cow::Owned` → `TokenText::borrowed`/`owned` | 25 | std enum variant(Cow)가 short fallback에서 프로젝트 함수에 매칭 | 모든 프로젝트 |
-| `FunctionBody::node` | 8 | 동명 메서드 ambiguity — `node()`가 여러 타입에 존재 | 대형 프로젝트 |
-| `projection`/`tuple`/`infer` | 15 | bare enum variant가 동명 함수에 매칭 (Ty::Tuple 등) | 컴파일러류 |
-| `ModPath::is_Self` 등 | 10+ | qualified call이 다른 타입의 동명 메서드에 매칭 | 대형 프로젝트 |
-| 나머지 | ~50 | short fallback의 과도한 매칭 | 공통 |
+| 1 | receiver 타입 iterative 전파 | ~400건 | 98.2% |
+| 2 | self.field extern 매칭 | ~75건 | 98.7% |
+| 3 | trait impl self 타입 | ~75건 | 99.2% |
+| 4 | 외부 crate dep 확장 | ~75건 | 99.7% |
+| 5 | 매크로 호출 skip | ~30건 | 99.9% |
 
-### 수정 P1: std enum variant을 extern으로 분류
-**파일**: `graph.rs` resolve_with_imports
-- `Cow::Borrowed`, `Cow::Owned` → rustdoc/extern index에서 Cow가 std 타입임을 확인하면 skip
-- `Rc::new`, `Arc::new`, `Box::new` 같은 std wrapper도 동일 패턴
-- **구현**: resolve_with_imports에서 `Type::Name` 형태일 때, Type이 extern_types에 있으면 skip
+## 범용성 보장 원칙
 
-### 수정 P2: short fallback에서 enum variant 추가 감지
-**파일**: `graph.rs` resolve_with_imports 6번(short fallback)
-- 현재: `Type::` prefix면 `exact.get(prefix_leaf)`로 enum 체크
-- 개선: prefix가 enum_types에 있으면 skip (exact에 없는 외부 enum도 처리)
-- `projection`, `tuple`, `infer` 등 bare call이 enum variant일 때 → 원래 call이 대문자면 skip
-
-### 수정 P3: qualified call의 타입 불일치 감지
-**파일**: `graph.rs` resolve_with_imports
-- `ModPath::is_Self` 매칭 시 실제 caller의 타입 context와 callee 소속 타입 일치 여부 확인
-- 이미 receiver_types 기반 체크가 있지만 qualified call에는 미적용
-
-## Recall Unresolved 1420개 분석
-
-| 카테고리 | 건수 | 상위 예시 | 원인 |
-|---|---|---|---|
-| receiver.method | 617 | krate(21), adjusted(19), as_expr(16) | receiver 타입 미추론 |
-| bare function | 505 | then_some(34), assert_eq(29), text(13) | std 메서드 or 매크로 |
-| self.field.method | 106 | self.output.push_str(8), self.interner(7) | field 타입 미추론 |
-| self.method | 97 | self.infer_pat(4), self.id.lookup(4) | self 타입 미추론 (trait impl 내) |
-| Type::method | 95 | ast::Expr::Literal(6), MemoryMap::default(4) | 외부 타입 or enum variant |
-
-### 수정 R1: std bare method extern 분류 (bare function 505 → ~200)
-**파일**: `verify.rs` check_extern_reason, `extern_types.rs`
-- `then_some`, `then`, `is_none`, `map_err`, `to_vec`, `clone_for_update` → Option/Result/Iterator 메서드
-- `assert_eq` → 매크로 (tree-sitter가 호출로 추출)
-- **구현**: extern index에 `Option::then_some`, `bool::then` 등 std trait 메서드 추가
-- 또는 verify에서 bare call이 extern_index.methods에도 있으면 extern 분류
-
-### 수정 R2: receiver 타입 전파 강화 (receiver.method 617 → ~300)
-**파일**: `graph.rs` resolve_chunk_edges, build_with_rustdoc
-- 현재: param_types, local_types, field_types에서 receiver 타입 추론
-- 개선: let_call_bindings의 반환 타입 전파 (1-hop chain)
-- `let db = self.db()` → db: Database → `db.generic_params()` 해석 가능
-- 이미 2nd pass에서 일부 수행, 정확도 개선 여지
-
-### 수정 R3: trait impl self 타입 해석 (self.method 97 → ~30)
-**파일**: `graph.rs` resolve_chunk_edges
-- trait impl 메서드의 self 타입이 impl 블록의 concrete type
-- `impl Foo for Bar { fn go(&self) { self.bar_method() } }` → self: Bar
-- 현재 owning_type이 impl 블록에서 추출하지만 trait impl은 미처리
-
-### 수정 R4: enum variant → extern 분류 (Type::method 95 → ~50)
-**파일**: `verify.rs`
-- `ast::Expr::Literal`, `ast::Adt::Union` 등은 enum variant
-- 현재 enum_variant_set에 없는 외부 crate enum (ast crate 등)
-- **구현**: `Type::Name` 형태에서 Name이 대문자시작이면 extern 분류 후보
-
-## 모든 Rust 프로젝트 범용성 평가
-
-| 기법 | 범용성 | 근거 |
-|---|---|---|
-| Prelude variant skip (Ok/Err/Some/None) | ★★★★★ | Rust 언어 사양, 모든 프로젝트 동일 |
-| tree-sitter enum variant 추출 | ★★★★★ | 언어 문법 기반, 프로젝트 무관 |
-| std extern index | ★★★★☆ | std는 고정, 외부 crate는 rustdoc 의존 |
-| receiver 타입 전파 | ★★★★☆ | 패턴 기반 추론, 복잡한 제네릭은 한계 |
-| short fallback enum 체크 | ★★★★★ | enum kind 체크는 DB 정보만 사용 |
-| trait impl self 해석 | ★★★★☆ | impl 블록 구조 분석, 일반적 패턴 |
-
-**결론**: 모든 수정 사항은 Rust 언어 구조와 std 라이브러리에 기반하므로 프로젝트 특화 로직이 아님.
-단, 대형 프로젝트(22K+ 심볼)에서 동명 메서드 충돌이 많아지므로 precision이 더 중요해짐.
-궁극적 한계: tree-sitter만으로는 full type inference 불가 → 99.9%+ 가능하나 100%는 이론적 한계.
-
-## 구현 우선순위
-
-1. **P1 + R1**: std enum variant/method extern 분류 → precision +0.1%, recall +2%
-2. **P2**: short fallback enum variant 감지 강화 → precision 잔여 wrong 절반 해소
-3. **R2**: receiver 타입 전파 → recall +1~2%
-4. **R3 + R4**: trait impl self + 외부 enum variant → recall +0.5%
-5. **P3**: qualified call 타입 불일치 → precision 최종 정리
-
-## 목표
-
-| 지표 | 현재 | 목표 |
-|---|---|---|
-| Precision (자체) | 100% | 100% 유지 |
-| Precision (RA) | 99.8% | 99.95%+ |
-| Recall (자체) | 99.8% | 99.9%+ |
-| Recall (RA) | 97.5% | 99%+ |
+- **hardcode 금지**: std 타입 목록, 매크로 이름 등 절대 hardcode하지 않음
+- **tree-sitter 기반**: AST node type으로 판별 (macro_invocation, primitive_type 등)
+- **Cargo 생태계 활용**: Cargo.lock, rustc sysroot, cargo doc으로 자동 탐색
+- **DB 자체 정보**: enum_variants, field_types, return_type 등 이미 추출된 메타데이터 활용
+- **iterative 추론**: 1회 pass가 아닌 fixpoint 반복으로 정보 전파

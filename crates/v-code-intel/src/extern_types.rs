@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 /// Cache version — bump when struct layout changes.
-const EXTERN_CACHE_VERSION: u8 = 2;
+const EXTERN_CACHE_VERSION: u8 = 3;
 
 /// Std library subdirectories that contain useful type definitions.
 /// Skips test-only, profiler, backtrace, and platform-specific crates.
@@ -201,35 +201,20 @@ fn discover_std_src() -> Option<PathBuf> {
     }
 }
 
-/// Find cargo dependency source directories from Cargo.toml (direct deps only).
+/// Find cargo dependency source directories from Cargo.lock (all deps including transitive).
 ///
-/// Parses `Cargo.toml` for direct dependency names, then finds matching
-/// versions in `Cargo.lock`, and locates sources in the cargo registry.
+/// Parses `Cargo.lock` for all package (name, version) pairs, then locates
+/// their sources in `~/.cargo/registry/src/`.
 fn discover_cargo_deps(project_root: &Path) -> Vec<PathBuf> {
-    let cargo_toml = project_root.join("Cargo.toml");
-    let Ok(toml_content) = std::fs::read_to_string(&cargo_toml) else {
-        return Vec::new();
-    };
-
-    // Extract direct dependency names from Cargo.toml (simple heuristic).
-    let direct_deps = parse_cargo_toml_deps(&toml_content);
-    if direct_deps.is_empty() {
-        return Vec::new();
-    }
-
-    // Get pinned versions from Cargo.lock.
+    // Get all pinned packages from Cargo.lock (direct + transitive).
     let lock_path = project_root.join("Cargo.lock");
     let Ok(lock_content) = std::fs::read_to_string(&lock_path) else {
         return Vec::new();
     };
     let all_deps = parse_cargo_lock_deps(&lock_content);
-
-    // Filter to direct deps only.
-    let direct_set: BTreeSet<&str> = direct_deps.iter().map(|s| s.as_str()).collect();
-    let matched: Vec<&(String, String)> = all_deps
-        .iter()
-        .filter(|(name, _)| direct_set.contains(name.as_str()))
-        .collect();
+    if all_deps.is_empty() {
+        return Vec::new();
+    }
 
     // Find registry source directory.
     let home = std::env::var("CARGO_HOME")
@@ -254,7 +239,7 @@ fn discover_cargo_deps(project_root: &Path) -> Vec<PathBuf> {
         .collect();
 
     let mut result = Vec::new();
-    for (name, version) in &matched {
+    for (name, version) in &all_deps {
         let dir_name = format!("{name}-{version}");
         for index_dir in &index_dirs {
             let dep_path = index_dir.join(&dir_name);
@@ -265,40 +250,6 @@ fn discover_cargo_deps(project_root: &Path) -> Vec<PathBuf> {
         }
     }
     result
-}
-
-/// Extract direct dependency names from Cargo.toml.
-///
-/// Handles both `[dependencies]` and `[workspace.dependencies]` sections.
-/// Simple line-by-line parser — no TOML crate needed.
-fn parse_cargo_toml_deps(content: &str) -> Vec<String> {
-    let mut deps = Vec::new();
-    let mut in_deps_section = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            let section = trimmed.trim_matches(|c| c == '[' || c == ']').trim();
-            in_deps_section = section == "dependencies"
-                || section == "workspace.dependencies"
-                || section == "dev-dependencies"
-                || section == "build-dependencies";
-            continue;
-        }
-        if in_deps_section && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            // "serde = ..." or "serde.workspace = true"
-            if let Some(name) = trimmed.split(['=', '.']).next() {
-                let name = name.trim();
-                if !name.is_empty() && name != "workspace" {
-                    // Normalize underscores to hyphens (cargo convention)
-                    deps.push(name.replace('_', "-"));
-                }
-            }
-        }
-    }
-    deps.sort();
-    deps.dedup();
-    deps
 }
 
 /// Parse Cargo.lock to extract (name, version) pairs.

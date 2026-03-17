@@ -233,12 +233,13 @@ impl CallGraph {
         // Pass 2+: iterative convergence.
         // Use resolved callees to infer more receiver types via return_type_map,
         // then re-resolve previously unresolved calls.
+        // Accumulate extra receiver types across iterations so earlier discoveries persist.
+        let mut extra_receiver_types: Vec<BTreeMap<String, String>> = vec![BTreeMap::new(); chunks.len()];
         for _pass in 0..3 {
             let prev_total: usize = adj.callees.iter().map(|c| c.len()).sum();
             // Build enriched receiver types from two sources:
             // (A) Forward: let_call_bindings + return_type_map (existing)
             // (B) Reverse argument propagation: callee param_types → caller variables
-            let mut extra_receiver_types: Vec<BTreeMap<String, String>> = vec![BTreeMap::new(); chunks.len()];
 
             // Build callee param_types index: chunk_idx → param_pos → type (lowercase)
             let callee_param_index: Vec<BTreeMap<u8, String>> = chunks.iter().map(|c| {
@@ -670,8 +671,17 @@ fn resolve_with_imports(
         //     e.g. self.tokenizer.encode → receiver_types["tokenizer"] = "tokenizer" → Tokenizer::encode
         if let Some((field_path, _)) = method.rsplit_once('.') {
             let field_leaf = field_path.rsplit_once('.').map_or(field_path, |p| p.1);
-            // Direct field type lookup (from struct definition)
-            if let Some(field_type) = receiver_types.get(field_leaf) {
+            // Direct field type lookup (from struct definition or rustdoc field_types)
+            let field_type_from_receiver = receiver_types.get(field_leaf).cloned();
+            let field_type_resolved = field_type_from_receiver.or_else(|| {
+                // Fallback: try rustdoc field_types for self.field resolution.
+                // Key format: "owner_type.field_name" → field_type
+                let owner = self_type?;
+                let rdoc = rustdoc?;
+                let key = format!("{owner}.{field_leaf}");
+                rdoc.field_types.get(&key).cloned()
+            });
+            if let Some(ref field_type) = field_type_resolved {
                 let candidate = format!("{field_type}::{leaf_method}");
                 if let Some(&idx) = exact.get(&candidate) {
                     return Some(idx);
@@ -999,6 +1009,8 @@ fn collect_owner_types(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> BTreeMap<St
         // e.g. "SimpleHybridSearcher<D, T>" → key should match owning_type output
         let lower = c.name.to_lowercase();
         let leaf = lower.rsplit("::").next().unwrap_or(&lower);
+        // Handle trait impl: "sometrait for concretetype" → "concretetype"
+        let leaf = leaf.rsplit_once(" for ").map_or(leaf, |(_, concrete)| concrete);
         // Strip generic params for the key: "simplehybridsearcher<d, t>" → "simplehybridsearcher"
         let key = leaf.split('<').next().unwrap_or(leaf);
         let entry = result.entry(key.to_owned()).or_default();
@@ -1462,6 +1474,8 @@ fn infer_local_types_from_calls(
 pub fn owning_type(name: &str) -> Option<String> {
     let (prefix, _) = name.rsplit_once("::")?;
     let leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
+    // Handle trait impl: "SomeTrait for ConcreteType" → "ConcreteType"
+    let leaf = leaf.rsplit_once(" for ").map_or(leaf, |(_, concrete)| concrete);
     // Strip generic params: "Foo<T>" → "Foo"
     let stripped = leaf.split('<').next().unwrap_or(leaf);
     Some(stripped.to_lowercase())

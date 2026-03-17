@@ -459,6 +459,54 @@ fn syntax_error_does_not_panic() {
 }
 
 #[test]
+fn macro_calls_not_extracted() {
+    let config = CodeChunkConfig { min_lines: 1, extract_calls: true, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let code = r#"
+fn test_fn() {
+    assert_eq!(1, 2);
+    assert!(true);
+    println!("hello");
+    vec![1, 2, 3];
+    foo();
+    bar(baz());
+}
+"#;
+    let chunks = chunker.chunk(code);
+    let func = find_chunk!(chunks, "test_fn");
+    // tree-sitter-rust parses macro calls as `macro_invocation` (not `call_expression`),
+    // so macro names should NOT appear in calls.
+    for call in &func.calls {
+        assert!(
+            !["assert_eq", "assert", "println", "vec"].contains(&call.as_str()),
+            "macro {call:?} should not appear in calls list"
+        );
+    }
+    // Real function calls should appear
+    assert!(func.calls.contains(&"foo".to_owned()), "foo should be in calls");
+    assert!(func.calls.contains(&"baz".to_owned()), "baz should be in calls");
+    assert!(func.calls.contains(&"bar".to_owned()), "bar should be in calls");
+}
+
+#[test]
+fn macro_args_calls_not_extracted() {
+    let config = CodeChunkConfig { min_lines: 1, extract_calls: true, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let code = r#"
+fn test_fn() {
+    assert_eq!(foo(), bar());
+    assert!(baz());
+    println!("{}", qux());
+}
+"#;
+    let chunks = chunker.chunk(code);
+    let func = find_chunk!(chunks, "test_fn");
+    // tree-sitter-rust parses macro_invocation → token_tree (not call_expression),
+    // so calls inside macros are NOT extracted. Empty is expected.
+    assert!(func.calls.is_empty(), "macro args should not produce calls, got: {:?}", func.calls);
+}
+
+#[test]
 fn config_disable_imports_and_calls() {
     let config = CodeChunkConfig {
         min_lines: 2,
