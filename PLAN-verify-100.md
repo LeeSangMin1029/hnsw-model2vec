@@ -1,96 +1,55 @@
-# v-code verify 100% — 남은 5개 패턴 해결 계획
+# v-code verify 100% — verify 로직 정확성 + recall 개선
 
-## 현황 (P1+R1 완료 후)
+## 현황 (iterative 전파 + trait impl + transitive deps 완료 후)
 
 | 지표 | 자체 (1.6K) | rust-analyzer (22K) |
 |---|---|---|
-| Precision | 100% | 100.0% (13 wrong) |
-| Recall | 99.8% (16) | 97.5% (1383 unresolved) |
+| Precision | 100% (0 wrong) | 100.0% (11 wrong) |
+| Recall | 99.9% (7 unresolved) | 98.1% (1051 unresolved) |
+| Extern 분류 | 502건 | 3428건 |
 
-## 미해결 5개 패턴
+## Phase 1: verify 로직 정확성 검증 (우선)
 
-### 1. receiver 타입 미추론 (615건, 44%)
-```rust
-let x = some_complex_expr();
-x.krate()  // x의 타입 불명 → krate 매칭 불가
-```
-**해결**: `graph.rs` resolve_chunk_edges — multi-hop 반환 타입 전파
-- 현재: `let x = foo()` → foo 반환타입으로 x 타입 추론 (1-hop, 2nd pass)
-- 개선: iterative fixpoint — 새 타입이 추론될 때까지 반복 (최대 3회)
-- `let db = self.db()` → db:Db → `db.generic_params()` → Db::generic_params
-- **파일**: `graph.rs` build_with_rustdoc 2nd pass → iterative pass
-- **영향**: 615 → ~200 (추정 67% 해소)
-- **범용성**: ★★★★★ 언어 무관, 모든 Rust 프로젝트 동작
+### 문제: `check_extern_reason`이 recall을 부풀림
 
-### 2. 매크로 호출 (bare ~30건, 2%)
-```rust
-assert_eq!(a, b);  // tree-sitter: "assert_eq" 함수 호출로 추출
-```
-**해결**: `extract/common.rs` — macro_invocation node 감지
-- tree-sitter Rust에서 매크로 호출은 `macro_invocation` node type
-- `extract_callee_from_node`에서 `macro_invocation` → skip
-- 또는 `!` 포함 여부로 매크로 판별 (tree-sitter가 `!` 보존)
-- **파일**: `extract/common.rs` walk_for_calls_with_lines
-- **영향**: bare function 460 → ~430
-- **범용성**: ★★★★★ tree-sitter 문법 기반
+현재 그래프가 resolve 못 한 호출을 "extern이니까 OK"로 분류하는데,
+그 중 일부는 그래프가 resolve했어야 할 프로젝트 함수 호출임.
 
-### 3. 외부 crate qualified 호출 (105건, 8%)
-```rust
-Command::new("test")              // std::process::Command
-lsp_server::Response::new_ok()    // 외부 crate
-```
-**해결**: `graph.rs` + `verify.rs` — cargo dep extern index 확장
-- 현재 extern_index가 direct dep만 파싱 — transitive dep 미포함
-- `lsp_server`는 transitive dep → extern index에 없음
-- **구현**: discover_cargo_deps에서 Cargo.lock 기반 전체 dep 파싱
-- **파일**: `extern_types.rs` discover_cargo_deps
-- **영향**: 105 → ~30
-- **범용성**: ★★★★☆ Cargo 프로젝트 전용 (대부분의 Rust)
+**rust-analyzer extern 3428건 내역:**
+- `bare-extern`: 454건 (`to_owned` 122, `iter` 38, `as_ref` 30...)
+- `untyped-extern`: 1407건 (`iter` 154, `clone` 100, `map` 87, `syntax` 42, `lookup` 24...)
+- `self.field`: 타입 매칭 → 비교적 정확
+- `receiver`: 타입 매칭 → 비교적 정확
 
-### 4. self.field 체인 (106건, 8%)
-```rust
-self.output.push_str("x")  // output: String이지만 제네릭 추론 못함
-self.map.get(&key)          // map: HashMap<K,V> → leaf "hashmap" 추론 필요
-```
-**해결**: `graph.rs` resolve_chunk_edges — 제네릭 필드 타입 전파
-- 현재: owner_field_types에서 `output: string` 추출은 가능
-- 문제: `push_str`이 extern index의 `string::push_str`로 매칭되어야 하는데 안 됨
-- **구현**: self.field.method에서 field 타입 → extern_index.has_method 체크 추가
-- **파일**: `graph.rs` resolve_with_imports (self.field.method 분기)
-- **영향**: 106 → ~30
-- **범용성**: ★★★★★ struct 정의에서 필드 타입 추출, 언어 무관
+**수정 1: untyped-extern 엄격화**
+- 현재: receiver가 프로젝트 타입이 아니고 method가 extern에 있으면 → extern
+- 문제: `syntax`(42건), `lookup`(24건) 같은 프로젝트 함수 이름이 extern으로 숨겨짐
+- 수정: method가 **프로젝트 함수 이름과 겹치면** unresolved로 분류
+- 단, `len`/`is_empty`/`get`/`push`/`iter`/`clone` 등 std에 압도적인 메서드는 예외
+- → 예외 없이: "프로젝트에 같은 이름 함수가 있고 + 그래프가 resolve 안 했으면 = unresolved"
 
-### 5. trait impl self 타입 (97건, 7%)
-```rust
-impl SomeTrait for ConcreteType {
-    fn method(&self) {
-        self.concrete_method()  // self = ConcreteType
-    }
-}
-```
-**해결**: `graph.rs` ChunkMeta — trait impl의 concrete type 추출
-- 현재 owning_type이 `impl` chunk에서 첫 번째 타입만 추출
-- trait impl: `impl Trait for Type` → Type이 concrete, Trait은 아님
-- `impl<'db> InferenceContext<'db>` 같은 경우 이미 작동 — 문제는 trait impl
-- **구현**: loader/parse에서 impl chunk의 `for` 뒤 타입을 ParsedChunk에 저장
-- **파일**: `parse.rs` ParsedChunk + `extract/chunk.rs` impl 파싱
-- **영향**: 97 → ~20
-- **범용성**: ★★★★★ Rust trait impl 문법 기반
+**수정 2: bare-extern 엄격화**
+- 현재: bare `len` 호출이 extern에 있으면 → extern
+- 문제: 프로젝트에도 `len` 함수가 있는데 resolve 못 한 것일 수 있음
+- 수정: 동일하게 프로젝트 함수 겹침 체크
 
-## 구현 순서 (영향도 순)
+**파일**: `verify.rs` check_extern_reason
+**영향**: recall 숫자가 떨어지지만 (98.1% → ~95%), 그게 진짜 숫자
 
-| 순서 | 패턴 | 예상 해소 | 누적 recall |
-|---|---|---|---|
-| 1 | receiver 타입 iterative 전파 | ~400건 | 98.2% |
-| 2 | self.field extern 매칭 | ~75건 | 98.7% |
-| 3 | trait impl self 타입 | ~75건 | 99.2% |
-| 4 | 외부 crate dep 확장 | ~75건 | 99.7% |
-| 5 | 매크로 호출 skip | ~30건 | 99.9% |
+## Phase 2: 진짜 recall 올리기 (Phase 1 이후)
 
-## 범용성 보장 원칙
+Phase 1에서 드러난 실제 unresolved 분포에 따라 우선순위 재설정.
 
-- **hardcode 금지**: std 타입 목록, 매크로 이름 등 절대 hardcode하지 않음
-- **tree-sitter 기반**: AST node type으로 판별 (macro_invocation, primitive_type 등)
-- **Cargo 생태계 활용**: Cargo.lock, rustc sysroot, cargo doc으로 자동 탐색
-- **DB 자체 정보**: enum_variants, field_types, return_type 등 이미 추출된 메타데이터 활용
-- **iterative 추론**: 1회 pass가 아닌 fixpoint 반복으로 정보 전파
+예상 카테고리:
+1. `receiver.method` — 타입 미추론 (가장 많을 것)
+2. `bare function` — trait method bare 호출, 매크로 생성 함수
+3. `Type::method` — 외부 crate qualified
+4. `self.method` — trait dispatch
+5. `self.field.method` — 중첩 필드 체인
+
+## 범용성 원칙
+
+- **hardcode 금지**: std 타입/메서드 목록 hardcode 안 함
+- **프로젝트 종속 금지**: 특정 프로젝트 패턴에 맞추지 않음
+- **verify는 보수적**: 의심스러우면 unresolved로 분류 (recall 부풀리지 않음)
+- **extern 분류는 확실한 것만**: 타입 매칭이 된 경우만 extern으로 인정
