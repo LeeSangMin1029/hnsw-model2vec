@@ -218,8 +218,34 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                     "call_expression" => {
                         return None;
                     }
-                    // Unwrap `?` and `.await`: `expr?.method()` / `expr.await.method()`
-                    // The inner expression may contain a receiver we can recover.
+                    // macro!(...).method() → receiver is macro expansion, type unknown.
+                    // arr[i].method() → receiver is indexed value, type unknown.
+                    // Skip like chained calls to avoid false positives.
+                    "macro_invocation" | "index_expression" => {
+                        return None;
+                    }
+                    // Unwrap `(expr)` → inner expression (named_child for parens).
+                    "parenthesized_expression" => {
+                        if let Some(inner) = value.named_child(0) {
+                            match inner.kind() {
+                                "identifier" | "self" => {
+                                    let recv = inner.utf8_text(src).ok()?;
+                                    return Some(format!("{recv}.{method}"));
+                                }
+                                "field_expression" => {
+                                    if let Some(recv) = extract_field_receiver(inner, src) {
+                                        return Some(format!("{recv}.{method}"));
+                                    }
+                                }
+                                "call_expression" | "macro_invocation"
+                                | "index_expression" => {
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    // Unwrap `expr?`, `expr.await` transparently.
                     "try_expression" | "await_expression" => {
                         if let Some(inner) = value.child(0) {
                             match inner.kind() {
@@ -232,7 +258,8 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                                         return Some(format!("{recv}.{method}"));
                                     }
                                 }
-                                "call_expression" => {
+                                "call_expression" | "macro_invocation"
+                                | "index_expression" => {
                                     return None;
                                 }
                                 _ => {}
@@ -255,11 +282,18 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
 }
 
 /// Extract receiver path from nested field expressions: `self.foo.bar` → "self.foo.bar"
+/// Also unwraps `?` and `.await` transparently: `self.foo?.bar` → "self.foo.bar"
 /// Stops at call expressions or other complex nodes.
 pub(crate) fn extract_field_receiver(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
     let field = node.child_by_field_name("field")?;
     let field_name = field.utf8_text(src).ok()?;
     let value = node.child_by_field_name("value")?;
+    // Unwrap `?` / `.await` / `(expr)` transparently to reach the inner expression.
+    let value = match value.kind() {
+        "try_expression" | "await_expression" => value.child(0).unwrap_or(value),
+        "parenthesized_expression" => value.named_child(0).unwrap_or(value),
+        _ => value,
+    };
     match value.kind() {
         "identifier" | "self" => {
             let recv = value.utf8_text(src).ok()?;
