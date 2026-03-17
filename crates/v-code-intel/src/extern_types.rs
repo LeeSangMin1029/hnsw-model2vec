@@ -37,6 +37,11 @@ impl ExternMethodIndex {
             .is_some_and(|methods| methods.contains(method))
     }
 
+    /// Check if any extern type has this method (type-agnostic lookup).
+    pub fn any_type_has_method(&self, method: &str) -> bool {
+        self.types.values().any(|methods| methods.contains(method))
+    }
+
     /// Total number of type→method entries.
     pub fn total_methods(&self) -> usize {
         self.types.values().map(|m| m.len()).sum()

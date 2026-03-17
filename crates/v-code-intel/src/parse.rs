@@ -1,11 +1,15 @@
 //! Text field parser for code chunks.
 //!
 //! Parses the structured text field produced by `chunk_code` into a
-//! [`CodeChunk`] struct for structural queries.
+//! [`ParsedChunk`] struct for structural queries.
 
 /// Structured representation of a code chunk's text field.
+///
+/// This is the lightweight analysis view parsed from the DB text field,
+/// distinct from `v_code_chunk::types::CodeChunk` which holds the full
+/// tree-sitter parse result.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
-pub struct CodeChunk {
+pub struct ParsedChunk {
     pub kind: String,
     pub name: String,
     pub file: String,
@@ -45,17 +49,17 @@ pub struct CodeChunk {
     pub field_accesses: Vec<(String, String)>,
 }
 
-/// Parse the text field of a code chunk into a [`CodeChunk`].
+/// Parse the text field of a code chunk into a [`ParsedChunk`].
 ///
 /// Expected format (first line is `[kind] [vis] name`):
 /// ```text
-/// [function] pub CodeChunk::parse
+/// [function] pub ParsedChunk::parse
 /// File: crates/v-code-intel/src/parse.rs:51-120
-/// Signature: pub fn parse(text: &str) -> Option<CodeChunk>
-/// Types: CodeChunk, String
+/// Signature: pub fn parse(text: &str) -> Option<ParsedChunk>
+/// Types: ParsedChunk, String
 /// Calls: String::new, lines.next
 /// ```
-pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
+pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
     let mut lines_iter = text.lines();
     let first = lines_iter.next()?;
 
@@ -220,7 +224,7 @@ pub fn parse_chunk(text: &str) -> Option<CodeChunk> {
         return None;
     }
 
-    Some(CodeChunk {
+    Some(ParsedChunk {
         kind,
         name,
         file,

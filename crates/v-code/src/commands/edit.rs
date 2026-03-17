@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 
 use v_code_intel::loader::load_chunks;
 use v_code_intel::helpers::find_project_root;
-use v_code_intel::parse::CodeChunk;
+use v_code_intel::parse::ParsedChunk;
 
 // ── Symbol location ─────────────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<Sym
     let chunks = load_chunks(db)?;
 
     // Find matching chunks.
-    let candidates: Vec<&CodeChunk> = chunks
+    let candidates: Vec<&ParsedChunk> = chunks
         .iter()
         .filter(|c| {
             let name_match = c.name == symbol || c.name.ends_with(&format!("::{symbol}"));
@@ -163,30 +163,43 @@ fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<Sym
 
 // ── Edit operations ─────────────────────────────────────────────────────
 
+/// Locate a symbol and load the source file in one step.
+///
+/// Returns lines and metadata needed by all symbol-editing commands.
+fn load_symbol_edit(db: &Path, symbol: &str, file: Option<&str>) -> Result<(String, SymbolLocation)> {
+    let loc = locate_symbol(db, symbol, file)?;
+    let content = std::fs::read_to_string(&loc.abs_path)
+        .with_context(|| format!("Failed to read {}", loc.abs_path.display()))?;
+    Ok((content, loc))
+}
+
+/// Write lines back to a file, preserving the original trailing-newline style.
+fn write_lines(path: &Path, lines: &[&str], trailing_nl: bool) -> Result<()> {
+    let output = if trailing_nl {
+        lines.join("\n") + "\n"
+    } else {
+        lines.join("\n")
+    };
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
 /// Replace the body of a symbol with new content.
 pub fn replace(db: PathBuf, symbol: String, file: Option<String>, body: String) -> Result<()> {
-    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
-    let content = std::fs::read_to_string(&loc.abs_path)?;
+    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
     let lines: Vec<&str> = content.lines().collect();
+
+    let body = body.trim_end();
+    let body_lines: Vec<&str> = body.lines().collect();
 
     let mut result: Vec<&str> = Vec::with_capacity(lines.len());
     result.extend_from_slice(&lines[..loc.start_line]);
-
-    // Insert new body lines.
-    let body = body.trim_end();
-    let body_lines: Vec<&str> = body.lines().collect();
     result.extend_from_slice(&body_lines);
-
     if loc.end_line + 1 < lines.len() {
         result.extend_from_slice(&lines[loc.end_line + 1..]);
     }
 
-    let output = if content.ends_with('\n') {
-        result.join("\n") + "\n"
-    } else {
-        result.join("\n")
-    };
-    std::fs::write(&loc.abs_path, output)?;
+    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
 
     let new_end = loc.start_line + body_lines.len();
     eprintln!(
@@ -210,31 +223,21 @@ pub fn insert_after(
     file: Option<String>,
     body: String,
 ) -> Result<()> {
-    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
-    let content = std::fs::read_to_string(&loc.abs_path)?;
+    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
     let lines: Vec<&str> = content.lines().collect();
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + 10);
-    // Keep everything up to and including the symbol.
-    result.extend_from_slice(&lines[..=loc.end_line]);
-
-    // Insert blank line separator + new body.
     let body = body.trim_end();
     let body_lines: Vec<&str> = body.lines().collect();
-    // Add empty line between symbol end and inserted content.
+
+    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len() + 1);
+    result.extend_from_slice(&lines[..=loc.end_line]);
     result.push("");
     result.extend_from_slice(&body_lines);
-
     if loc.end_line + 1 < lines.len() {
         result.extend_from_slice(&lines[loc.end_line + 1..]);
     }
 
-    let output = if content.ends_with('\n') {
-        result.join("\n") + "\n"
-    } else {
-        result.join("\n")
-    };
-    std::fs::write(&loc.abs_path, output)?;
+    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
 
     let insert_start = loc.end_line + 2; // after blank line
     eprintln!(
@@ -254,27 +257,19 @@ pub fn insert_before(
     file: Option<String>,
     body: String,
 ) -> Result<()> {
-    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
-    let content = std::fs::read_to_string(&loc.abs_path)?;
+    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
     let lines: Vec<&str> = content.lines().collect();
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + 10);
-    result.extend_from_slice(&lines[..loc.start_line]);
-
-    // Insert new body + blank line separator.
     let body = body.trim_end();
     let body_lines: Vec<&str> = body.lines().collect();
+
+    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len() + 1);
+    result.extend_from_slice(&lines[..loc.start_line]);
     result.extend_from_slice(&body_lines);
     result.push("");
-
     result.extend_from_slice(&lines[loc.start_line..]);
 
-    let output = if content.ends_with('\n') {
-        result.join("\n") + "\n"
-    } else {
-        result.join("\n")
-    };
-    std::fs::write(&loc.abs_path, output)?;
+    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
 
     eprintln!(
         "Inserted before {} (before L{}) in {}",
@@ -288,8 +283,7 @@ pub fn insert_before(
 
 /// Delete a symbol from the source file.
 pub fn delete_symbol(db: PathBuf, symbol: String, file: Option<String>) -> Result<()> {
-    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
-    let content = std::fs::read_to_string(&loc.abs_path)?;
+    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
     let lines: Vec<&str> = content.lines().collect();
 
     let mut result: Vec<&str> = Vec::with_capacity(lines.len());
@@ -304,12 +298,7 @@ pub fn delete_symbol(db: PathBuf, symbol: String, file: Option<String>) -> Resul
         result.extend_from_slice(&lines[after..]);
     }
 
-    let output = if content.ends_with('\n') {
-        result.join("\n") + "\n"
-    } else {
-        result.join("\n")
-    };
-    std::fs::write(&loc.abs_path, output)?;
+    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
 
     eprintln!(
         "Deleted {} (L{}-{}) from {}",
@@ -341,17 +330,6 @@ fn resolve_file_path(db: &Path, file: &str) -> Result<(PathBuf, String)> {
         bail!("File not found: {} (resolved to {})", file, abs_path.display());
     }
     Ok((abs_path, file.to_string()))
-}
-
-/// Write lines back to a file, preserving the original trailing-newline style.
-fn write_lines(path: &Path, lines: &[&str], had_trailing_newline: bool) -> Result<()> {
-    let output = if had_trailing_newline {
-        lines.join("\n") + "\n"
-    } else {
-        lines.join("\n")
-    };
-    std::fs::write(path, output)?;
-    Ok(())
 }
 
 /// Insert content at a specific 1-based line number (before that line).

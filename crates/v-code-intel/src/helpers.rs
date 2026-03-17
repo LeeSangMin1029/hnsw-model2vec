@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::parse::CodeChunk;
+use crate::parse::ParsedChunk;
 
 // ── Project Root Detection ──────────────────────────────────────────
 
@@ -125,7 +125,7 @@ pub fn apply_alias(path: &str, alias_map: &std::collections::BTreeMap<String, St
 }
 
 /// Format line range as `"start-end"` or empty string.
-pub fn lines_str(c: &CodeChunk) -> String {
+pub fn lines_str(c: &ParsedChunk) -> String {
     if let Some((start, end)) = c.lines {
         format!("{start}-{end}")
     } else {
@@ -150,9 +150,9 @@ const SCHEMA: &str = "f=file,l=lines,k=kind,n=name,v=via";
 /// Build file-grouped JSON from chunks, applying `extra_fields` to each entry.
 ///
 /// The closure receives a chunk and returns additional key-value pairs to merge.
-fn build_grouped_json_with<'a, F>(chunks: impl Iterator<Item = &'a CodeChunk>, extra_fields: F) -> serde_json::Value
+fn build_grouped_json_with<'a, F>(chunks: impl Iterator<Item = &'a ParsedChunk>, extra_fields: F) -> serde_json::Value
 where
-    F: Fn(&CodeChunk) -> Vec<(&'static str, serde_json::Value)>,
+    F: Fn(&ParsedChunk) -> Vec<(&'static str, serde_json::Value)>,
 {
     let mut map = serde_json::Map::new();
     map.insert("_s".to_owned(), serde_json::Value::String(SCHEMA.to_owned()));
@@ -179,19 +179,19 @@ where
 /// Build file-grouped JSON with `_s` schema header.
 ///
 /// Output: `{"_s":"...","crates/foo/src/bar.rs":[{"l":"1-10","k":"fn","n":"run"}]}`
-pub fn grouped_json(chunks: &[&CodeChunk]) -> serde_json::Value {
+pub fn grouped_json(chunks: &[&ParsedChunk]) -> serde_json::Value {
     build_grouped_json_with(chunks.iter().copied(), |_| Vec::new())
 }
 
 /// Build file-grouped JSON for refs (includes `v` field).
-pub fn grouped_json_refs(refs: &[(&CodeChunk, Vec<&str>)]) -> serde_json::Value {
+pub fn grouped_json_refs(refs: &[(&ParsedChunk, Vec<&str>)]) -> serde_json::Value {
     // Build a lookup map from chunk pointer to via list.
-    let via_map: std::collections::HashMap<*const CodeChunk, &Vec<&str>> = refs
+    let via_map: std::collections::HashMap<*const ParsedChunk, &Vec<&str>> = refs
         .iter()
-        .map(|(c, v)| (*c as *const CodeChunk, v))
+        .map(|(c, v)| (*c as *const ParsedChunk, v))
         .collect();
     build_grouped_json_with(refs.iter().map(|(c, _)| *c), |c| {
-        if let Some(via) = via_map.get(&(c as *const CodeChunk)) {
+        if let Some(via) = via_map.get(&(c as *const ParsedChunk)) {
             vec![("v", serde_json::json!(via))]
         } else {
             Vec::new()

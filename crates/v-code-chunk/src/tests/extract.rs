@@ -435,3 +435,109 @@ fn extract_java_visibility_default() {
     let vis = extract::extract_java_visibility(&method, &bytes);
     assert_eq!(vis, "", "package-private should return empty string");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// strip_string_quotes
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn strip_double_quotes() {
+    assert_eq!(extract::strip_string_quotes(r#""hello""#), "hello");
+}
+
+#[test]
+fn strip_single_quotes() {
+    assert_eq!(extract::strip_string_quotes("'world'"), "world");
+}
+
+#[test]
+fn strip_backtick_quotes() {
+    assert_eq!(extract::strip_string_quotes("`template`"), "template");
+}
+
+#[test]
+fn strip_raw_string() {
+    assert_eq!(extract::strip_string_quotes(r#"r"raw content""#), "raw content");
+}
+
+#[test]
+fn strip_raw_string_with_hashes() {
+    assert_eq!(extract::strip_string_quotes(r###"r#"hash content"#"###), "hash content");
+}
+
+#[test]
+fn strip_empty_quotes() {
+    assert_eq!(extract::strip_string_quotes(r#""""#), "");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// walk_for_calls with method calls
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn extract_calls_method_on_self() {
+    let src = r#"impl Foo {
+    fn run(&self) {
+        self.helper();
+        self.db.query();
+    }
+    fn helper(&self) {}
+}"#;
+    let (tree, bytes) = parse_rust(src);
+    let root = tree.root_node();
+    // Find the first function_item (run)
+    let func = find_first(&root, "function_item").expect("no function_item");
+    let calls = extract::collect_sorted_unique(&func, &bytes, extract::walk_for_calls);
+    assert!(calls.iter().any(|c| c.contains("self.helper")), "should find self.helper: {calls:?}");
+    assert!(calls.iter().any(|c| c.contains("self.db.query")), "should find self.db.query: {calls:?}");
+}
+
+#[test]
+fn extract_calls_qualified() {
+    let src = r#"fn run() {
+    Config::load();
+    std::fs::read_to_string("x");
+}"#;
+    let (tree, bytes) = parse_rust(src);
+    let root = tree.root_node();
+    let func = find_first(&root, "function_item").expect("no function_item");
+    let calls = extract::collect_sorted_unique(&func, &bytes, extract::walk_for_calls);
+    assert!(calls.iter().any(|c| c.contains("Config::load")), "should find Config::load: {calls:?}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// extract_visibility (already tested above, extending)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn extract_visibility_pub_super() {
+    let src = "pub(super) fn baz() {}";
+    let (tree, bytes) = parse_rust(src);
+    let root = tree.root_node();
+    let func = find_first(&root, "function_item").expect("no function_item");
+    assert_eq!(extract::extract_visibility(&func, &bytes), "pub(super)");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// walk_for_string_args
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn string_args_basic() {
+    let src = r#"fn run() {
+    open("config.json");
+    connect("localhost", 8080);
+}"#;
+    let (tree, bytes) = parse_rust(src);
+    let root = tree.root_node();
+    let func = find_first(&root, "function_item").expect("no function_item");
+    let args = extract::walk_for_string_args(&func, &bytes);
+    assert!(
+        args.iter().any(|a| a.value.contains("config.json")),
+        "should find 'config.json': {args:?}"
+    );
+    assert!(
+        args.iter().any(|a| a.value.contains("localhost")),
+        "should find 'localhost': {args:?}"
+    );
+}

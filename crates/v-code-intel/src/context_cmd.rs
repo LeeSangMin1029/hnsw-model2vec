@@ -3,7 +3,7 @@
 
 use crate::bfs::{bfs_generic, BfsDirection};
 use crate::graph::CallGraph;
-use crate::parse::CodeChunk;
+use crate::parse::ParsedChunk;
 
 /// A single entry in the context result (definition, caller, callee, type, or test).
 pub struct ContextEntry {
@@ -33,7 +33,7 @@ pub struct ContextResult {
 /// callees (forward BFS), referenced types, and test functions — all in one pass.
 pub fn build_context(
     graph: &CallGraph,
-    chunks: &[CodeChunk],
+    chunks: &[ParsedChunk],
     symbol: &str,
     depth: u32,
 ) -> ContextResult {
@@ -70,7 +70,7 @@ pub fn build_context(
 }
 
 /// Resolve type names from seed chunks to chunk indices.
-fn collect_types(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) -> Vec<u32> {
+fn collect_types(graph: &CallGraph, chunks: &[ParsedChunk], seeds: &[u32]) -> Vec<u32> {
     let mut type_indices = Vec::new();
     let mut seen = vec![false; graph.len()];
 
@@ -104,7 +104,7 @@ fn collect_types(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) -> Vec<
 
 /// Collect call names from seed chunks that couldn't be resolved to any graph node.
 /// These are typically external crate / std library calls.
-fn collect_unresolved(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) -> Vec<String> {
+fn collect_unresolved(graph: &CallGraph, chunks: &[ParsedChunk], seeds: &[u32]) -> Vec<String> {
     let mut unresolved = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -137,7 +137,7 @@ fn collect_unresolved(graph: &CallGraph, chunks: &[CodeChunk], seeds: &[u32]) ->
 }
 
 /// Filter out common std/self method noise from unresolved calls.
-fn is_noise(call: &str) -> bool {
+pub(crate) fn is_noise(call: &str) -> bool {
     // self.field calls are usually internal method chains
     if call.starts_with("self.") { return true; }
     // Common std traits / methods that are never interesting

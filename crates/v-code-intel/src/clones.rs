@@ -663,6 +663,6 @@ fn same_file(pstore: &impl PayloadStore, id_a: u64, id_b: u64) -> bool {
     file_a.is_some() && file_a == file_b
 }
 
-fn ranges_overlap(s1: usize, e1: usize, s2: usize, e2: usize) -> bool {
+pub(crate) fn ranges_overlap(s1: usize, e1: usize, s2: usize, e2: usize) -> bool {
     s1 <= e2 && s2 <= e1
 }

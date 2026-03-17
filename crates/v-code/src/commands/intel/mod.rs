@@ -78,7 +78,7 @@ fn daemon_spawn_and_wait(_db: &std::path::Path) {
     // Users can manually start v-daemon if they want LSP-enhanced graphs.
 }
 
-pub use v_code_intel::parse::CodeChunk;
+pub use v_code_intel::parse::ParsedChunk;
 #[cfg(test)]
 pub use v_code_intel::parse;
 #[cfg(test)]
@@ -128,8 +128,8 @@ pub(super) fn cached_json(db: &Path, cache_key: &str, compute: impl FnOnce() -> 
 }
 
 /// Print chunks grouped by parent directory.
-pub(crate) fn print_grouped(chunks: &[&CodeChunk], compact: bool) {
-    let mut groups: BTreeMap<String, Vec<&CodeChunk>> = BTreeMap::new();
+pub(crate) fn print_grouped(chunks: &[&ParsedChunk], compact: bool) {
+    let mut groups: BTreeMap<String, Vec<&ParsedChunk>> = BTreeMap::new();
     for c in chunks {
         let dir = parent_dir(&c.file);
         groups.entry(dir).or_default().push(c);

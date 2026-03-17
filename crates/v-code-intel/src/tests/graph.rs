@@ -6,11 +6,11 @@
 use v_code_chunk::{CodeChunkConfig, RustCodeChunker};
 
 use crate::graph::CallGraph;
-use crate::parse::CodeChunk;
+use crate::parse::ParsedChunk;
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn chunks_from_files(files: &[(&str, &str)]) -> Vec<CodeChunk> {
+fn chunks_from_files(files: &[(&str, &str)]) -> Vec<ParsedChunk> {
     let config = CodeChunkConfig {
         min_lines: 1,
         extract_imports: true,
@@ -30,11 +30,11 @@ fn chunks_from_files(files: &[(&str, &str)]) -> Vec<CodeChunk> {
     all
 }
 
-fn chunks_from_src(src: &str) -> Vec<CodeChunk> {
+fn chunks_from_src(src: &str) -> Vec<ParsedChunk> {
     chunks_from_files(&[("src/lib.rs", src)])
 }
 
-fn build_graph(chunks: &[CodeChunk]) -> CallGraph {
+fn build_graph(chunks: &[ParsedChunk]) -> CallGraph {
     CallGraph::build(chunks)
 }
 
@@ -1341,4 +1341,402 @@ fn check_tags(p: Payload) {
     let field_names: Vec<&str> = entries.iter().map(|(f, _)| *f).collect();
     assert!(field_names.contains(&"source"), "should have source: {field_names:?}");
     assert!(field_names.contains(&"tags"), "should have tags: {field_names:?}");
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Pure function tests: extract_leaf_type, extract_generic_bounds,
+// owning_type, is_test_path, is_test_chunk
+// ══════════════════════════════════════════════════════════════════════
+
+use crate::graph::{extract_leaf_type, extract_generic_bounds, owning_type, is_test_path};
+
+// ── extract_leaf_type ────────────────────────────────────────────────
+
+#[test]
+fn leaf_type_simple() {
+    assert_eq!(extract_leaf_type("string"), "string");
+    assert_eq!(extract_leaf_type("i32"), "i32");
+}
+
+#[test]
+fn leaf_type_reference() {
+    assert_eq!(extract_leaf_type("&foo"), "foo");
+    assert_eq!(extract_leaf_type("&mut bar"), "bar");
+}
+
+#[test]
+fn leaf_type_dyn_impl() {
+    assert_eq!(extract_leaf_type("dyn processor"), "processor");
+    assert_eq!(extract_leaf_type("impl filter"), "filter");
+}
+
+#[test]
+fn leaf_type_generic() {
+    assert_eq!(extract_leaf_type("hashmap<string, i32>"), "hashmap");
+}
+
+#[test]
+fn leaf_type_unwraps_option() {
+    assert_eq!(extract_leaf_type("option<config>"), "config");
+}
+
+#[test]
+fn leaf_type_unwraps_result() {
+    assert_eq!(extract_leaf_type("result<foo, error>"), "foo");
+}
+
+#[test]
+fn leaf_type_unwraps_box() {
+    assert_eq!(extract_leaf_type("box<widget>"), "widget");
+}
+
+#[test]
+fn leaf_type_unwraps_vec() {
+    assert_eq!(extract_leaf_type("vec<item>"), "item");
+}
+
+#[test]
+fn leaf_type_unwraps_arc() {
+    assert_eq!(extract_leaf_type("arc<engine>"), "engine");
+}
+
+#[test]
+fn leaf_type_ref_option() {
+    assert_eq!(extract_leaf_type("&option<foo>"), "foo");
+}
+
+#[test]
+fn leaf_type_self() {
+    assert_eq!(extract_leaf_type("Self"), "Self");
+}
+
+// ── extract_generic_bounds ───────────────────────────────────────────
+
+#[test]
+fn generic_bounds_single() {
+    let bounds = extract_generic_bounds("fn foo<T: Search>(x: T)");
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0], ("t".to_owned(), "search".to_owned()));
+}
+
+#[test]
+fn generic_bounds_multiple() {
+    let bounds = extract_generic_bounds("fn foo<T: Search, U: Clone>(x: T, y: U)");
+    assert_eq!(bounds.len(), 2);
+    assert!(bounds.contains(&("t".to_owned(), "search".to_owned())));
+    assert!(bounds.contains(&("u".to_owned(), "clone".to_owned())));
+}
+
+#[test]
+fn generic_bounds_multi_trait_first_only() {
+    let bounds = extract_generic_bounds("fn foo<T: Search + Clone + Display>(x: T)");
+    assert_eq!(bounds.len(), 1);
+    // Only the first trait bound is extracted
+    assert_eq!(bounds[0], ("t".to_owned(), "search".to_owned()));
+}
+
+#[test]
+fn generic_bounds_where_clause() {
+    // where clause is only parsed when <> generics are also present
+    let bounds = extract_generic_bounds("fn foo<T>(x: T) where T: Serializer {");
+    assert!(
+        bounds.iter().any(|(t, b)| t == "t" && b == "serializer"),
+        "should extract where clause bound, got: {bounds:?}"
+    );
+}
+
+#[test]
+fn generic_bounds_where_clause_no_angle_brackets() {
+    // Without <>, extract_generic_bounds returns empty (known limitation)
+    let bounds = extract_generic_bounds("fn foo(x: T) where T: Serializer {");
+    assert!(bounds.is_empty(), "no <> means no extraction: {bounds:?}");
+}
+
+#[test]
+fn generic_bounds_nested_generics() {
+    let bounds = extract_generic_bounds("fn foo<T: Iterator<Item = i32>>(x: T)");
+    assert_eq!(bounds.len(), 1);
+    assert_eq!(bounds[0].0, "t");
+    assert_eq!(bounds[0].1, "iterator");
+}
+
+#[test]
+fn generic_bounds_no_generics() {
+    let bounds = extract_generic_bounds("fn foo(x: i32)");
+    assert!(bounds.is_empty());
+}
+
+// ── owning_type ──────────────────────────────────────────────────────
+
+#[test]
+fn owning_type_simple() {
+    assert_eq!(owning_type("Foo::bar"), Some("foo".to_owned()));
+}
+
+#[test]
+fn owning_type_nested() {
+    assert_eq!(owning_type("module::Foo::bar"), Some("foo".to_owned()));
+}
+
+#[test]
+fn owning_type_generic() {
+    assert_eq!(owning_type("Foo<T>::bar"), Some("foo".to_owned()));
+}
+
+#[test]
+fn owning_type_no_qualifier() {
+    assert_eq!(owning_type("bar"), None);
+}
+
+// ── is_test_path ─────────────────────────────────────────────────────
+
+#[test]
+fn is_test_detection() {
+    assert!(is_test_path("src/tests/foo.rs"));
+    assert!(is_test_path("src/test/bar.rs"));
+    assert!(is_test_path("parser_test.rs"));
+    assert!(is_test_path("parser_test.go"));
+    assert!(is_test_path("src/test_helpers.rs"));
+    assert!(!is_test_path("src/lib.rs"));
+    assert!(!is_test_path("src/main.rs"));
+}
+
+// ── CallGraph.resolve ────────────────────────────────────────────────
+
+#[test]
+fn resolve_by_exact_name() {
+    let chunks = chunks_from_src(r#"
+fn alpha() {}
+fn beta() { alpha(); }
+    "#);
+    let g = build_graph(&chunks);
+    let indices = g.resolve("alpha");
+    assert!(!indices.is_empty(), "should resolve 'alpha'");
+    let found_name = &g.names[indices[0] as usize];
+    assert_eq!(found_name.to_lowercase(), "alpha");
+}
+
+#[test]
+fn resolve_case_insensitive() {
+    let chunks = chunks_from_src(r#"
+struct MyEngine;
+impl MyEngine {
+    fn run(&self) {}
+}
+    "#);
+    let g = build_graph(&chunks);
+    let indices = g.resolve("myengine::run");
+    assert!(!indices.is_empty(), "should resolve case-insensitive");
+}
+
+#[test]
+fn resolve_nonexistent_returns_empty() {
+    let chunks = chunks_from_src("fn foo() {}");
+    let g = build_graph(&chunks);
+    let indices = g.resolve("nonexistent");
+    assert!(indices.is_empty());
+}
+
+// ── CallGraph.find_string ────────────────────────────────────────────
+
+#[test]
+fn find_string_matches_literal() {
+    let chunks = chunks_from_src(r#"
+fn setup() {
+    open("config.json");
+}
+fn open(path: &str) {}
+    "#);
+    let g = build_graph(&chunks);
+    let matches = g.find_string("config.json");
+    assert!(
+        !matches.is_empty(),
+        "should find 'config.json' in string index"
+    );
+}
+
+#[test]
+fn find_string_no_match() {
+    let chunks = chunks_from_src(r#"
+fn setup() {
+    open("data.db");
+}
+fn open(path: &str) {}
+    "#);
+    let g = build_graph(&chunks);
+    let matches = g.find_string("nonexistent");
+    assert!(matches.is_empty());
+}
+
+// ── CallGraph.call_site_line ─────────────────────────────────────────
+
+#[test]
+fn call_site_line_returns_line() {
+    let chunks = chunks_from_src(r#"
+fn helper() -> i32 { 0 }
+fn caller() {
+    helper();
+}
+    "#);
+    let g = build_graph(&chunks);
+    let caller_idx = g.resolve("caller");
+    let helper_idx = g.resolve("helper");
+    assert!(!caller_idx.is_empty());
+    assert!(!helper_idx.is_empty());
+    let line = g.call_site_line(caller_idx[0], helper_idx[0]);
+    // line should be > 0 (1-based) since the call exists
+    assert!(line > 0, "call_site_line should return the source line");
+}
+
+// ── CallGraph callers (reverse edges) ────────────────────────────────
+
+#[test]
+fn callers_populated() {
+    let chunks = chunks_from_src(r#"
+fn target() -> i32 { 42 }
+fn caller_a() { target(); }
+fn caller_b() { target(); }
+    "#);
+    let g = build_graph(&chunks);
+    let target_idx = g.resolve("target");
+    assert!(!target_idx.is_empty());
+    let ti = target_idx[0] as usize;
+    let caller_names: Vec<&str> = g.callers[ti]
+        .iter()
+        .map(|&i| g.names[i as usize].as_str())
+        .collect();
+    assert!(
+        caller_names.iter().any(|n| n.to_lowercase().contains("caller_a")),
+        "target should have caller_a, got: {caller_names:?}"
+    );
+    assert!(
+        caller_names.iter().any(|n| n.to_lowercase().contains("caller_b")),
+        "target should have caller_b, got: {caller_names:?}"
+    );
+}
+
+// ── is_test flag ─────────────────────────────────────────────────────
+
+#[test]
+fn is_test_flag_for_test_file() {
+    let chunks = chunks_from_files(&[
+        ("src/lib.rs", "fn prod() {}"),
+        ("src/tests/foo.rs", "fn test_it() { prod(); }"),
+    ]);
+    let g = build_graph(&chunks);
+    let prod_idx = g.resolve("prod");
+    let test_idx = g.resolve("test_it");
+    assert!(!prod_idx.is_empty());
+    assert!(!test_idx.is_empty());
+    assert!(!g.is_test[prod_idx[0] as usize], "prod should not be test");
+    assert!(g.is_test[test_idx[0] as usize], "test_it should be test");
+}
+
+// ── trait_impls ──────────────────────────────────────────────────────
+
+#[test]
+fn trait_impls_populated() {
+    let chunks = chunks_from_src(r#"
+trait Processor {
+    fn process(&self);
+}
+struct FastProc;
+impl Processor for FastProc {
+    fn process(&self) {}
+}
+    "#);
+    let g = build_graph(&chunks);
+    // Find the trait chunk
+    let trait_idx = g.names.iter().position(|n| n.to_lowercase() == "processor");
+    if let Some(ti) = trait_idx {
+        let impls = &g.trait_impls[ti];
+        assert!(
+            !impls.is_empty(),
+            "Processor trait should have impl entries, trait_impls: {:?}",
+            g.trait_impls.iter().enumerate()
+                .filter(|(_, v)| !v.is_empty())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+// ── Graph len/is_empty ───────────────────────────────────────────────
+
+#[test]
+fn graph_len_and_is_empty() {
+    let empty: Vec<ParsedChunk> = vec![];
+    let g_empty = build_graph(&empty);
+    assert_eq!(g_empty.len(), 0);
+    assert!(g_empty.is_empty());
+
+    let chunks = chunks_from_src("fn foo() {}");
+    let g = build_graph(&chunks);
+    assert!(g.len() > 0);
+    assert!(!g.is_empty());
+}
+
+// ── Import resolution across files ───────────────────────────────────
+
+#[test]
+fn import_group_resolution() {
+    let chunks = chunks_from_files(&[
+        ("src/main.rs", r#"
+use crate::util::{helper, process};
+fn run() {
+    helper();
+    process();
+}
+        "#),
+        ("src/util.rs", r#"
+pub fn helper() -> i32 { 42 }
+pub fn process() -> i32 { 0 }
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    assert!(has_edge(&g, "run", "helper"), "should resolve grouped import helper");
+    assert!(has_edge(&g, "run", "process"), "should resolve grouped import process");
+}
+
+// ── Mixed: struct field type + method call + import ──────────────────
+
+#[test]
+fn complex_field_type_with_import() {
+    let chunks = chunks_from_files(&[
+        ("src/app.rs", r#"
+use crate::db::Database;
+struct App {
+    db: Database,
+}
+impl App {
+    fn handle(&self) {
+        self.db.query();
+    }
+}
+        "#),
+        ("src/db.rs", r#"
+pub struct Database;
+impl Database {
+    pub fn query(&self) -> i32 { 0 }
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    assert!(has_edge(&g, "App::handle", "Database::query"));
+}
+
+// ── name_index: binary search lookup ─────────────────────────────────
+
+#[test]
+fn name_index_sorted() {
+    let chunks = chunks_from_src(r#"
+fn alpha() {}
+fn beta() {}
+fn gamma() {}
+    "#);
+    let g = build_graph(&chunks);
+    // name_index should be sorted
+    let keys: Vec<&str> = g.name_index.iter().map(|(k, _)| k.as_str()).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "name_index should be sorted for binary search");
 }

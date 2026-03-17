@@ -30,3 +30,4 @@ mod c_lang;
 mod cpp;
 mod common;
 mod extract;
+mod hash;

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::graph::is_test_chunk;
 use crate::helpers::extract_crate_name;
-use crate::parse::CodeChunk;
+use crate::parse::ParsedChunk;
 
 /// Schema descriptor for stats JSON output.
 const STATS_SCHEMA: &str = "p=prod_fn,t=test_fn,s=struct,e=enum";
@@ -12,7 +12,7 @@ const STATS_SCHEMA: &str = "p=prod_fn,t=test_fn,s=struct,e=enum";
 /// Build per-crate statistics from code chunks.
 ///
 /// Returns a map from crate name to `[prod_fn, test_fn, struct, enum]` counts.
-pub fn build_stats(chunks: &[CodeChunk]) -> BTreeMap<String, [usize; 4]> {
+pub fn build_stats(chunks: &[ParsedChunk]) -> BTreeMap<String, [usize; 4]> {
     let mut stats: BTreeMap<String, [usize; 4]> = BTreeMap::new();
     for c in chunks {
         let crate_name = extract_crate_name(&c.file);

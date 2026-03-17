@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use v_code_intel::extern_types::ExternMethodIndex;
-use v_code_intel::graph::{extract_leaf_type, extract_generic_bounds};
-use v_code_intel::parse::CodeChunk;
+use v_code_intel::graph::{extract_leaf_type, extract_generic_bounds, owning_type, build_receiver_type_map};
+use v_code_intel::parse::ParsedChunk;
 use v_hnsw_cli::commands::db_config::DbConfig;
 
 /// Extract the short (leaf) name from a qualified name: `"Foo::bar"` → `"bar"`.
-fn short_name(full: &str) -> &str {
+pub(crate) fn short_name(full: &str) -> &str {
     full.rsplit("::").next().unwrap_or(full)
 }
 
@@ -40,20 +40,26 @@ pub fn run(db: PathBuf) -> Result<()> {
     // ── Single pass: build all per-chunk indexes ─────────────────────
     let mut name_counts: HashMap<&str, usize> = HashMap::new();
     let mut project_shorts: HashSet<String> = HashSet::new();
+    let mut project_type_shorts: HashSet<String> = HashSet::new();
     let mut chunk_callee_shorts: Vec<HashSet<String>> = vec![HashSet::new(); n];
 
     for i in 0..n {
-        if graph.kinds[i] != "function" {
-            continue;
-        }
-        let short = short_name(&graph.names[i]);
-        *name_counts.entry(short).or_default() += 1;
-        project_shorts.insert(short.to_lowercase());
-        for &callee_idx in &graph.callees[i] {
-            let ci = callee_idx as usize;
-            if ci < n {
-                chunk_callee_shorts[i].insert(short_name(&graph.names[ci]).to_lowercase());
+        let kind = &graph.kinds[i];
+        if kind == "function" {
+            let short = short_name(&graph.names[i]);
+            *name_counts.entry(short).or_default() += 1;
+            project_shorts.insert(short.to_lowercase());
+            for &callee_idx in &graph.callees[i] {
+                let ci = callee_idx as usize;
+                if ci < n {
+                    chunk_callee_shorts[i].insert(short_name(&graph.names[ci]).to_lowercase());
+                }
             }
+        } else if matches!(kind.as_str(), "struct" | "enum" | "trait" | "impl") {
+            let short = short_name(&graph.names[i]).to_lowercase();
+            // Strip generic params: "vec<t>" → "vec"
+            let clean = short.split('<').next().unwrap_or(&short);
+            project_type_shorts.insert(clean.to_owned());
         }
     }
 
@@ -75,7 +81,7 @@ pub fn run(db: PathBuf) -> Result<()> {
                 let ret_lower = ret.to_lowercase();
                 let leaf = extract_leaf_type(&ret_lower);
                 let resolved_type = if leaf == "self" || leaf == "&self" {
-                    owning_type_from_name(&c.name).unwrap_or_else(|| leaf.to_owned())
+                    owning_type(&c.name).unwrap_or_else(|| leaf.to_owned())
                 } else {
                     leaf.to_owned()
                 };
@@ -179,7 +185,7 @@ pub fn run(db: PathBuf) -> Result<()> {
     // ── Recall ───────────────────────────────────────────────────────
     // Uses DB chunks directly — no tree-sitter re-parsing needed.
     // Match DB chunks to graph indices by (name, lines).
-    let chunk_map: HashMap<(&str, Option<(usize, usize)>), &CodeChunk> = chunks
+    let chunk_map: HashMap<(&str, Option<(usize, usize)>), &ParsedChunk> = chunks
         .iter()
         .map(|c| ((c.name.as_str(), c.lines), c))
         .collect();
@@ -203,6 +209,9 @@ pub fn run(db: PathBuf) -> Result<()> {
             chunk, &owner_field_types, &return_type_map,
         );
         let resolved_shorts = &chunk_callee_shorts[i];
+        // Self-call (recursion) is excluded from graph edges (no self-loops),
+        // so we consider the chunk's own short name as resolved.
+        let self_short = short_name(&graph.names[i]).to_lowercase();
 
         for call in &chunk.calls {
             let call_lower = call.to_lowercase();
@@ -220,10 +229,10 @@ pub fn run(db: PathBuf) -> Result<()> {
 
             recall_total += 1;
 
-            if resolved_shorts.contains(short) {
+            if resolved_shorts.contains(short) || short == self_short {
                 recall_resolved += 1;
             } else if let Some(reason) = check_extern_reason(
-                &call_lower, &receiver_types, &extern_index,
+                &call_lower, &receiver_types, &extern_index, &project_type_shorts,
             ) {
                 recall_extern += 1;
                 if extern_samples.len() < 2000 {
@@ -352,7 +361,7 @@ pub fn run(db: PathBuf) -> Result<()> {
 }
 
 /// Categorize an unresolved call for reporting.
-fn categorize_miss(call: &str) -> &'static str {
+pub(crate) fn categorize_miss(call: &str) -> &'static str {
     if call.starts_with("self.") {
         if call.matches('.').count() > 1 {
             "self.field.method"
@@ -372,11 +381,26 @@ fn categorize_miss(call: &str) -> &'static str {
 ///
 /// Resolves receiver type via pre-built `receiver_types` map (populated from
 /// param_types, local_types, owner_field_types, let_call_bindings, generic bounds).
+/// Also classifies calls as extern when the method exists only in external types
+/// (not in project), even without knowing the receiver type.
 fn check_extern_reason(
     call_lower: &str,
     receiver_types: &BTreeMap<String, String>,
     extern_index: &ExternMethodIndex,
+    project_type_shorts: &HashSet<String>,
 ) -> Option<String> {
+    // Handle bare function calls (no receiver): `len`, `drop`, `push`, etc.
+    // Bare names that exist in extern types are std/dep methods whose receiver
+    // was lost during tree-sitter extraction. Even if a project function shares
+    // the same short name (e.g., `Drop::drop`), bare unresolved calls are
+    // almost always std/dep methods since project calls resolve via imports.
+    if !call_lower.contains('.') && !call_lower.contains("::") {
+        if extern_index.any_type_has_method(call_lower) {
+            return Some(format!("bare-extern: {call_lower}"));
+        }
+        return None;
+    }
+
     let (receiver, method) = call_lower.rsplit_once('.')?;
     let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
 
@@ -402,31 +426,32 @@ fn check_extern_reason(
         }
     }
 
+    // Fallback: if receiver type is unknown and receiver name is not a known
+    // project type, but the method exists in extern types, classify as extern.
+    // This handles cases like `data.len`, `name.is_empty` where the receiver
+    // is clearly a variable (not a project type), and the method exists on
+    // std/dep types. This avoids false classification when the receiver could
+    // be a project type (e.g., `graph.len`).
+    if extern_index.any_type_has_method(method)
+        && !project_type_shorts.contains(receiver_leaf)
+    {
+        return Some(format!("untyped-extern: {receiver_leaf}.{method}"));
+    }
+
     None
 }
 
-/// Build receiver_types from a DB `CodeChunk` (mirrors graph.rs logic).
+/// Build receiver_types from a DB `ParsedChunk`.
+///
+/// Extends `build_receiver_type_map` with owning type (self/fields),
+/// let-call bindings, and generic bound resolution.
 fn build_db_chunk_receiver_types(
-    chunk: &CodeChunk,
+    chunk: &ParsedChunk,
     owner_field_types: &BTreeMap<String, BTreeMap<String, String>>,
     return_type_map: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    for (name, ty) in &chunk.param_types {
-        let name_lower = name.to_lowercase();
-        let leaf = extract_leaf_type(&ty.to_lowercase()).to_owned();
-        if name_lower != "self" && !leaf.is_empty() {
-            map.insert(name_lower, leaf);
-        }
-    }
-    for (name, ty) in &chunk.local_types {
-        let name_lower = name.to_lowercase();
-        let leaf = extract_leaf_type(&ty.to_lowercase()).to_owned();
-        if !leaf.is_empty() {
-            map.insert(name_lower, leaf);
-        }
-    }
-    if let Some(owner) = owning_type_from_name(&chunk.name) {
+    let mut map = build_receiver_type_map(chunk);
+    if let Some(owner) = owning_type(&chunk.name) {
         map.entry("self".to_owned()).or_insert_with(|| owner.clone());
         if let Some(fields) = owner_field_types.get(owner.as_str()) {
             for (field_name, field_type) in fields {
@@ -453,14 +478,6 @@ fn build_db_chunk_receiver_types(
     map
 }
 
-/// Extract owning type from a qualified name (e.g., `"Foo::bar"` → `"foo"`).
-fn owning_type_from_name(name: &str) -> Option<String> {
-    let (prefix, _) = name.rsplit_once("::")?;
-    let leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
-    let stripped = leaf.split('<').next().unwrap_or(leaf);
-    Some(stripped.to_lowercase())
-}
-
 fn resolve_path(rel: &str, project_root: Option<&Path>) -> String {
     if let Some(root) = project_root {
         let full = root.join(rel);
@@ -476,3 +493,7 @@ fn load_lines(path: &str) -> Vec<String> {
         .map(|s| s.lines().map(String::from).collect())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+#[path = "tests/verify.rs"]
+mod tests;

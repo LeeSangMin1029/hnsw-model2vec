@@ -15,7 +15,7 @@ use super::{
     build_bfs_json,
     build_stats, stats_to_json, load_chunks, load_or_build_graph,
     format_lines_opt, grouped_json,
-    graph, impact, trace, CodeChunk,
+    graph, impact, trace, ParsedChunk,
 };
 
 // ── Commands ─────────────────────────────────────────────────────────────
@@ -626,7 +626,7 @@ fn run_chunk_query(
     db: &std::path::Path,
     format: OutputFormat,
     cache_key: &str,
-    filter: impl Fn(&CodeChunk) -> bool,
+    filter: impl Fn(&ParsedChunk) -> bool,
     empty_msg: &str,
     header: impl FnOnce(usize) -> String,
     limit: Option<usize>,
@@ -635,15 +635,15 @@ fn run_chunk_query(
     if matches!(format, OutputFormat::Json) {
         return cached_json(db, cache_key, || {
             let chunks = load_chunks(db)?;
-            let mut filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| filter(c)).collect();
+            let mut filtered: Vec<&ParsedChunk> = chunks.iter().filter(|c| filter(c)).collect();
             if let Some(n) = limit { filtered.truncate(n); }
             Ok(serde_json::to_string(&grouped_json(&filtered))?)
         });
     }
     let chunks = load_chunks(db)?;
-    let filtered: Vec<&CodeChunk> = chunks.iter().filter(|c| filter(c)).collect();
+    let filtered: Vec<&ParsedChunk> = chunks.iter().filter(|c| filter(c)).collect();
     let total = filtered.len();
-    let display: Vec<&CodeChunk> = if let Some(n) = limit {
+    let display: Vec<&ParsedChunk> = if let Some(n) = limit {
         filtered.into_iter().take(n).collect()
     } else {
         filtered

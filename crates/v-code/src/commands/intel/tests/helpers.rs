@@ -1,7 +1,7 @@
-use crate::commands::intel::parse::CodeChunk;
+use crate::commands::intel::parse::ParsedChunk;
 
-pub fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
+pub fn chunk(name: &str, file: &str, calls: &[&str]) -> ParsedChunk {
+    ParsedChunk {
         kind: "function".to_owned(),
         name: name.to_owned(),
         file: file.to_owned(),
@@ -22,8 +22,8 @@ pub fn chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
     }
 }
 
-pub fn test_chunk(name: &str, file: &str, calls: &[&str]) -> CodeChunk {
-    CodeChunk {
+pub fn test_chunk(name: &str, file: &str, calls: &[&str]) -> ParsedChunk {
+    ParsedChunk {
         kind: "function".to_owned(),
         name: name.to_owned(),
         file: format!("src/tests/{file}"),

@@ -107,23 +107,22 @@ pub fn process_markdown_files(
     finalize_ingest(db_path, records, model, engine, file_metadata_map)
 }
 
-/// Process records and update the file metadata index.
+/// Shared tail logic: remove stale chunks, filter unchanged, run processor,
+/// update file index.
 ///
-/// Shared tail logic for `process_markdown_files`.
-/// Returns `(inserted, errors, added_ids, removed_ids)`.
-pub fn finalize_ingest(
+/// `processor` receives the filtered records and returns `(inserted, errors, inserted_ids)`.
+fn finalize_ingest_core(
     db_path: &Path,
     records: Vec<IngestRecord>,
-    model: &Model2VecModel,
     engine: &mut StorageEngine,
     file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
+    processor: impl FnOnce(Vec<IngestRecord>, &mut StorageEngine) -> Result<(u64, u64, Vec<u64>)>,
 ) -> Result<IngestResult> {
     // Remove stale chunks for files being re-added
     let mut removed_ids = Vec::new();
     let file_index = file_index::load_file_index(db_path)?;
     for (path, (_, _, new_ids)) in &file_metadata_map {
         if let Some(existing) = file_index.get_file(path) {
-            // Remove old IDs that are NOT in the new set (chunk_index shifted)
             for &old_id in &existing.chunk_ids {
                 if !new_ids.contains(&old_id) {
                     let _ = engine.remove(old_id);
@@ -146,7 +145,7 @@ pub fn finalize_ingest(
         eprintln!("Skipped {skipped} unchanged symbols (body_hash match)");
     }
 
-    let (inserted, errors, inserted_ids) = process_records(records, model, engine)?;
+    let (inserted, errors, inserted_ids) = processor(records, engine)?;
 
     let mut file_index = file_index::load_file_index(db_path)?;
     for (path, (mtime, size, chunk_ids)) in file_metadata_map {
@@ -162,6 +161,21 @@ pub fn finalize_ingest(
     })
 }
 
+/// Process records and update the file metadata index.
+///
+/// Shared tail logic for `process_markdown_files`.
+pub fn finalize_ingest(
+    db_path: &Path,
+    records: Vec<IngestRecord>,
+    model: &Model2VecModel,
+    engine: &mut StorageEngine,
+    file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
+) -> Result<IngestResult> {
+    finalize_ingest_core(db_path, records, engine, file_metadata_map, |recs, eng| {
+        process_records(recs, model, eng)
+    })
+}
+
 /// Finalize ingest with zero vectors (text-only, no embedding).
 ///
 /// Same as [`finalize_ingest`] but skips the embedding step for fast indexing.
@@ -173,47 +187,8 @@ pub fn finalize_ingest_text_only(
     engine: &mut StorageEngine,
     file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
 ) -> Result<IngestResult> {
-    // Remove stale chunks for files being re-added
-    let mut removed_ids = Vec::new();
-    let file_index = file_index::load_file_index(db_path)?;
-    for (path, (_, _, new_ids)) in &file_metadata_map {
-        if let Some(existing) = file_index.get_file(path) {
-            for &old_id in &existing.chunk_ids {
-                if !new_ids.contains(&old_id) {
-                    let _ = engine.remove(old_id);
-                    removed_ids.push(old_id);
-                }
-            }
-        }
-    }
-    if !removed_ids.is_empty() {
-        engine.checkpoint().ok();
-        eprintln!(
-            "Removed {} stale chunks from re-added files",
-            removed_ids.len()
-        );
-    }
-
-    // Early cutoff: skip records whose body_hash matches existing payload.
-    let (records, skipped) = filter_unchanged_records(records, engine);
-    if skipped > 0 {
-        eprintln!("Skipped {skipped} unchanged symbols (body_hash match)");
-    }
-
-    let (inserted, errors, inserted_ids) =
-        crate::commands::pipeline::process_records_text_only(records, dim, engine)?;
-
-    let mut file_index = file_index::load_file_index(db_path)?;
-    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
-        file_index.update_file(path, mtime, size, chunk_ids);
-    }
-    file_index::save_file_index(db_path, &file_index)?;
-
-    Ok(IngestResult {
-        inserted,
-        errors,
-        added_ids: inserted_ids,
-        removed_ids,
+    finalize_ingest_core(db_path, records, engine, file_metadata_map, |recs, eng| {
+        crate::commands::pipeline::process_records_text_only(recs, dim, eng)
     })
 }
 

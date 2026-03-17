@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 
 use crate::commands::intel::deps::{merge_deps, resolve_symbol, DepGraph, DepSet};
 use v_code_intel::deps::{common_prefix_len, crate_group};
-use crate::commands::intel::parse::CodeChunk;
+use crate::commands::intel::parse::ParsedChunk;
 
-fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> CodeChunk {
-    CodeChunk {
+fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> ParsedChunk {
+    ParsedChunk {
         kind: "function".to_owned(),
         name: name.to_owned(),
         file: file.to_owned(),
@@ -208,4 +208,52 @@ fn dep_graph_total_edges() {
 
     let graph = DepGraph::build(&chunks);
     assert_eq!(graph.total_edges(), 1);
+}
+
+// ── collect_transitive_files ─────────────────────────────────────────
+
+use v_code_intel::deps::collect_transitive_files;
+
+#[test]
+fn transitive_files_depth_1() {
+    let chunks = vec![
+        chunk("A", "src/a.rs", &["B"], &[]),
+        chunk("B", "src/b.rs", &["C"], &[]),
+        chunk("C", "src/c.rs", &[], &[]),
+    ];
+    let graph = DepGraph::build(&chunks);
+    let files = collect_transitive_files(&graph, "a.rs", 1);
+    // depth 1: a.rs itself + direct neighbors (b.rs)
+    assert!(files.contains("src/a.rs"), "should include start file");
+    assert!(files.contains("src/b.rs"), "should include direct dep");
+    assert!(!files.contains("src/c.rs"), "should not include depth-2 dep");
+}
+
+#[test]
+fn transitive_files_depth_2() {
+    let chunks = vec![
+        chunk("A", "src/a.rs", &["B"], &[]),
+        chunk("B", "src/b.rs", &["C"], &[]),
+        chunk("C", "src/c.rs", &[], &[]),
+    ];
+    let graph = DepGraph::build(&chunks);
+    let files = collect_transitive_files(&graph, "a.rs", 2);
+    assert!(files.contains("src/a.rs"));
+    assert!(files.contains("src/b.rs"));
+    assert!(files.contains("src/c.rs"), "should include depth-2 dep");
+}
+
+#[test]
+fn transitive_files_bidirectional() {
+    let chunks = vec![
+        chunk("A", "src/a.rs", &["B"], &[]),
+        chunk("B", "src/b.rs", &[], &[]),
+        chunk("C", "src/c.rs", &["B"], &[]),
+    ];
+    let graph = DepGraph::build(&chunks);
+    // Starting from b.rs, both a.rs and c.rs should be reachable (incoming edges)
+    let files = collect_transitive_files(&graph, "b.rs", 1);
+    assert!(files.contains("src/b.rs"));
+    assert!(files.contains("src/a.rs"), "should include incoming dep");
+    assert!(files.contains("src/c.rs"), "should include incoming dep");
 }

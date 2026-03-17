@@ -3,7 +3,7 @@
 use crate::commands::intel::context::bfs_forward;
 use crate::commands::intel::{format_lines_opt as format_lines, format_lines_str_opt as format_lines_str};
 use crate::commands::intel::graph::CallGraph;
-use crate::commands::intel::parse::CodeChunk;
+use crate::commands::intel::parse::ParsedChunk;
 
 // ---------------------------------------------------------------------------
 // format_lines
@@ -47,7 +47,7 @@ fn format_lines_str_none_returns_empty() {
 ///   4 (test_main) is a test node, no edges from main
 fn build_test_graph() -> CallGraph {
     let chunks = vec![
-        CodeChunk {
+        ParsedChunk {
             kind: "function".to_owned(),
             name: "main".to_owned(),
             file: "src/main.rs".to_owned(),
@@ -66,7 +66,7 @@ fn build_test_graph() -> CallGraph {
             field_accesses: vec![],
             return_type: None,
         },
-        CodeChunk {
+        ParsedChunk {
             kind: "function".to_owned(),
             name: "foo".to_owned(),
             file: "src/lib.rs".to_owned(),
@@ -85,7 +85,7 @@ fn build_test_graph() -> CallGraph {
             field_accesses: vec![],
             return_type: None,
         },
-        CodeChunk {
+        ParsedChunk {
             kind: "function".to_owned(),
             name: "bar".to_owned(),
             file: "src/lib.rs".to_owned(),
@@ -104,7 +104,7 @@ fn build_test_graph() -> CallGraph {
             field_accesses: vec![],
             return_type: None,
         },
-        CodeChunk {
+        ParsedChunk {
             kind: "function".to_owned(),
             name: "baz".to_owned(),
             file: "src/util.rs".to_owned(),
@@ -123,7 +123,7 @@ fn build_test_graph() -> CallGraph {
             field_accesses: vec![],
             return_type: None,
         },
-        CodeChunk {
+        ParsedChunk {
             kind: "function".to_owned(),
             name: "test_main".to_owned(),
             file: "src/tests/test_main.rs".to_owned(),

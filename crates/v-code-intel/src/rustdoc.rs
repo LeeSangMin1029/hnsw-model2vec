@@ -491,11 +491,19 @@ pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
     None
 }
 
+/// Cache format version for `rustdoc_types.bin` — bump when `RustdocTypes` layout changes.
+const RUSTDOC_CACHE_VERSION: u8 = 1;
+
 /// Load `RustdocTypes` from a bincode cache file.
+///
+/// Uses a version prefix byte to detect stale caches.
 fn load_bincode_cache(path: &Path) -> Option<RustdocTypes> {
     let data = std::fs::read(path).ok()?;
+    if data.first() != Some(&RUSTDOC_CACHE_VERSION) {
+        return None;
+    }
     let config = bincode::config::standard();
-    let (types, _): (RustdocTypes, _) = bincode::decode_from_slice(&data, config).ok()?;
+    let (types, _): (RustdocTypes, _) = bincode::decode_from_slice(&data[1..], config).ok()?;
     if types.fn_return_types.is_empty() { None } else { Some(types) }
 }
 
@@ -506,7 +514,9 @@ fn save_bincode_cache(path: &Path, types: &RustdocTypes) {
     }
     let config = bincode::config::standard();
     if let Ok(data) = bincode::encode_to_vec(types, config) {
-        let _ = std::fs::write(path, data);
+        let mut bytes = vec![RUSTDOC_CACHE_VERSION];
+        bytes.extend_from_slice(&data);
+        let _ = std::fs::write(path, bytes);
     }
 }
 

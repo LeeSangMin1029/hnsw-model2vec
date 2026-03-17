@@ -1,4 +1,4 @@
-//! Call graph adjacency list built from `CodeChunk` data.
+//! Call graph adjacency list built from `ParsedChunk` data.
 //!
 //! Provides `CallGraph` — a pre-built, bincode-cached graph that maps
 //! chunk indices to their callees and callers for fast BFS traversal.
@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::parse::CodeChunk;
+use crate::parse::ParsedChunk;
 use crate::rustdoc::RustdocTypes;
 
 /// Cache format version — bump when struct layout changes.
@@ -76,7 +76,7 @@ struct ChunkMeta {
 }
 
 impl ChunkMeta {
-    fn collect(chunks: &[CodeChunk]) -> Self {
+    fn collect(chunks: &[ParsedChunk]) -> Self {
         let len = chunks.len();
         let mut exact = BTreeMap::new();
         let mut short = BTreeMap::new();
@@ -187,12 +187,12 @@ impl CallGraph {
     ///
     /// Resolution strategy: exact match on lowercase name first, then
     /// short name (last `::` segment) fallback.
-    pub fn build(chunks: &[CodeChunk]) -> Self {
+    pub fn build(chunks: &[ParsedChunk]) -> Self {
         Self::build_with_rustdoc(chunks, None)
     }
 
     /// Build the call graph, optionally enriched with rustdoc JSON type info.
-    pub fn build_with_rustdoc(chunks: &[CodeChunk], rustdoc: Option<&RustdocTypes>) -> Self {
+    pub fn build_with_rustdoc(chunks: &[ParsedChunk], rustdoc: Option<&RustdocTypes>) -> Self {
         let meta = ChunkMeta::collect(chunks);
         let mut adj = AdjState::new(chunks.len());
         let owner_types = collect_owner_types(chunks, &meta);
@@ -328,7 +328,7 @@ impl CallGraph {
     /// `skip_calls` contains short names already resolved — those are skipped.
     fn resolve_chunk_edges(
         src: usize,
-        chunk: &CodeChunk,
+        chunk: &ParsedChunk,
         exact: &BTreeMap<String, u32>,
         short: &BTreeMap<String, u32>,
         kinds: &[String],
@@ -407,7 +407,7 @@ impl CallGraph {
     }
 
     /// Assemble a `CallGraph` from pre-built metadata and adjacency state.
-    fn from_parts(meta: ChunkMeta, adj: AdjState, chunks: &[CodeChunk]) -> Self {
+    fn from_parts(meta: ChunkMeta, adj: AdjState, chunks: &[ParsedChunk]) -> Self {
         let trait_impls = build_trait_impls(&meta.names, &meta.kinds, &meta.exact, &meta.short);
         let string_args = collect_string_args(chunks);
         let string_index = build_string_index(&string_args);
@@ -529,9 +529,14 @@ impl CallGraph {
 
     /// Load the graph from `<db>/cache/graph.bin`, returning `None` on
     /// cache miss or version mismatch.
+    ///
+    /// Uses `payload.dat` mtime (not directory mtime) for invalidation —
+    /// directory mtime doesn't update on Windows when files inside change.
     pub fn load(db: &Path) -> Option<Self> {
         let path = graph_cache_path(db);
-        let db_mtime = fs::metadata(db).and_then(|m| m.modified()).ok()?;
+        let db_mtime = fs::metadata(db.join("payload.dat"))
+            .and_then(|m| m.modified())
+            .ok()?;
         let cache_meta = fs::metadata(&path).ok()?;
         let cache_mtime = cache_meta.modified().ok()?;
 
@@ -934,7 +939,7 @@ fn resolve_type_ref_edges(
 /// For `impl SimpleHybridSearcher<D, T>` with type_refs `[Bm25Index, HnswGraph, ...]`,
 /// produces `{"simplehybridsearcher": ["Bm25Index", "HnswGraph", ...]}`.
 /// Methods of that type can then use these types to resolve `self.field.method()` calls.
-fn collect_owner_types(chunks: &[CodeChunk], _meta: &ChunkMeta) -> BTreeMap<String, Vec<String>> {
+fn collect_owner_types(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> BTreeMap<String, Vec<String>> {
     let mut result: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for c in chunks {
         if !matches!(c.kind.as_str(), "struct" | "impl") {
@@ -960,7 +965,7 @@ fn collect_owner_types(chunks: &[CodeChunk], _meta: &ChunkMeta) -> BTreeMap<Stri
 ///
 /// E.g. struct `MmapStaticModel { tokenizer: Tokenizer, weights: Vec }` →
 /// `{"mmapmstaticmodel": {"tokenizer": "tokenizer", "weights": "vec"}}`.
-fn collect_owner_field_types(chunks: &[CodeChunk]) -> BTreeMap<String, BTreeMap<String, String>> {
+fn collect_owner_field_types(chunks: &[ParsedChunk]) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut result: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for c in chunks {
         if c.kind != "struct" {
@@ -980,7 +985,7 @@ fn collect_owner_field_types(chunks: &[CodeChunk]) -> BTreeMap<String, BTreeMap<
 /// Build function name → return type map (lowercase → lowercase leaf type).
 ///
 /// Resolves `Self` to the owning type: `Foo::new → Self` becomes `foo::new → foo`.
-fn build_return_type_map(chunks: &[CodeChunk]) -> BTreeMap<String, String> {
+fn build_return_type_map(chunks: &[ParsedChunk]) -> BTreeMap<String, String> {
     // Collect all project type names (structs, enums, traits, etc.)
     let project_types: std::collections::HashSet<String> = chunks
         .iter()
@@ -1018,7 +1023,7 @@ fn build_return_type_map(chunks: &[CodeChunk]) -> BTreeMap<String, String> {
 ///
 /// Scans all `Type::method` function chunks and groups by method short name.
 /// Used for resolving `receiver.method()` when receiver type is unknown.
-fn build_method_owner_index(chunks: &[CodeChunk]) -> BTreeMap<String, Vec<String>> {
+fn build_method_owner_index(chunks: &[ParsedChunk]) -> BTreeMap<String, Vec<String>> {
     let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for c in chunks {
         if c.kind != "function" {
@@ -1044,7 +1049,7 @@ fn build_method_owner_index(chunks: &[CodeChunk]) -> BTreeMap<String, Vec<String
 /// `{"search": ["engine"]}` — meaning `x.search()` could resolve to `Engine::search`.
 /// This complements method_owners by adding trait-based disambiguation.
 fn build_trait_impl_method_map(
-    chunks: &[CodeChunk],
+    chunks: &[ParsedChunk],
 ) -> BTreeMap<String, Vec<String>> {
     // Step 1: Find all "impl Trait for Type" chunks → (trait_name, concrete_type)
     let mut trait_to_types: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1102,7 +1107,7 @@ fn build_trait_impl_method_map(
 /// Scans all `Type::new()`, `Type::default()`, `Type::from()`, `Type::builder()`,
 /// `Type::with_*()`, `Type::create()`, `Type::open()`, `Type::connect()` calls
 /// to identify types that are actually instantiated in the project.
-fn collect_instantiated_types(chunks: &[CodeChunk]) -> HashSet<String> {
+fn collect_instantiated_types(chunks: &[ParsedChunk]) -> HashSet<String> {
     let constructors = [
         "new", "default", "from", "builder", "create", "open", "connect",
         "init", "build", "with_capacity", "with_config", "with_options",
@@ -1155,7 +1160,7 @@ fn extract_project_type_from_return(
 ///
 /// Finds all trait chunks, then collects short method names from function chunks
 /// whose name starts with `TraitName::` (e.g., `Iterator::next` → `"next"`).
-fn collect_trait_methods(chunks: &[CodeChunk]) -> BTreeSet<String> {
+fn collect_trait_methods(chunks: &[ParsedChunk]) -> BTreeSet<String> {
     let trait_names: BTreeSet<String> = chunks
         .iter()
         .filter(|c| c.kind == "trait")
@@ -1322,7 +1327,10 @@ fn strip_generics_from_key(key: &str) -> String {
 ///
 /// E.g. `param_types = [("handle", "File")]` → `{"handle": "file"}` (lowercase).
 /// For `self.field` lookups, field_types are keyed as-is.
-fn build_receiver_type_map(chunk: &CodeChunk) -> BTreeMap<String, String> {
+/// Build a receiver→type map from a chunk's param/local/field types.
+///
+/// Populates variable names → leaf type names for method resolution.
+pub fn build_receiver_type_map(chunk: &ParsedChunk) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for (name, ty) in &chunk.param_types {
         let name_lower = name.to_lowercase();
@@ -1400,7 +1408,8 @@ fn infer_local_types_from_calls(
     }
 }
 
-fn owning_type(name: &str) -> Option<String> {
+/// Extract owning type from a qualified name (e.g., `"Foo::bar"` → `"foo"`).
+pub fn owning_type(name: &str) -> Option<String> {
     let (prefix, _) = name.rsplit_once("::")?;
     let leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
     // Strip generic params: "Foo<T>" → "Foo"
@@ -1445,7 +1454,7 @@ pub fn is_test_path(path: &str) -> bool {
         || path.contains("/test_")
 }
 
-pub fn is_test_chunk(c: &CodeChunk) -> bool {
+pub fn is_test_chunk(c: &ParsedChunk) -> bool {
     is_test_path(&c.file) || c.name.starts_with("test_")
 }
 
@@ -1489,7 +1498,7 @@ fn build_trait_impls(
 }
 
 /// Collect string_args from each chunk.
-fn collect_string_args(chunks: &[CodeChunk]) -> Vec<Vec<(String, String, u32, u8)>> {
+fn collect_string_args(chunks: &[ParsedChunk]) -> Vec<Vec<(String, String, u32, u8)>> {
     chunks.iter().map(|c| c.string_args.clone()).collect()
 }
 
@@ -1511,7 +1520,7 @@ fn build_string_index(all: &[Vec<(String, String, u32, u8)>]) -> Vec<(String, Ve
 /// For each chunk's `field_accesses`, resolve the receiver variable to a type
 /// using the same sources as edge resolution (self type, param types, local types,
 /// field types), then index as `"typename::fieldname"`.
-fn build_field_access_index(chunks: &[CodeChunk], _meta: &ChunkMeta) -> Vec<(String, Vec<u32>)> {
+fn build_field_access_index(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> Vec<(String, Vec<u32>)> {
     let mut map: BTreeMap<String, Vec<u32>> = BTreeMap::new();
 
     for (idx, chunk) in chunks.iter().enumerate() {

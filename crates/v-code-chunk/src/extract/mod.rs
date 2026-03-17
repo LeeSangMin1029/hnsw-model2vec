@@ -30,7 +30,7 @@ pub use hash::{
 pub use common::{
     collect_sorted_unique, extract_doc_comment_before, extract_function_signature, extract_imports,
     extract_name, extract_param_types, extract_return_type, extract_struct_fields, extract_visibility,
-    walk_for_calls, walk_for_type_ids,
+    strip_string_quotes, walk_for_calls, walk_for_string_args, walk_for_type_ids,
 };
 pub use lang::{
     extract_block_doc_comment_before, extract_c_func_name, extract_c_params,

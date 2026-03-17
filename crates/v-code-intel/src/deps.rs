@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::parse::CodeChunk;
+use crate::parse::ParsedChunk;
 
 /// A dependency edge: target file + relationship type.
 pub type DepSet = BTreeSet<(String, &'static str)>;
@@ -25,7 +25,7 @@ pub struct DepGraph {
 
 impl DepGraph {
     /// Build from code chunks.
-    pub fn build(chunks: &[CodeChunk]) -> Self {
+    pub fn build(chunks: &[ParsedChunk]) -> Self {
         // Build symbol -> file index.
         let mut sym_to_file: BTreeMap<String, String> = BTreeMap::new();
         for c in chunks {
@@ -139,20 +139,23 @@ pub fn collect_transitive_files(graph: &DepGraph, start: &str, depth: usize) -> 
     }
 
     while let Some((file, level)) = queue.pop_front() {
-        if visited.contains(&file) || level >= depth {
+        if visited.contains(&file) {
             continue;
         }
         visited.insert(file.clone());
 
-        if let Some(node) = graph.nodes.get(&file) {
-            for (target, _) in &node.outgoing {
-                if !visited.contains(target) {
-                    queue.push_back((target.clone(), level + 1));
+        // Only expand neighbors if we haven't reached the depth limit.
+        if level < depth {
+            if let Some(node) = graph.nodes.get(&file) {
+                for (target, _) in &node.outgoing {
+                    if !visited.contains(target) {
+                        queue.push_back((target.clone(), level + 1));
+                    }
                 }
-            }
-            for (source, _) in &node.incoming {
-                if !visited.contains(source) {
-                    queue.push_back((source.clone(), level + 1));
+                for (source, _) in &node.incoming {
+                    if !visited.contains(source) {
+                        queue.push_back((source.clone(), level + 1));
+                    }
                 }
             }
         }

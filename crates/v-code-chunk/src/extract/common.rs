@@ -392,7 +392,7 @@ pub(crate) fn extract_string_value(node: &tree_sitter::Node, src: &[u8]) -> Opti
 /// Strip surrounding quotes from a string literal.
 ///
 /// Handles `"..."`, `'...'`, `` `...` ``, `r"..."`, `r#"..."#` etc.
-pub(crate) fn strip_string_quotes(s: &str) -> String {
+pub fn strip_string_quotes(s: &str) -> String {
     // Raw strings: r"...", r#"..."#
     if let Some(rest) = s.strip_prefix('r') {
         let hashes = rest.chars().take_while(|&c| c == '#').count();
