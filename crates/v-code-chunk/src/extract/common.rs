@@ -218,6 +218,27 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                     "call_expression" => {
                         return None;
                     }
+                    // Unwrap `?` and `.await`: `expr?.method()` / `expr.await.method()`
+                    // The inner expression may contain a receiver we can recover.
+                    "try_expression" | "await_expression" => {
+                        if let Some(inner) = value.child(0) {
+                            match inner.kind() {
+                                "identifier" | "self" => {
+                                    let recv = inner.utf8_text(src).ok()?;
+                                    return Some(format!("{recv}.{method}"));
+                                }
+                                "field_expression" => {
+                                    if let Some(recv) = extract_field_receiver(inner, src) {
+                                        return Some(format!("{recv}.{method}"));
+                                    }
+                                }
+                                "call_expression" => {
+                                    return None;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -806,9 +827,71 @@ fn walk_let_types_inner(
         }
     }
 
+    // Enum variant pattern binding: `Expr::BinExpr(x)` → ("x", "BinExpr")
+    // Works in if-let, match arms, and let declarations.
+    // tuple_struct_pattern with scoped_identifier = qualified variant.
+    if kind == "tuple_struct_pattern" {
+        extract_variant_binding_type(node, src, out);
+    }
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_let_types_inner(&child, src, out);
+    }
+}
+
+/// Extract variable bindings from enum variant patterns.
+///
+/// `Expr::BinExpr(x)` → `("x", "BinExpr")` — the variant name is the type hint.
+/// Skips prelude wrappers like `Some(x)`, `Ok(x)`, `Err(e)` which don't give type info.
+fn extract_variant_binding_type(
+    pat: &tree_sitter::Node,
+    src: &[u8],
+    out: &mut Vec<(String, String)>,
+) {
+    static PRELUDE_WRAPPERS: &[&str] = &["Some", "Ok", "Err", "None", "Box"];
+
+    // First child should be the variant path (scoped_identifier or identifier)
+    let mut cursor = pat.walk();
+    let children: Vec<_> = pat.children(&mut cursor).collect();
+
+    // Find the variant type name
+    let variant_type = children.iter().find_map(|child| {
+        match child.kind() {
+            // Expr::BinExpr(x) → scoped_identifier, last segment = "BinExpr"
+            "scoped_identifier" => {
+                let last = child.child_by_field_name("name")?;
+                let name = last.utf8_text(src).ok()?;
+                if name.starts_with(char::is_uppercase) && !PRELUDE_WRAPPERS.contains(&name) {
+                    Some(name.to_owned())
+                } else {
+                    None
+                }
+            }
+            // Some(x) → plain identifier, skip prelude wrappers
+            "identifier" => {
+                let name = child.utf8_text(src).ok()?;
+                if name.starts_with(char::is_uppercase) && !PRELUDE_WRAPPERS.contains(&name) {
+                    Some(name.to_owned())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    });
+
+    let Some(variant_type) = variant_type else { return };
+
+    // Find bound variable identifiers (lowercase names inside the pattern)
+    for child in &children {
+        if child.kind() == "identifier" {
+            if let Ok(name) = child.utf8_text(src) {
+                if name.starts_with(char::is_lowercase) {
+                    out.push((name.to_owned(), variant_type.clone()));
+                }
+            }
+        }
     }
 }
 
@@ -830,17 +913,82 @@ fn walk_let_call_bindings_inner(
     src: &[u8],
     out: &mut Vec<(String, String)>,
 ) {
-    if node.kind() == "let_declaration"
-        && let Some(pat) = node.child_by_field_name("pattern")
-            && pat.kind() == "identifier"
-            && let Ok(var_name) = pat.utf8_text(src)
-            && let Some(val) = node.child_by_field_name("value")
-                && let Some(callee) = extract_rhs_callee(&val, src) {
-                    out.push((var_name.to_owned(), callee));
+    match node.kind() {
+        // `let x = foo()` or `let Some(x) = foo()` (let ... else)
+        "let_declaration" => {
+            if let Some(pat) = node.child_by_field_name("pattern")
+                && let Some(val) = node.child_by_field_name("value")
+                && let Some(callee) = extract_rhs_callee(&val, src)
+            {
+                if let Some(var) = extract_binding_from_pattern(&pat, src) {
+                    out.push((var, callee));
                 }
+            }
+        }
+        // `if let Some(x) = foo()` — let_condition inside if_expression
+        "let_condition" => {
+            if let Some(pat) = node.child_by_field_name("pattern")
+                && let Some(val) = node.child_by_field_name("value")
+                && let Some(callee) = extract_rhs_callee(&val, src)
+            {
+                if let Some(var) = extract_binding_from_pattern(&pat, src) {
+                    out.push((var, callee));
+                }
+            }
+        }
+        // `match expr { Some(x) => ... }` — match arm patterns
+        "match_expression" => {
+            if let Some(scrutinee) = node.child_by_field_name("value")
+                && let Some(callee) = extract_rhs_callee(&scrutinee, src)
+            {
+                // Walk match arms to find pattern bindings
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "match_block" {
+                        let mut arm_cursor = child.walk();
+                        for arm in child.children(&mut arm_cursor) {
+                            if arm.kind() == "match_arm"
+                                && let Some(pat) = arm.child_by_field_name("pattern")
+                                && let Some(var) = extract_binding_from_pattern(&pat, src)
+                            {
+                                out.push((var, callee.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_let_call_bindings_inner(&child, src, out);
+    }
+}
+
+/// Extract a variable name from a pattern, handling:
+/// - `identifier` → direct name
+/// - `tuple_struct_pattern` (`Some(x)`, `Ok(x)`) → inner identifier
+/// - `struct_pattern` → skip (too complex)
+fn extract_binding_from_pattern(pat: &tree_sitter::Node, src: &[u8]) -> Option<String> {
+    match pat.kind() {
+        "identifier" => pat.utf8_text(src).ok().map(|s| s.to_owned()),
+        "tuple_struct_pattern" => {
+            // Some(x), Ok(x), Err(e) — find first identifier child that's not the type name
+            let mut cursor = pat.walk();
+            for child in pat.children(&mut cursor) {
+                if child.kind() == "identifier" && child.is_named() {
+                    // Skip the type name (first identifier = constructor name like "Some")
+                    let is_type = child.utf8_text(src).ok()
+                        .is_some_and(|t| t.starts_with(|c: char| c.is_uppercase()));
+                    if !is_type {
+                        return child.utf8_text(src).ok().map(|s| s.to_owned());
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -962,6 +1110,19 @@ fn infer_type_from_rhs(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
                         None
                     }
                 }
+                // Turbofish: expr.cast::<BinExpr>() or foo::<MyType>()
+                // generic_function wraps the inner function + type_arguments
+                "generic_function" => {
+                    let type_args = func.child_by_field_name("type_arguments")?;
+                    // Use the first type argument as the inferred type
+                    let mut cursor = type_args.walk();
+                    for child in type_args.children(&mut cursor) {
+                        if let Some(leaf) = extract_leaf_type_name(&child, src) {
+                            return Some(leaf);
+                        }
+                    }
+                    None
+                }
                 _ => None,
             }
         }
@@ -969,6 +1130,11 @@ fn infer_type_from_rhs(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
         "struct_expression" => {
             let name_node = inner.child_by_field_name("name")?;
             extract_leaf_type_name(&name_node, src)
+        }
+        // `expr as Type` — type cast expression
+        "type_cast_expression" => {
+            let ty = inner.child_by_field_name("type")?;
+            extract_leaf_type_name(&ty, src)
         }
         _ => None,
     }
@@ -994,9 +1160,13 @@ fn extract_leaf_type_name(node: &tree_sitter::Node, src: &[u8]) -> Option<String
         }
         "reference_type" | "pointer_type" | "mutable_specifier"
         | "dynamic_type" | "abstract_type" => {
-            // Skip & / &mut / * / dyn / impl and get the inner type
+            // Skip & / &mut / * / dyn / impl / lifetime and get the inner type
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
+                let ck = child.kind();
+                if ck == "lifetime" || ck == "mutable_specifier" || ck == "&" {
+                    continue;
+                }
                 if let Some(name) = extract_leaf_type_name(&child, src) {
                     return Some(name);
                 }

@@ -5,7 +5,7 @@
 //!
 //! ## HOW TO EXTEND
 //! - Add new traversal methods (e.g., shortest path) as `impl CallGraph` methods.
-//! - Add new fields to `CallGraph` and update `build()` + bump cache version.
+//! - Add new fields to `CallGraph` and update `build()` (cache auto-invalidates via source hash).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -16,14 +16,15 @@ use anyhow::{Context, Result};
 use crate::parse::ParsedChunk;
 use crate::rustdoc::RustdocTypes;
 
-/// Cache format version — bump when struct layout changes.
-const CACHE_VERSION: u8 = 7;
+/// Source hash of graph.rs — auto-computed by build.rs.
+/// Invalidates cache whenever resolve logic changes, no manual version bump needed.
+const GRAPH_SOURCE_HASH: &str = env!("GRAPH_SOURCE_HASH");
 
 /// Pre-built call graph with bidirectional adjacency lists.
 #[derive(bincode::Encode, bincode::Decode)]
 pub struct CallGraph {
-    /// Cache format version for invalidation.
-    version: u8,
+    /// Source hash for cache invalidation.
+    version: String,
     /// chunk index -> chunk name.
     pub names: Vec<String>,
     /// chunk index -> file path.
@@ -409,21 +410,56 @@ impl CallGraph {
                 }
             }
         }
-        for (call_idx, call) in chunk.calls.iter().enumerate() {
-            if !skip_calls.is_empty() {
-                let call_short = call.to_lowercase();
-                let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
-                if skip_calls.contains(call_leaf) {
+        // Iterative resolve: 2 passes.
+        // Pass 1: resolve what we can, collect resolved return types.
+        // Pass 2: re-attempt unresolved calls with enriched receiver_types.
+        let mut resolved_set = vec![false; chunk.calls.len()];
+        for pass in 0..2 {
+            for (call_idx, call) in chunk.calls.iter().enumerate() {
+                if resolved_set[call_idx] {
                     continue;
                 }
-            }
-            if let Some(tgt) = resolve_with_imports(
-                call, exact, short, &imports,
-                self_type.as_deref(), &enriched_types, &call_types,
-                &receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants,
-            ) {
-                let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
-                adj.add_edge(src, tgt, call_line);
+                if !skip_calls.is_empty() {
+                    let call_short = call.to_lowercase();
+                    let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
+                    if skip_calls.contains(call_leaf) {
+                        resolved_set[call_idx] = true;
+                        continue;
+                    }
+                }
+                if let Some(tgt) = resolve_with_imports(
+                    call, exact, short, &imports,
+                    self_type.as_deref(), &enriched_types, &call_types,
+                    &receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants,
+                ) {
+                    let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
+                    adj.add_edge(src, tgt, call_line);
+                    resolved_set[call_idx] = true;
+
+                    // After pass 1, propagate return types to receiver_types
+                    // for let_call_bindings that reference this callee.
+                    if pass == 0 {
+                        let call_lower = call.to_lowercase();
+                        if let Some(ret_type) = return_type_map.get(&call_lower).or_else(|| {
+                            // Try qualified lookup: for receiver.method calls,
+                            // build Type::method key from receiver_types.
+                            let (recv, method) = call_lower.rsplit_once('.')?;
+                            let recv_leaf = recv.rsplit_once('.').map_or(recv, |p| p.1);
+                            let recv_type = receiver_types.get(recv_leaf)?;
+                            let qualified = format!("{recv_type}::{method}");
+                            return_type_map.get(&qualified)
+                        }) {
+                            // Find bindings where callee matches this call
+                            for (var_name, callee_name) in &chunk.let_call_bindings {
+                                if callee_name.to_lowercase() == call_lower {
+                                    receiver_types
+                                        .entry(var_name.to_lowercase())
+                                        .or_insert_with(|| ret_type.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         resolve_type_ref_edges(src, &chunk.types, exact, short, &imports, &mut adj.callees, &mut adj.callers);
@@ -439,7 +475,7 @@ impl CallGraph {
             chunks.iter().map(|c| c.param_flows.clone()).collect();
         let field_access_index = build_field_access_index(chunks, &meta);
         Self {
-            version: CACHE_VERSION,
+            version: GRAPH_SOURCE_HASH.to_owned(),
             names: meta.names,
             files: meta.files,
             kinds: meta.kinds,
@@ -571,7 +607,7 @@ impl CallGraph {
         let config = bincode::config::standard();
         let (graph, _): (Self, _) = bincode::decode_from_slice(&bytes, config).ok()?;
 
-        if graph.version != CACHE_VERSION {
+        if graph.version != GRAPH_SOURCE_HASH {
             return None;
         }
 
@@ -620,10 +656,24 @@ fn resolve_with_imports(
     instantiated: &HashSet<String>,
     trait_impl_methods: &BTreeMap<String, Vec<String>>,
     rustdoc: Option<&RustdocTypes>,
-    kinds: &[String],
+    _kinds: &[String],
     _enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
 ) -> Option<u32> {
+    // Normalize UFCS / turbofish syntax before resolution:
+    //   `<Foo>::func`         → `Foo::func`
+    //   `<Foo as Trait>::func` → `Foo::func`
+    let call = if let Some(rest) = call.strip_prefix('<') {
+        if let Some((inner, suffix)) = rest.split_once(">::") {
+            let type_part = inner.split_once(" as ").map_or(inner, |p| p.0);
+            format!("{type_part}::{suffix}")
+        } else {
+            call.to_owned()
+        }
+    } else {
+        call.to_owned()
+    };
+    let call: &str = &call;
     let lower = call.to_lowercase();
 
     // Skip Rust prelude enum variant constructors that tree-sitter sees as calls.
@@ -693,6 +743,29 @@ fn resolve_with_imports(
                     }
                 // Field type is external → skip to avoid false positive
                 return None;
+            }
+            // Fallback: field name as type hint via underscore-stripped matching.
+            // e.g. self.token_tree.method() → "token_tree" → "tokentree" ↔ "TokenTree"
+            let field_stripped: String = field_leaf.chars().filter(|&c| c != '_').collect();
+            if let Some(owners) = method_owners.get(leaf_method) {
+                if let Some(owner) = owners.iter().find(|o| {
+                    o.contains(&field_stripped) || field_stripped.contains(o.as_str())
+                }) {
+                    let candidate = format!("{owner}::{leaf_method}");
+                    if let Some(&idx) = exact.get(&candidate) {
+                        return Some(idx);
+                    }
+                }
+            }
+            if let Some(impl_types) = trait_impl_methods.get(leaf_method) {
+                if let Some(t) = impl_types.iter().find(|t| {
+                    t.contains(&field_stripped) || field_stripped.contains(t.as_str())
+                }) {
+                    let candidate = format!("{t}::{leaf_method}");
+                    if let Some(&idx) = exact.get(&candidate) {
+                        return Some(idx);
+                    }
+                }
             }
             // Fallback: try type_refs heuristic
             for ty in source_types.iter().chain(call_types.iter()) {
@@ -764,25 +837,26 @@ fn resolve_with_imports(
     //    Bare names → skip (too ambiguous).
     if let Some((prefix, suffix)) = lower.rsplit_once("::") {
         // Skip enum variant constructors: `CliError::Embed(...)` is not a function call.
+        // Only skip when original suffix starts with uppercase — lowercase suffix
+        // like `Expr::cast()` or `Expr::from()` is a method call, not a variant.
         let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix);
-        if let Some(&idx) = exact.get(prefix_leaf)
-            && let Some(kind) = kinds.get(idx as usize)
-                && kind == "enum" {
-                    return None;
-                }
-        // Skip external enum variant constructors: `Cow::Borrowed(...)` where
-        // "cow" is not a project type and "Borrowed" starts with uppercase.
-        // This catches external enum variants without hardcoding specific types.
-        if !exact.contains_key(prefix_leaf) && !short.contains_key(prefix_leaf) {
-            let orig_suffix = call.rsplit_once("::").map_or(call, |p| p.1);
-            if orig_suffix.starts_with(char::is_uppercase) {
-                return None;
-            }
+        let orig_suffix = call.rsplit_once("::").map_or(call, |p| p.1);
+        if orig_suffix.starts_with(char::is_uppercase) {
+            // Uppercase suffix = likely enum variant constructor, not a method call.
+            // Skip entirely: both project enums and external enum variants.
+            return None;
+        }
+        // Try exact match with type leaf: `ast::Expr::cast` → exact["expr::cast"]
+        // (populated by trait impl alias: "Trait for Type::method" → "type::method").
+        let qualified = format!("{prefix_leaf}::{suffix}");
+        if let Some(&idx) = exact.get(&qualified) {
+            return Some(idx);
         }
         return short.get(suffix).copied();
     }
     if let Some((receiver, method)) = lower.rsplit_once('.') {
         let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
+        let recv_stripped: String = receiver_leaf.chars().filter(|&c| c != '_').collect();
         if imports.contains_key(receiver_leaf) || exact.contains_key(receiver_leaf) {
             return short.get(method).copied();
         }
@@ -811,6 +885,7 @@ fn resolve_with_imports(
                             .any(|st| st.to_lowercase() == **t)
                     }).or_else(|| impl_types.iter().find(|t| {
                         t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
+                        || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
                     }));
                     if let Some(t) = matched {
                         let qualified = format!("{t}::{method}");
@@ -821,8 +896,13 @@ fn resolve_with_imports(
                 }
             }
             // Also check method_owners (non-trait methods)
+            // Underscore-stripped: recv type "binexpr" matches owner "binexpr"
+            let ty_stripped: String = ty_lower.chars().filter(|&c| c != '_').collect();
             if let Some(owners) = method_owners.get(method)
-                && let Some(owner) = owners.iter().find(|o| **o == ty_lower) {
+                && let Some(owner) = owners.iter().find(|o| {
+                    **o == ty_lower || **o == ty_stripped
+                    || o.contains(ty_stripped.as_str()) || ty_stripped.contains(o.as_str())
+                }) {
                     let qualified = format!("{owner}::{method}");
                     if let Some(&idx) = exact.get(&qualified) {
                         return Some(idx);
@@ -863,6 +943,7 @@ fn resolve_with_imports(
         //     Resolution priority:
         //     (1) Unique owner → resolve immediately
         //     (2) Receiver name contains owner type → resolve (e.g. engine ~ storageengine)
+        //         Also underscore-stripped: "bin_expr" → "binexpr" ~ "BinExpr"
         //     (3) Self type match → resolve to own type's method
         //     (4) Known receiver type from receiver_types → resolve
         //     (5) Type context (source_types + call_types + imports) → narrow
@@ -882,8 +963,10 @@ fn resolve_with_imports(
                 }
             } else if owners.len() > 1 {
                 // (2) Receiver name similarity — "engine" matches "storageengine"
+                //     Also underscore-stripped: "bin_expr" → "binexpr" ~ "binexpr"
                 let matched_owner = owners.iter().find(|o| {
                     o.contains(receiver_leaf) || receiver_leaf.contains(o.as_str())
+                    || o.contains(&recv_stripped) || recv_stripped.contains(o.as_str())
                 });
                 if let Some(owner) = matched_owner {
                     let qualified = format!("{owner}::{method}");
@@ -937,6 +1020,7 @@ fn resolve_with_imports(
                     // Narrow by receiver name similarity or type context
                     let matched = impl_types.iter().find(|t| {
                         t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
+                        || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
                     }).or_else(|| impl_types.iter().find(|t| {
                         source_types.iter().chain(call_types.iter())
                             .any(|st| st.to_lowercase() == **t)

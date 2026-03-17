@@ -426,13 +426,24 @@ fn check_extern_reason(
     project_type_shorts: &HashSet<String>,
 ) -> Option<String> {
     // Handle bare function calls (no receiver): `len`, `drop`, `push`, etc.
-    // Bare names that exist in extern types are std/dep methods whose receiver
-    // was lost during tree-sitter extraction. Even if a project function shares
-    // the same short name (e.g., `Drop::drop`), bare unresolved calls are
-    // almost always std/dep methods since project calls resolve via imports.
     if !call_lower.contains('.') && !call_lower.contains("::") {
         if extern_index.any_type_has_method(call_lower) {
             return Some(format!("bare-extern: {call_lower}"));
+        }
+        return None;
+    }
+
+    // Handle qualified path calls: `ast::Expr::cast`, `Command::new`, etc.
+    if let Some((prefix, method)) = call_lower.rsplit_once("::") {
+        let leaf_type = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
+
+        if extern_index.has_method(leaf_type, method) {
+            return Some(format!("qualified-extern: {leaf_type}::{method}"));
+        }
+        if extern_index.any_type_has_method(method)
+            && !project_type_shorts.contains(leaf_type)
+        {
+            return Some(format!("qualified-untyped-extern: {leaf_type}::{method}"));
         }
         return None;
     }

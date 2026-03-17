@@ -735,3 +735,129 @@ fn analyze<'db>(db: &'db dyn HirDatabase, x: &'a mut dyn Iterator) {
         x_type
     );
 }
+
+#[test]
+fn struct_field_types_with_references_and_lifetimes() {
+    let config = CodeChunkConfig { min_lines: 1, ..CodeChunkConfig::default() };
+    let chunker = RustCodeChunker::new(config);
+    let code = r#"
+struct Converter<'a, 'b> {
+    output: &'b mut String,
+    map: HashMap<String, Vec<usize>>,
+    sig: Binders<FnSig>,
+    cache: Option<Arc<Cache>>,
+    simple: Vec<u8>,
+    raw: RawData,
+}
+"#;
+    let chunks = chunker.chunk(code);
+    let s = chunks.iter().find(|c| c.name == "Converter")
+        .expect("should find Converter struct");
+
+    let ft: std::collections::HashMap<&str, &str> = s.field_types.iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    assert_eq!(ft.get("output"), Some(&"String"), "should unwrap &'b mut String → String");
+    assert_eq!(ft.get("map"), Some(&"HashMap"), "should extract HashMap from generic");
+    assert_eq!(ft.get("sig"), Some(&"Binders"), "should extract Binders from generic");
+    assert_eq!(ft.get("cache"), Some(&"Option"), "should extract Option from generic");
+    assert_eq!(ft.get("simple"), Some(&"Vec"), "should extract Vec from generic");
+    assert_eq!(ft.get("raw"), Some(&"RawData"), "should extract plain type");
+}
+
+#[test]
+fn infer_local_types_from_turbofish() {
+    let code = r#"
+trait AstNode { fn cast(node: SyntaxNode) -> Option<Self>; }
+struct BinExpr {}
+impl AstNode for BinExpr { fn cast(node: SyntaxNode) -> Option<Self> { todo!() } }
+struct Config {}
+fn analyze(node: SyntaxNode) {
+    let bin_expr = node.cast::<BinExpr>();
+    let cfg = make::<Config>()?;
+    let result = foo.bar::<MyType>(42);
+}
+"#;
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(code);
+    let func = chunks.iter().find(|c| c.name == "analyze").expect("should find analyze");
+
+    assert!(
+        func.local_types.contains(&("bin_expr".to_owned(), "BinExpr".to_owned())),
+        "should infer bin_expr: BinExpr from turbofish .cast::<BinExpr>(), got: {:?}",
+        func.local_types
+    );
+    assert!(
+        func.local_types.contains(&("cfg".to_owned(), "Config".to_owned())),
+        "should infer cfg: Config from turbofish make::<Config>()?, got: {:?}",
+        func.local_types
+    );
+    assert!(
+        func.local_types.contains(&("result".to_owned(), "MyType".to_owned())),
+        "should infer result: MyType from turbofish foo.bar::<MyType>(), got: {:?}",
+        func.local_types
+    );
+}
+
+#[test]
+fn infer_local_types_from_as_cast() {
+    let code = r#"
+struct RawPtr {}
+fn process(addr: usize) {
+    let ptr = addr as RawPtr;
+}
+"#;
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(code);
+    let func = chunks.iter().find(|c| c.name == "process").expect("should find process");
+
+    assert!(
+        func.local_types.contains(&("ptr".to_owned(), "RawPtr".to_owned())),
+        "should infer ptr: RawPtr from `as` cast, got: {:?}",
+        func.local_types
+    );
+}
+
+#[test]
+fn infer_local_types_from_enum_variant_pattern() {
+    let code = r#"
+enum Expr { BinExpr(BinExpr), ForExpr(ForExpr) }
+struct BinExpr {}
+impl BinExpr { fn op_kind(&self) {} }
+struct ForExpr {}
+impl ForExpr { fn body(&self) {} }
+fn analyze(node: Expr) {
+    if let Expr::BinExpr(x) = node {
+        x.op_kind();
+    }
+    match node {
+        Expr::ForExpr(it) => { it.body(); }
+        _ => {}
+    }
+    if let Some(val) = option {
+        // Some(val) should NOT produce a type
+    }
+}
+"#;
+    let chunker = RustCodeChunker::new(CodeChunkConfig::default());
+    let chunks = chunker.chunk(code);
+    let func = chunks.iter().find(|c| c.name == "analyze").expect("should find analyze");
+
+    assert!(
+        func.local_types.contains(&("x".to_owned(), "BinExpr".to_owned())),
+        "should infer x: BinExpr from if-let Expr::BinExpr(x), got: {:?}",
+        func.local_types
+    );
+    assert!(
+        func.local_types.contains(&("it".to_owned(), "ForExpr".to_owned())),
+        "should infer it: ForExpr from match Expr::ForExpr(it), got: {:?}",
+        func.local_types
+    );
+    // Some(val) should NOT produce a type binding
+    assert!(
+        !func.local_types.iter().any(|(name, _)| name == "val"),
+        "Some(val) should be skipped (prelude wrapper), got: {:?}",
+        func.local_types
+    );
+}
