@@ -247,11 +247,21 @@ pub fn run(db: PathBuf) -> Result<()> {
             if call.starts_with(char::is_uppercase) && PRELUDE_VARIANTS.contains(&call_lower.as_str()) {
                 continue;
             }
-            // Qualified enum variant: `Type::Variant(args)` where Variant starts uppercase
-            if let Some((_, last)) = call.rsplit_once("::")
-                && last.starts_with(char::is_uppercase) && enum_variant_set.contains(&call_lower) {
-                    continue;
+            // Qualified enum variant: `Type::Variant(args)` where Variant starts uppercase.
+            // Covers both project enums (via enum_variant_set) and external enums
+            // (prefix type not in project + suffix uppercase).
+            if let Some((prefix, last)) = call.rsplit_once("::") {
+                if last.starts_with(char::is_uppercase) {
+                    if enum_variant_set.contains(&call_lower) {
+                        continue;
+                    }
+                    // External enum variant: prefix type not in project index
+                    let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix).to_lowercase();
+                    if !project_shorts.contains(&prefix_leaf) && !project_type_shorts.contains(&prefix_leaf) {
+                        continue;
+                    }
                 }
+            }
 
             recall_total += 1;
 

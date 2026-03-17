@@ -70,10 +70,10 @@ fn extract_impl_type(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
             has_for = true;
             continue;
         }
-        // Type nodes: type_identifier, scoped_type_identifier, generic_type
+        // Type nodes: type_identifier, scoped_type_identifier, generic_type, primitive_type
         if matches!(
             kind,
-            "type_identifier" | "scoped_type_identifier" | "generic_type"
+            "type_identifier" | "scoped_type_identifier" | "generic_type" | "primitive_type"
         ) {
             if has_for {
                 // After "for" → this is the concrete type

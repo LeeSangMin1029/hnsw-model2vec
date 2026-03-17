@@ -760,6 +760,15 @@ fn resolve_with_imports(
                 && kind == "enum" {
                     return None;
                 }
+        // Skip external enum variant constructors: `Cow::Borrowed(...)` where
+        // "cow" is not a project type and "Borrowed" starts with uppercase.
+        // This catches external enum variants without hardcoding specific types.
+        if !exact.contains_key(prefix_leaf) && !short.contains_key(prefix_leaf) {
+            let orig_suffix = call.rsplit_once("::").map_or(call, |p| p.1);
+            if orig_suffix.starts_with(char::is_uppercase) {
+                return None;
+            }
+        }
         return short.get(suffix).copied();
     }
     if let Some((receiver, method)) = lower.rsplit_once('.') {
