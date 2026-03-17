@@ -200,71 +200,22 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
             let field = func_node.child_by_field_name("field")?;
             let method = field.utf8_text(src).ok()?;
             if let Some(value) = func_node.child_by_field_name("value") {
-                match value.kind() {
+                // Peel transparent wrappers: `?`, `.await`, `(expr)` — iteratively.
+                let inner = peel_transparent(value);
+                match inner.kind() {
                     "identifier" | "self" => {
-                        let recv = value.utf8_text(src).ok()?;
+                        let recv = inner.utf8_text(src).ok()?;
                         return Some(format!("{recv}.{method}"));
                     }
-                    // self.field.method → "self.field.method"
                     "field_expression" => {
-                        if let Some(recv) = extract_field_receiver(value, src) {
+                        if let Some(recv) = extract_field_receiver(inner, src) {
                             return Some(format!("{recv}.{method}"));
                         }
                     }
-                    // chained call: a(x).b(y) → receiver type is unknown.
-                    // Skip entirely to avoid false positives (e.g. `.create(true)` on
-                    // OpenOptions matching `collection::create`). The first call in
-                    // the chain (`OpenOptions::new`) is already extracted separately.
-                    "call_expression" => {
+                    // Opaque receivers: chained call, macro expansion, indexed value.
+                    // Type is unknown — skip to avoid false positives.
+                    "call_expression" | "macro_invocation" | "index_expression" => {
                         return None;
-                    }
-                    // macro!(...).method() → receiver is macro expansion, type unknown.
-                    // arr[i].method() → receiver is indexed value, type unknown.
-                    // Skip like chained calls to avoid false positives.
-                    "macro_invocation" | "index_expression" => {
-                        return None;
-                    }
-                    // Unwrap `(expr)` → inner expression (named_child for parens).
-                    "parenthesized_expression" => {
-                        if let Some(inner) = value.named_child(0) {
-                            match inner.kind() {
-                                "identifier" | "self" => {
-                                    let recv = inner.utf8_text(src).ok()?;
-                                    return Some(format!("{recv}.{method}"));
-                                }
-                                "field_expression" => {
-                                    if let Some(recv) = extract_field_receiver(inner, src) {
-                                        return Some(format!("{recv}.{method}"));
-                                    }
-                                }
-                                "call_expression" | "macro_invocation"
-                                | "index_expression" => {
-                                    return None;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    // Unwrap `expr?`, `expr.await` transparently.
-                    "try_expression" | "await_expression" => {
-                        if let Some(inner) = value.child(0) {
-                            match inner.kind() {
-                                "identifier" | "self" => {
-                                    let recv = inner.utf8_text(src).ok()?;
-                                    return Some(format!("{recv}.{method}"));
-                                }
-                                "field_expression" => {
-                                    if let Some(recv) = extract_field_receiver(inner, src) {
-                                        return Some(format!("{recv}.{method}"));
-                                    }
-                                }
-                                "call_expression" | "macro_invocation"
-                                | "index_expression" => {
-                                    return None;
-                                }
-                                _ => {}
-                            }
-                        }
                     }
                     _ => {}
                 }
@@ -281,6 +232,30 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
     }
 }
 
+/// Iteratively peel `?`, `.await`, and `(expr)` wrappers from an expression node.
+fn peel_transparent(mut node: tree_sitter::Node) -> tree_sitter::Node {
+    loop {
+        match node.kind() {
+            "try_expression" | "await_expression" => {
+                if let Some(inner) = node.child(0) {
+                    node = inner;
+                } else {
+                    break;
+                }
+            }
+            "parenthesized_expression" => {
+                if let Some(inner) = node.named_child(0) {
+                    node = inner;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    node
+}
+
 /// Extract receiver path from nested field expressions: `self.foo.bar` → "self.foo.bar"
 /// Also unwraps `?` and `.await` transparently: `self.foo?.bar` → "self.foo.bar"
 /// Stops at call expressions or other complex nodes.
@@ -288,12 +263,7 @@ pub(crate) fn extract_field_receiver(node: tree_sitter::Node, src: &[u8]) -> Opt
     let field = node.child_by_field_name("field")?;
     let field_name = field.utf8_text(src).ok()?;
     let value = node.child_by_field_name("value")?;
-    // Unwrap `?` / `.await` / `(expr)` transparently to reach the inner expression.
-    let value = match value.kind() {
-        "try_expression" | "await_expression" => value.child(0).unwrap_or(value),
-        "parenthesized_expression" => value.named_child(0).unwrap_or(value),
-        _ => value,
-    };
+    let value = peel_transparent(value);
     match value.kind() {
         "identifier" | "self" => {
             let recv = value.utf8_text(src).ok()?;
