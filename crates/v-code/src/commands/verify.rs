@@ -468,6 +468,13 @@ fn check_extern_reason(
             if extern_index.has_method(leaf, method) {
                 return Some(format!("self.field: {field_leaf}:{leaf}.{method}"));
             }
+            // Field type is known but not in extern_index (e.g. type alias like FxHashMap).
+            // If the field type is not a project type and method exists on any extern type,
+            // classify as extern.
+            if !project_type_shorts.contains(leaf)
+                && extern_index.any_type_has_method(method) {
+                return Some(format!("self.field-alias: {field_leaf}:{leaf}.{method}"));
+            }
         }
     }
 
@@ -477,6 +484,11 @@ fn check_extern_reason(
         let leaf = extract_leaf_type(&lowered);
         if extern_index.has_method(leaf, method) {
             return Some(format!("receiver: {receiver_leaf}:{leaf}.{method}"));
+        }
+        // Same alias fallback for direct receiver.
+        if !project_type_shorts.contains(leaf)
+            && extern_index.any_type_has_method(method) {
+            return Some(format!("receiver-alias: {receiver_leaf}:{leaf}.{method}"));
         }
     }
 
