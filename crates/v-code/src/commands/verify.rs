@@ -105,8 +105,7 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
     let extern_index = if has_graph_extern {
         None // Graph already has extern classification
     } else {
-        let extern_root = project_root.as_deref().unwrap_or(Path::new("."));
-        Some(ExternMethodIndex::build(extern_root))
+        Some(ExternMethodIndex::build(&db))
     };
 
     if let Some(ref ext) = extern_index {

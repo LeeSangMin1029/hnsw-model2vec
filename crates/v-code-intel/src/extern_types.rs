@@ -67,11 +67,13 @@ impl ExternMethodIndex {
     ///
     /// Uses a cache file to avoid re-parsing on subsequent runs.
     /// Cache is invalidated when `Cargo.toml` or `rustc --version` changes.
-    pub fn build(project_root: &Path) -> Self {
+    /// Cache stored in `<db>/cache/extern_types.bin`.
+    pub fn build(db_path: &Path) -> Self {
+        let project_root = db_path.parent().unwrap_or(Path::new("."));
         let fingerprint = compute_fingerprint(project_root);
 
         // Try loading from cache first.
-        if let Some(cached) = Self::load_cache(project_root, &fingerprint) {
+        if let Some(cached) = Self::load_cache(db_path, &fingerprint) {
             return cached;
         }
 
@@ -168,13 +170,13 @@ impl ExternMethodIndex {
             return_types,
         };
 
-        index.save_cache(project_root);
+        index.save_cache(db_path);
         index
     }
 
     /// Try to load a cached extern index.
-    fn load_cache(project_root: &Path, fingerprint: &str) -> Option<Self> {
-        let path = cache_path(project_root);
+    fn load_cache(db_path: &Path, fingerprint: &str) -> Option<Self> {
+        let path = cache_path(db_path);
         let data = std::fs::read(&path).ok()?;
         let config = bincode::config::standard();
         let (index, _): (Self, _) = bincode::decode_from_slice(&data, config).ok()?;
@@ -185,20 +187,18 @@ impl ExternMethodIndex {
         }
     }
 
-    /// Try to load a cached extern index from the DB's parent directory.
+    /// Try to load a cached extern index from the DB directory.
     ///
-    /// Looks for `extern_types.bin` in the `.code.db/cache/` directory.
     /// Returns `None` if no cache exists (does NOT rebuild).
     pub fn try_load_cached(db_path: &Path) -> Option<Self> {
-        // DB is typically at `<project>/.code.db`, so parent = project root.
         let project_root = db_path.parent()?;
         let fingerprint = compute_fingerprint(project_root);
-        Self::load_cache(project_root, &fingerprint)
+        Self::load_cache(db_path, &fingerprint)
     }
 
     /// Save the index to cache.
-    fn save_cache(&self, project_root: &Path) {
-        let path = cache_path(project_root);
+    fn save_cache(&self, db_path: &Path) {
+        let path = cache_path(db_path);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -209,11 +209,9 @@ impl ExternMethodIndex {
     }
 }
 
-/// Cache file path for the extern type index.
-///
-/// Stored in `target/v-code-cache/` so it survives DB deletion (`.code.db` removal).
-fn cache_path(project_root: &Path) -> PathBuf {
-    project_root.join("target").join("v-code-cache").join("extern_types.bin")
+/// Cache file path for the extern type index — stored inside the DB directory.
+fn cache_path(db_path: &Path) -> PathBuf {
+    db_path.join("cache").join("extern_types.bin")
 }
 
 /// Compute a fingerprint from Cargo.toml content + rustc version.

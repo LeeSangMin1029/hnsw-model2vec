@@ -447,45 +447,47 @@ fn list_workspace_lib_crates(project_root: &Path) -> Vec<String> {
 /// 2. `<db>/cache/rustdoc.json` (single file, legacy)
 /// 3. `<project_root>/target/doc/` (directly from cargo rustdoc output)
 pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
-    // Check bincode caches: first in target/v-code-cache/ (survives DB deletion),
-    // then fallback to .code.db/cache/ (legacy).
-    let persistent_cache = crate::helpers::find_project_root(db_path)
-        .map(|r| r.join("target").join("v-code-cache").join("rustdoc_types.bin"));
     let db_cache = db_path.join("cache").join("rustdoc_types.bin");
 
-    for path in persistent_cache.iter().chain(std::iter::once(&db_cache)) {
-        if let Some(types) = load_bincode_cache(path) {
+    // Try bincode cache in DB directory.
+    if let Some(types) = load_bincode_cache(&db_cache) {
+        return Some(types);
+    }
+
+    // Try migration: load from old target/v-code-cache/ location and move to DB.
+    let old_cache = crate::helpers::find_project_root(db_path)
+        .map(|r| r.join("target").join("v-code-cache").join("rustdoc_types.bin"));
+    if let Some(ref old_path) = old_cache {
+        if let Some(types) = load_bincode_cache(old_path) {
+            save_bincode_cache(&db_cache, &types);
+            let _ = std::fs::remove_file(old_path);
             return Some(types);
         }
     }
 
-    // Parse from JSON sources and save to persistent cache.
-    let save_to = persistent_cache.as_ref().unwrap_or(&db_cache);
-
-    // 2. Multi-file JSON cache directory
+    // Parse from JSON sources and save to DB cache.
     let cache_dir = db_path.join("cache").join("rustdoc");
     if cache_dir.is_dir()
         && let Ok(types) = RustdocTypes::from_dir(&cache_dir)
             && !types.fn_return_types.is_empty() {
-                save_bincode_cache(save_to, &types);
+                save_bincode_cache(&db_cache, &types);
                 return Some(types);
             }
 
-    // 3. Single file cache (legacy)
     let cache_path = db_path.join("cache").join("rustdoc.json");
     if cache_path.exists()
         && let Ok(types) = RustdocTypes::from_file(&cache_path) {
-            save_bincode_cache(save_to, &types);
+            save_bincode_cache(&db_cache, &types);
             return Some(types);
         }
 
-    // 4. Try target/doc/ from project root
+    // Try target/doc/ from project root.
     if let Some(project_root) = crate::helpers::find_project_root(db_path) {
         let doc_dir = project_root.join("target").join("doc");
         if doc_dir.is_dir()
             && let Ok(types) = RustdocTypes::from_dir(&doc_dir)
                 && !types.fn_return_types.is_empty() {
-                    save_bincode_cache(save_to, &types);
+                    save_bincode_cache(&db_cache, &types);
                     return Some(types);
                 }
     }
