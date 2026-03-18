@@ -200,7 +200,14 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
             let field = func_node.child_by_field_name("field")?;
             let method = field.utf8_text(src).ok()?;
             if let Some(value) = func_node.child_by_field_name("value") {
+                // Direct chained call: a(x).b(y) → receiver type is unknown.
+                // Skip entirely to avoid false positives (e.g. `.create(true)` on
+                // OpenOptions matching `collection::create`).
+                if value.kind() == "call_expression" {
+                    return None;
+                }
                 // Peel transparent wrappers: `?`, `.await`, `(expr)` — iteratively.
+                // Recovers receiver from `self.foo?.method()`, `(self.bar).method()`, etc.
                 let inner = peel_transparent(value);
                 match inner.kind() {
                     "identifier" | "self" => {
@@ -211,11 +218,6 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                         if let Some(recv) = extract_field_receiver(inner, src) {
                             return Some(format!("{recv}.{method}"));
                         }
-                    }
-                    // Opaque receivers: chained call, macro expansion, indexed value.
-                    // Type is unknown — skip to avoid false positives.
-                    "call_expression" | "macro_invocation" | "index_expression" => {
-                        return None;
                     }
                     _ => {}
                 }
