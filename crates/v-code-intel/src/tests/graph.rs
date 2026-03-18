@@ -866,13 +866,6 @@ fn assert_edge(g: &CallGraph, caller: &str, callee: &str) {
     );
 }
 
-/// Helper: assert edge does NOT exist (precision check).
-fn assert_no_edge(g: &CallGraph, caller: &str, callee: &str) {
-    assert!(
-        !has_edge(g, caller, callee),
-        "[PRECISION] unexpected {caller} → {callee}",
-    );
-}
 
 // ── P1. trait object dispatch ────────────────────────────────────────
 

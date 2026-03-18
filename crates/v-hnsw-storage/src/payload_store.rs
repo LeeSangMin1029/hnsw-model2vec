@@ -118,6 +118,44 @@ impl FilePayloadStore {
         Ok(())
     }
 
+    /// Bulk-write payloads and texts in a single I/O each (no WAL).
+    /// Write pre-encoded payload and text buffers in a single I/O each.
+    ///
+    /// No per-record allocation or encoding — the caller provides contiguous
+    /// byte buffers with offset/length tables.
+    pub fn write_raw_bulk(
+        &mut self,
+        ids: &[PointId],
+        payload_buf: &[u8],
+        payload_offsets: &[(u64, u32)],
+        text_buf: &[u8],
+        text_offsets: &[(u64, u32)],
+    ) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        // Single write for all payloads.
+        let p_file_offset = self.payload_file.seek(SeekFrom::End(0))?;
+        self.payload_file.write_all(payload_buf)?;
+        self.payload_file.flush()?;
+
+        for (i, id) in ids.iter().enumerate() {
+            let (buf_off, len) = payload_offsets[i];
+            self.payload_index.insert(*id, (p_file_offset + buf_off, len));
+        }
+
+        // Single write for all texts.
+        let t_file_offset = self.text_file.seek(SeekFrom::End(0))?;
+        self.text_file.write_all(text_buf)?;
+        self.text_file.flush()?;
+
+        for (i, id) in ids.iter().enumerate() {
+            let (buf_off, len) = text_offsets[i];
+            self.text_index.insert(*id, (t_file_offset + buf_off, len));
+        }
+
+        Ok(())
+    }
+
     /// Buffer a payload in memory (for WAL-backed writes before flush).
     pub fn buffer_payload(&mut self, id: PointId, payload: Payload) {
         self.update_secondary_indexes(id, &payload);

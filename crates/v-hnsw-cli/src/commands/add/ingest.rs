@@ -176,21 +176,6 @@ pub fn finalize_ingest(
     })
 }
 
-/// Finalize ingest with zero vectors (text-only, no embedding).
-///
-/// Same as [`finalize_ingest`] but skips the embedding step for fast indexing.
-/// Real vectors can be filled in later via `v-code embed`.
-pub fn finalize_ingest_text_only(
-    db_path: &Path,
-    records: Vec<IngestRecord>,
-    dim: usize,
-    engine: &mut StorageEngine,
-    file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)>,
-) -> Result<IngestResult> {
-    finalize_ingest_core(db_path, records, engine, file_metadata_map, |recs, eng| {
-        crate::commands::pipeline::process_records_text_only(recs, dim, eng)
-    })
-}
 
 /// Extract `body_hash` (i64) from a payload's custom fields.
 fn payload_body_hash(payload: &v_hnsw_core::Payload) -> Option<i64> {

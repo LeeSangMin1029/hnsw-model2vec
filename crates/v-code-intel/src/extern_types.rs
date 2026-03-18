@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 /// Cache version — bump when struct layout changes.
-const EXTERN_CACHE_VERSION: u8 = 3;
+const EXTERN_CACHE_VERSION: u8 = 4;
 
 /// Std library subdirectories that contain useful type definitions.
 /// Skips test-only, profiler, backtrace, and platform-specific crates.
@@ -27,6 +27,9 @@ pub struct ExternMethodIndex {
     fingerprint: String,
     /// type_name (lowercase) → set of method_names (lowercase)
     pub types: BTreeMap<String, BTreeSet<String>>,
+    /// "type::method" (lowercase) → return_type_leaf (lowercase)
+    /// Only populated for methods with non-primitive, non-void return types.
+    pub return_types: BTreeMap<String, String>,
 }
 
 impl ExternMethodIndex {
@@ -40,6 +43,14 @@ impl ExternMethodIndex {
     /// Check if any extern type has this method (type-agnostic lookup).
     pub fn any_type_has_method(&self, method: &str) -> bool {
         self.types.values().any(|methods| methods.contains(method))
+    }
+
+    /// Build a flat set of all method names for O(1) lookup.
+    /// Use this instead of `any_type_has_method` in hot loops.
+    pub fn all_method_set(&self) -> std::collections::HashSet<String> {
+        self.types.values()
+            .flat_map(|methods| methods.iter().cloned())
+            .collect()
     }
 
     /// Total number of type→method entries.
@@ -65,6 +76,7 @@ impl ExternMethodIndex {
         }
 
         // Collect all .rs file paths first, then parse in parallel.
+        let t0 = std::time::Instant::now();
         let mut all_files: Vec<PathBuf> = Vec::new();
 
         if let Some(std_src) = discover_std_src() {
@@ -75,41 +87,85 @@ impl ExternMethodIndex {
                 }
             }
         }
+        let std_count = all_files.len();
 
         for dep_dir in discover_cargo_deps(project_root) {
             collect_rs_files(&dep_dir, &mut all_files);
         }
+        eprintln!("    [extern] collect files: {:.1}s ({} std + {} deps = {} total)",
+            t0.elapsed().as_secs_f64(), std_count, all_files.len() - std_count, all_files.len());
 
         // Parallel parse: read + quick impl check + tree-sitter parse.
-        let per_file_results: Vec<Vec<(String, String)>> = all_files
-            .par_iter()
-            .filter_map(|path| {
-                let src = std::fs::read(path).ok()?;
-                // Quick pre-filter: skip files without "impl " to avoid tree-sitter overhead.
-                if !has_impl_keyword(&src) {
-                    return None;
-                }
-                let methods = v_code_chunk::extern_impl::extract_impl_methods(&src);
-                if methods.is_empty() {
-                    None
-                } else {
-                    Some(methods)
-                }
-            })
-            .collect();
+        // Use a dedicated thread pool (4 threads) to avoid competing with
+        // the main chunk phase's rayon global pool.
+        let t1 = std::time::Instant::now();
+        use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering::Relaxed};
+        let parsed_count = AtomicUsize::new(0);
+        let skipped_count = AtomicUsize::new(0);
+        let total_bytes = AtomicUsize::new(0);
+        // Cumulative nanoseconds (sum across all threads).
+        let ns_read = AtomicU64::new(0);
+        let ns_parse = AtomicU64::new(0);
+        let ns_walk = AtomicU64::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .thread_name(|i| format!("extern-{i}"))
+            .build();
+        let per_file_results: Vec<Vec<(String, String, Option<String>)>> = match pool {
+            Ok(ref pool) => pool.install(|| {
+                all_files
+                    .par_iter()
+                    .filter_map(|path| {
+                        let tr = std::time::Instant::now();
+                        let src = std::fs::read(path).ok()?;
+                        ns_read.fetch_add(tr.elapsed().as_nanos() as u64, Relaxed);
+                        if !has_impl_keyword(&src) {
+                            skipped_count.fetch_add(1, Relaxed);
+                            return None;
+                        }
+                        total_bytes.fetch_add(src.len(), Relaxed);
+                        parsed_count.fetch_add(1, Relaxed);
+                        let methods = v_code_chunk::extern_impl::extract_impl_methods_timed(
+                            &src, &ns_parse, &ns_walk,
+                        );
+                        if methods.is_empty() { None } else { Some(methods) }
+                    })
+                    .collect()
+            }),
+            Err(_) => Vec::new(),
+        };
+        let cores = pool.as_ref().map_or(0, |p| p.current_num_threads());
+        eprintln!("    [extern] parse: {:.1}s (parsed={}, skipped={}, {:.1}MB)",
+            t1.elapsed().as_secs_f64(),
+            parsed_count.load(Relaxed), skipped_count.load(Relaxed),
+            total_bytes.load(Relaxed) as f64 / 1_048_576.0);
+        eprintln!("      thread-sum: read={:.1}s  ts-parse={:.1}s  walk={:.1}s  (/{cores} cores)",
+            ns_read.load(Relaxed) as f64 / 1e9,
+            ns_parse.load(Relaxed) as f64 / 1e9,
+            ns_walk.load(Relaxed) as f64 / 1e9);
 
         // Merge results.
+        let t2 = std::time::Instant::now();
         let mut types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut return_types: BTreeMap<String, String> = BTreeMap::new();
         for methods in per_file_results {
-            for (type_name, method_name) in methods {
-                types.entry(type_name).or_default().insert(method_name);
+            for (type_name, method_name, ret_type) in methods {
+                types.entry(type_name.clone()).or_default().insert(method_name.clone());
+                if let Some(ret) = ret_type {
+                    let key = format!("{type_name}::{method_name}");
+                    return_types.entry(key).or_insert(ret);
+                }
             }
         }
+
+        eprintln!("    [extern] merge: {:.1}s ({} types, {} methods)",
+            t2.elapsed().as_secs_f64(), types.len(), types.values().map(|m| m.len()).sum::<usize>());
 
         let index = Self {
             version: EXTERN_CACHE_VERSION,
             fingerprint,
             types,
+            return_types,
         };
 
         index.save_cache(project_root);
@@ -129,6 +185,17 @@ impl ExternMethodIndex {
         }
     }
 
+    /// Try to load a cached extern index from the DB's parent directory.
+    ///
+    /// Looks for `extern_types.bin` in the `.code.db/cache/` directory.
+    /// Returns `None` if no cache exists (does NOT rebuild).
+    pub fn try_load_cached(db_path: &Path) -> Option<Self> {
+        // DB is typically at `<project>/.code.db`, so parent = project root.
+        let project_root = db_path.parent()?;
+        let fingerprint = compute_fingerprint(project_root);
+        Self::load_cache(project_root, &fingerprint)
+    }
+
     /// Save the index to cache.
     fn save_cache(&self, project_root: &Path) {
         let path = cache_path(project_root);
@@ -143,8 +210,10 @@ impl ExternMethodIndex {
 }
 
 /// Cache file path for the extern type index.
+///
+/// Stored in `target/v-code-cache/` so it survives DB deletion (`.code.db` removal).
 fn cache_path(project_root: &Path) -> PathBuf {
-    project_root.join(".code.db").join("cache").join("extern_types.bin")
+    project_root.join("target").join("v-code-cache").join("extern_types.bin")
 }
 
 /// Compute a fingerprint from Cargo.toml content + rustc version.
@@ -201,10 +270,12 @@ fn discover_std_src() -> Option<PathBuf> {
     }
 }
 
-/// Find cargo dependency source directories from Cargo.lock (all deps including transitive).
+/// Find cargo dependency source directories from Cargo.lock.
 ///
 /// Parses `Cargo.lock` for all package (name, version) pairs, then locates
 /// their sources in `~/.cargo/registry/src/`.
+/// Includes direct + transitive deps to ensure complete extern coverage.
+/// Speed is managed by caching — this only runs on first build.
 fn discover_cargo_deps(project_root: &Path) -> Vec<PathBuf> {
     // Get all pinned packages from Cargo.lock (direct + transitive).
     let lock_path = project_root.join("Cargo.lock");

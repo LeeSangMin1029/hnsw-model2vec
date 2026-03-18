@@ -81,6 +81,28 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [profile.dev]
 debug = "line-tables-only"
 
+# Optimize heavy deps in dev builds for faster runtime.
+[profile.dev.package.tree-sitter]
+opt-level = 3
+[profile.dev.package.tree-sitter-rust]
+opt-level = 3
+[profile.dev.package.tree-sitter-python]
+opt-level = 3
+[profile.dev.package.tree-sitter-java]
+opt-level = 3
+[profile.dev.package.tree-sitter-c]
+opt-level = 3
+[profile.dev.package.tree-sitter-javascript]
+opt-level = 3
+[profile.dev.package.v-code-chunk]
+opt-level = 3
+[profile.dev.package.v-code-intel]
+opt-level = 2
+[profile.dev.package.v-hnsw-core]
+opt-level = 3
+[profile.dev.package.bincode]
+opt-level = 3
+
 # Local: cargo build --profile local -p v-hnsw -p v-code  (incremental, fast iteration)
 # Deploy: cargo build --release -p v-hnsw -p v-code       (full optimization)
 [profile.local]

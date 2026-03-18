@@ -447,19 +447,27 @@ fn list_workspace_lib_crates(project_root: &Path) -> Vec<String> {
 /// 2. `<db>/cache/rustdoc.json` (single file, legacy)
 /// 3. `<project_root>/target/doc/` (directly from cargo rustdoc output)
 pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
-    let bin_cache = db_path.join("cache").join("rustdoc_types.bin");
+    // Check bincode caches: first in target/v-code-cache/ (survives DB deletion),
+    // then fallback to .code.db/cache/ (legacy).
+    let persistent_cache = crate::helpers::find_project_root(db_path)
+        .map(|r| r.join("target").join("v-code-cache").join("rustdoc_types.bin"));
+    let db_cache = db_path.join("cache").join("rustdoc_types.bin");
 
-    // 1. Bincode cache (fastest — single file, pre-parsed)
-    if let Some(types) = load_bincode_cache(&bin_cache) {
-        return Some(types);
+    for path in persistent_cache.iter().chain(std::iter::once(&db_cache)) {
+        if let Some(types) = load_bincode_cache(path) {
+            return Some(types);
+        }
     }
+
+    // Parse from JSON sources and save to persistent cache.
+    let save_to = persistent_cache.as_ref().unwrap_or(&db_cache);
 
     // 2. Multi-file JSON cache directory
     let cache_dir = db_path.join("cache").join("rustdoc");
     if cache_dir.is_dir()
         && let Ok(types) = RustdocTypes::from_dir(&cache_dir)
             && !types.fn_return_types.is_empty() {
-                save_bincode_cache(&bin_cache, &types);
+                save_bincode_cache(save_to, &types);
                 return Some(types);
             }
 
@@ -467,7 +475,7 @@ pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
     let cache_path = db_path.join("cache").join("rustdoc.json");
     if cache_path.exists()
         && let Ok(types) = RustdocTypes::from_file(&cache_path) {
-            save_bincode_cache(&bin_cache, &types);
+            save_bincode_cache(save_to, &types);
             return Some(types);
         }
 
@@ -477,7 +485,7 @@ pub fn load_cached(db_path: &Path) -> Option<RustdocTypes> {
         if doc_dir.is_dir()
             && let Ok(types) = RustdocTypes::from_dir(&doc_dir)
                 && !types.fn_return_types.is_empty() {
-                    save_bincode_cache(&bin_cache, &types);
+                    save_bincode_cache(save_to, &types);
                     return Some(types);
                 }
     }

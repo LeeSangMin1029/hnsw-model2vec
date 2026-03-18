@@ -358,6 +358,16 @@ impl MmapVectorStore {
         self.capacity
     }
 
+    /// Next available slot index.
+    pub fn next_slot(&self) -> u32 {
+        self.next_slot
+    }
+
+    /// Number of free (recycled) slots available.
+    pub fn free_slot_count(&self) -> u32 {
+        self.free_slots.len() as u32
+    }
+
     /// Insert multiple vectors in a batch, writing the header only once at the end.
     ///
     /// Auto-grows capacity if needed before inserting.

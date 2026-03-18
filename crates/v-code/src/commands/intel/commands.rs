@@ -165,6 +165,7 @@ pub fn run_context(
     depth: u32,
     format: OutputFormat,
     source: bool,
+    include_tests: bool,
 ) -> Result<()> {
     use v_code_intel::context_cmd;
 
@@ -201,9 +202,11 @@ pub fn run_context(
     for &idx in &result.types {
         entries.push(TaggedEntry { idx, tag: "type", sig: false, call_line: 0 });
     }
-    for &idx in &result.tests {
-        let cl = result.seeds.first().map_or(0, |&seed| graph.call_site_line(idx, seed));
-        entries.push(TaggedEntry { idx, tag: "test", sig: false, call_line: cl });
+    if include_tests {
+        for &idx in &result.tests {
+            let cl = result.seeds.first().map_or(0, |&seed| graph.call_site_line(idx, seed));
+            entries.push(TaggedEntry { idx, tag: "test", sig: false, call_line: cl });
+        }
     }
 
     // Header with counts
@@ -216,6 +219,10 @@ pub fn run_context(
     );
     println!("=== context: {symbol} ({counts}) ===\n");
     print_file_grouped(&graph, &entries, source);
+
+    if !include_tests && !result.tests.is_empty() {
+        println!("  {} tests (use --include-tests to show)\n", result.tests.len());
+    }
 
     // Show unresolved/external calls if any.
     if !result.unresolved_calls.is_empty() {
@@ -531,10 +538,11 @@ pub fn run_strings(
     for (file, items) in &groups {
         let short = apply_alias(file, &alias_map);
         println!("@ {short}");
-        for (idx, callee, value, line, pos) in items.iter().copied() {
-            let func = &graph.names[*idx as usize];
-            let line_display = if *line > 0 { format!(":{line}") } else { String::new() };
-            println!("  {line_display} {func}  {callee}(\"{value}\")  arg[{pos}]");
+        for (idx, callee, value, _line, pos) in items.iter().copied() {
+            let i = *idx as usize;
+            let func = &graph.names[i];
+            let lines = format_lines_opt(graph.lines[i]);
+            println!("  {lines} {func}  {callee}(\"{value}\")  arg[{pos}]");
         }
         println!();
     }
@@ -758,19 +766,30 @@ fn print_source_lines(file_path: &str, start: usize, end: usize) {
 }
 
 fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
+    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+    let files: Vec<&str> = path.iter()
+        .map(|&idx| super::relative_path(&graph.files[idx as usize]))
+        .collect();
+    let (alias_map, legend) = build_path_aliases(&files);
+
     for (step, &idx) in path.iter().enumerate() {
         let i = idx as usize;
         let file = super::relative_path(&graph.files[i]);
+        let short_file = apply_alias(file, &alias_map);
         let name = &graph.names[i];
-        let kind = &graph.kinds[i];
         let lines = format_lines_opt(graph.lines[i]);
-        let test_marker = if graph.is_test[i] { " [test]" } else { "" };
 
-        let arrow = if step == 0 { "  " } else { "-> " };
-        let indent = if step == 0 { "" } else { &"   ".repeat(step) };
-        println!("  {indent}{arrow}{file}{lines}  [{kind}] {name}{test_marker}");
+        let arrow = if step == 0 { "  " } else { "→ " };
+        let indent = if step == 0 { "" } else { &"  ".repeat(step) };
+        println!("  {indent}{arrow}{short_file}{lines}  {name}");
     }
     println!();
+    if !legend.is_empty() {
+        for (alias, dir) in &legend {
+            println!("{alias} = {dir}");
+        }
+        println!();
+    }
 }
 
 

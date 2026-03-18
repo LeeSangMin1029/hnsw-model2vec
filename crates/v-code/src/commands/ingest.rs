@@ -10,7 +10,6 @@ use rayon::prelude::*;
 use v_code_chunk as chunk_code;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::{generate_id, get_file_mtime, normalize_source};
-use v_hnsw_cli::commands::ingest::IngestRecord;
 
 /// Intermediate data collected per code chunk before `called_by` resolution.
 pub struct CodeChunkEntry {
@@ -89,87 +88,6 @@ pub fn lookup_called_by<'a>(
     result
 }
 
-/// Convert a single code chunk to an [`IngestRecord`].
-///
-/// Pass `called_by` slice for reverse-reference enrichment (empty slice if unavailable).
-pub fn code_chunk_to_record(
-    chunk: &chunk_code::CodeChunk,
-    source: &str,
-    file_path_str: &str,
-    lang: &str,
-    mtime: u64,
-    chunk_total: usize,
-    called_by: &[String],
-) -> IngestRecord {
-    let id = generate_id(source, chunk.chunk_index);
-    let embed_text = chunk.to_embed_text(file_path_str, called_by);
-
-    let is_test = v_code_intel::graph::is_test_path(source)
-        || chunk.name.starts_with("test_");
-
-    let mut tags = vec![
-        format!("kind:{}", chunk.kind.as_str()),
-        format!("lang:{lang}"),
-        format!("role:{}", if is_test { "test" } else { "prod" }),
-    ];
-    if !chunk.visibility.is_empty() {
-        tags.push(format!("vis:{}", chunk.visibility));
-    }
-    for caller in called_by {
-        tags.push(format!("caller:{caller}"));
-    }
-
-    IngestRecord {
-        id,
-        text: embed_text,
-        source: source.to_owned(),
-        title: Some(chunk.name.clone()),
-        tags,
-        chunk_index: chunk.chunk_index,
-        chunk_total,
-        source_modified_at: mtime,
-        custom: chunk.to_custom_fields(called_by),
-    }
-}
-
-/// Convert chunked entries into `IngestRecord`s (Pass 2 + Pass 3 combined).
-///
-/// Builds the called_by reverse index and generates records with caller data.
-pub fn entries_to_records(entries: &[CodeChunkEntry]) -> Vec<IngestRecord> {
-    let reverse_index = build_called_by_index(entries);
-
-    let chunk_total_map: HashMap<&str, usize> = {
-        let mut m: HashMap<&str, usize> = HashMap::new();
-        for entry in entries {
-            *m.entry(&entry.source).or_default() += 1;
-        }
-        m
-    };
-
-    let mut records: Vec<IngestRecord> = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        let chunk_total = chunk_total_map
-            .get(entry.source.as_str())
-            .copied()
-            .unwrap_or(1);
-
-        let called_by_refs = lookup_called_by(&reverse_index, &entry.chunk.name);
-        let called_by: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
-
-        records.push(code_chunk_to_record(
-            &entry.chunk,
-            &entry.source,
-            &entry.file_path_str,
-            entry.lang,
-            entry.mtime,
-            chunk_total,
-            &called_by,
-        ));
-    }
-
-    records
-}
 
 /// Chunk code files via tree-sitter and collect entries with file metadata.
 ///
@@ -189,24 +107,46 @@ pub fn chunk_code_files(
     }
 
     // Parallel phase: read + parse all files concurrently.
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    let ns_read = AtomicU64::new(0);
+    let ns_parse = AtomicU64::new(0);
+    let ns_meta = AtomicU64::new(0);
+    let max_parse = AtomicU64::new(0);
+    let t_par = std::time::Instant::now();
     let per_file: Vec<_> = code_files
         .par_iter()
         .filter_map(|code_path| {
             let code_path = code_path.as_ref();
+            let t_r = std::time::Instant::now();
             let source_code = std::fs::read_to_string(code_path).ok()?;
+            ns_read.fetch_add(t_r.elapsed().as_nanos() as u64, Relaxed);
             let ext = code_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let t_p = std::time::Instant::now();
             let chunks = chunk_code::chunk_for_language(ext, &source_code)?;
+            let parse_ns = t_p.elapsed().as_nanos() as u64;
+            ns_parse.fetch_add(parse_ns, Relaxed);
+            max_parse.fetch_max(parse_ns, Relaxed);
             if chunks.is_empty() {
                 return None;
             }
+            let t_m = std::time::Instant::now();
             let source = normalize_source(code_path);
             let file_path_str = code_path.to_string_lossy().to_string();
             let mtime = get_file_mtime(code_path).unwrap_or(0);
             let size = file_index::get_file_size(code_path).unwrap_or(0);
             let lang = chunk_code::lang_for_extension(ext).unwrap_or("unknown");
+            ns_meta.fetch_add(t_m.elapsed().as_nanos() as u64, Relaxed);
             Some((chunks, source, file_path_str, mtime, size, lang))
         })
         .collect();
+    let par_wall = t_par.elapsed();
+    eprintln!("    chunk thread-sum: read={:.1}s  parse={:.1}s  meta={:.1}s  max_parse={:.0}ms  (/{} cores)  par_wall={:.1}s",
+        ns_read.load(Relaxed) as f64 / 1e9,
+        ns_parse.load(Relaxed) as f64 / 1e9,
+        ns_meta.load(Relaxed) as f64 / 1e9,
+        max_parse.load(Relaxed) as f64 / 1e6,
+        rayon::current_num_threads(),
+        par_wall.as_secs_f64());
 
     // Sequential merge (cheap: just moves data).
     for (chunks, source, file_path_str, mtime, size, lang) in per_file {

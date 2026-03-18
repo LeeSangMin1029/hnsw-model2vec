@@ -33,11 +33,13 @@ pub fn load_chunks(path: &Path) -> Result<Vec<ParsedChunk>> {
         if let Ok((chunks, _)) =
             bincode::decode_from_slice::<Vec<ParsedChunk>, _>(&bytes[1..], config)
         {
+            eprintln!("  chunks.bin cache hit: {} chunks from {:.1}MB", chunks.len(), bytes.len() as f64 / 1_048_576.0);
             return Ok(chunks);
         }
     }
 
     // Cache miss — load from DB and save
+    eprintln!("  chunks.bin cache miss — loading from DB");
     let chunks = load_chunks_from_db(path)?;
     save_chunks_cache(&cache, &chunks);
     Ok(chunks)
@@ -50,7 +52,9 @@ pub fn load_chunks_from_db(path: &Path) -> Result<Vec<ParsedChunk>> {
 
     let vector_store = engine.vector_store();
     let payload_store = engine.payload_store();
-    let ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
+    let mut ids: Vec<u64> = vector_store.id_map().keys().copied().collect();
+    // Sort by ID for deterministic chunk ordering (HashMap iteration is random).
+    ids.sort_unstable();
 
     let mut chunks = Vec::new();
     for id in ids {
@@ -67,7 +71,11 @@ pub fn load_chunks_from_db(path: &Path) -> Result<Vec<ParsedChunk>> {
     Ok(chunks)
 }
 
-fn save_chunks_cache(path: &Path, chunks: &[ParsedChunk]) {
+/// Save parsed chunks to the bincode cache file.
+///
+/// Called internally after DB load, and externally by `v-code add`
+/// to pre-build the cache (avoids expensive text re-parsing on first verify).
+pub fn save_chunks_cache(path: &Path, chunks: &[ParsedChunk]) {
     let config = bincode::config::standard();
     // Prepend version byte, then encode chunks.
     let mut bytes = vec![CHUNKS_CACHE_VERSION];
@@ -77,7 +85,8 @@ fn save_chunks_cache(path: &Path, chunks: &[ParsedChunk]) {
     }
 }
 
-fn cache_path(db: &Path) -> PathBuf {
+/// Path to the chunks.bin cache file for a given database.
+pub fn cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("chunks.bin")
 }
 
@@ -112,15 +121,28 @@ pub fn load_or_build_graph(
     db: &Path,
     daemon: Option<&DaemonHooks>,
 ) -> Result<crate::graph::CallGraph> {
+    let (g, _) = load_or_build_graph_with_chunks(db, daemon)?;
+    Ok(g)
+}
+
+/// Load or build the call graph, also returning the parsed chunks if they were loaded.
+///
+/// Returns `(graph, Some(chunks))` when chunks were loaded for graph building,
+/// or `(graph, None)` when the graph was loaded from cache (chunks not needed).
+/// Callers that need both graph and chunks can avoid double-loading.
+pub fn load_or_build_graph_with_chunks(
+    db: &Path,
+    daemon: Option<&DaemonHooks>,
+) -> Result<(crate::graph::CallGraph, Option<Vec<ParsedChunk>>)> {
     if let Some(g) = crate::graph::CallGraph::load(db) {
-        return Ok(g);
+        return Ok((g, None));
     }
 
     // Try daemon first.
     let mut daemon_building = false;
     if let Some(hooks) = daemon {
         match (hooks.try_graph_build)(db) {
-            DaemonBuildResult::Ready(g) => return Ok(*g),
+            DaemonBuildResult::Ready(g) => return Ok((*g, None)),
             DaemonBuildResult::Building => daemon_building = true,
             DaemonBuildResult::Unavailable => (hooks.spawn)(db),
         }
@@ -128,15 +150,18 @@ pub fn load_or_build_graph(
 
     let chunks = load_chunks(db)?;
 
-    // Try loading cached rustdoc type info for enrichment.
+    // Try loading cached type info for enrichment.
     let rustdoc = crate::rustdoc::load_cached(db);
 
-    let g = crate::graph::CallGraph::build_with_rustdoc(&chunks, rustdoc.as_ref());
+    // Load extern index if project root is known (from db config).
+    let extern_index = crate::extern_types::ExternMethodIndex::try_load_cached(db);
+
+    let g = crate::graph::CallGraph::build_full(&chunks, rustdoc.as_ref(), extern_index.as_ref());
 
     // Don't persist tree-sitter fallback when daemon is building —
     // daemon will save the accurate graph.bin when done.
     if !daemon_building {
         let _ = g.save(db);
     }
-    Ok(g)
+    Ok((g, Some(chunks)))
 }

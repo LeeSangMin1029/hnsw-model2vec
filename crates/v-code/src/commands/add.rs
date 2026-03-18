@@ -12,10 +12,8 @@ use v_code_chunk as chunk_code;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::scan_files;
-use super::ingest::{CodeChunkEntry, entries_to_records};
-use v_hnsw_cli::commands::add::ingest::finalize_ingest_text_only;
+use super::ingest::CodeChunkEntry;
 use v_hnsw_cli::is_interrupted;
-use v_hnsw_core::VectorStore;
 use v_hnsw_storage::{StorageConfig, StorageEngine};
 
 /// Placeholder dimension for text-only storage (no real vectors).
@@ -33,8 +31,10 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     println!("Indexing code: {}", input_path.display());
     println!("Database:      {}", db_path.display());
 
-    // Scan for code files
-    let all_files = scan_files(&input_path, exclude, chunk_code::is_supported_code_file);
+    // Scan for code files — prefer `git ls-files` (instant) over walkdir (slow fs walk).
+    let t_scan = std::time::Instant::now();
+    let all_files = scan_files_fast(&input_path, exclude);
+    eprintln!("  scan: {:.1}ms ({} files)", t_scan.elapsed().as_secs_f64() * 1000.0, all_files.len());
     if all_files.is_empty() {
         anyhow::bail!(
             "No supported code files found in {}",
@@ -112,6 +112,9 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     }
 
     // === Pass 1: Chunk all files (parallel via rayon) ===
+    // Extern/rustdoc are spawned AFTER chunk to avoid allocator contention.
+    eprintln!("  [rss] start: {:.0}MB", v_code_intel::graph::current_rss_mb());
+    let t0 = std::time::Instant::now();
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
     super::ingest::chunk_code_files(
@@ -120,15 +123,32 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         &mut entries,
         &mut file_metadata_map,
     );
+    eprintln!("  chunk: {:.1}s  RSS: {:.0}MB", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
-    // === Pass 2+3: Build called_by index + generate IngestRecords ===
-    let records = entries_to_records(&entries);
-    println!("Symbols: {} (functions, structs, enums, ...)", records.len());
+    // === Build called_by + direct bulk write (zero-copy path) ===
+    println!("Symbols: {} (functions, structs, enums, ...)", entries.len());
+    let t1 = std::time::Instant::now();
+    let inserted = direct_bulk_write(&db_path, &entries, &mut engine, &file_metadata_map)?;
+    eprintln!("  ingest: {:.1}s  RSS: {:.0}MB",
+        t1.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
-    // === Remove stale + insert text-only (no embedding) + update file index ===
-    let dim = engine.vector_store().dim();
-    let result = finalize_ingest_text_only(&db_path, records, dim, &mut engine, file_metadata_map)?;
-    let inserted = result.inserted;
+    // Spawn extern + rustdoc after chunk+ingest (avoids allocator contention on
+    // Windows that causes 8x slowdown in rayon par_iter phases).
+    let project_root_for_bg = if let Ok(canonical) = input_path.canonicalize() {
+        Some(canonical)
+    } else {
+        None
+    };
+
+    let extern_handle = std::thread::spawn({
+        let root = project_root_for_bg.clone();
+        move || root.as_deref().map(v_code_intel::extern_types::ExternMethodIndex::build)
+    });
+
+    let rustdoc_db_for_bg = db_path.clone();
+    let rustdoc_handle = std::thread::spawn(move || {
+        v_code_intel::rustdoc::load_cached(&rustdoc_db_for_bg)
+    });
 
     // === Remove chunks from deleted files ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
@@ -178,5 +198,260 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         println!("Use: v-code context/blast/jump/symbols/dupes {}", db_path.display());
     }
 
+    // Pre-build chunks.bin + graph.bin caches directly from in-memory entries.
+    // This ensures verify/context/blast start instantly without rebuilding.
+    eprintln!("  [rss] before cache: {:.0}MB", v_code_intel::graph::current_rss_mb());
+    drop(engine); // Release exclusive lock.
+    let t_cache = std::time::Instant::now();
+    prebuild_caches(&db_path, &entries, &current_sources, rustdoc_handle, extern_handle);
+    eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
+
     Ok(())
+}
+
+/// Build chunks.bin + graph.bin caches directly from in-memory entries.
+///
+/// Single source of truth: `from_code_chunk` → chunks.bin → graph.bin.
+/// verify/context/blast use these caches without any rebuilding.
+fn prebuild_caches(
+    db_path: &std::path::Path,
+    new_entries: &[CodeChunkEntry],
+    current_sources: &std::collections::HashSet<String>,
+    rustdoc_handle: std::thread::JoinHandle<Option<v_code_intel::rustdoc::RustdocTypes>>,
+    extern_handle: std::thread::JoinHandle<Option<v_code_intel::extern_types::ExternMethodIndex>>,
+) {
+    use v_code_intel::parse::ParsedChunk;
+
+    let t_total = std::time::Instant::now();
+
+    let cache = v_code_intel::loader::cache_path(db_path);
+    if let Some(parent) = cache.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Collect sources that were just re-chunked.
+    let t0 = std::time::Instant::now();
+    let new_sources: std::collections::HashSet<&str> = new_entries
+        .iter()
+        .map(|e| e.source.as_str())
+        .collect();
+
+    // Convert new entries → ParsedChunks (no DB round-trip).
+    // Use file_path_str (matches to_embed_text's File: line used in DB text parsing).
+    let mut chunks: Vec<ParsedChunk> = new_entries
+        .iter()
+        .map(|e| ParsedChunk::from_code_chunk(&e.chunk, &e.file_path_str, e.chunk.imports.clone()))
+        .collect();
+
+    // For incremental adds: merge with existing cache (keep chunks from unchanged files).
+    // Only attempt if a cache file already exists (skip on full rebuild).
+    if cache.exists() {
+        if let Ok(existing) = v_code_intel::loader::load_chunks(db_path) {
+            for c in existing {
+                // Keep chunk if its file wasn't re-chunked AND still exists.
+                if !new_sources.contains(c.file.as_str())
+                    && current_sources.contains(&c.file)
+                {
+                    chunks.push(c);
+                }
+            }
+        }
+    }
+    eprintln!("    [cache] chunks convert: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
+
+    // Save chunks.bin
+    let t1 = std::time::Instant::now();
+    v_code_intel::loader::save_chunks_cache(&cache, &chunks);
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&cache) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+    eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
+
+    // Join rustdoc (was loading in bg since before chunk phase).
+    let t_rd = std::time::Instant::now();
+    let rustdoc = rustdoc_handle.join().ok().flatten();
+    eprintln!("    [cache] rustdoc join: {:.1}ms", t_rd.elapsed().as_secs_f64() * 1000.0);
+
+    // Build graph edges (extern joins inside build_full_deferred).
+    let t3 = std::time::Instant::now();
+    let graph = v_code_intel::graph::CallGraph::build_full_deferred(
+        &chunks,
+        rustdoc.as_ref(),
+        extern_handle,
+    );
+    eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
+
+    let t4 = std::time::Instant::now();
+    let _ = graph.save(db_path);
+    eprintln!("    [cache] graph.bin save: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
+    eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
+}
+
+/// Zero-copy ingest: CodeChunkEntry → Payload bincode → disk.
+///
+/// Skips IngestRecord and make_payload intermediates. Builds Payload inline
+/// from entry references, encodes directly to contiguous buffer, single I/O.
+fn direct_bulk_write(
+    db_path: &std::path::Path,
+    entries: &[super::ingest::CodeChunkEntry],
+    engine: &mut StorageEngine,
+    file_metadata_map: &HashMap<String, (u64, u64, Vec<u64>)>,
+) -> Result<u64> {
+    use v_hnsw_cli::commands::file_utils::generate_id;
+    use v_hnsw_core::{Payload, PayloadValue};
+
+    // Remove stale chunks for files being re-added.
+    let file_index_data = file_index::load_file_index(db_path)?;
+    for (path, (_, _, new_ids)) in file_metadata_map {
+        if let Some(existing) = file_index_data.get_file(path) {
+            for &old_id in &existing.chunk_ids {
+                if !new_ids.contains(&old_id) {
+                    let _ = engine.remove(old_id);
+                }
+            }
+        }
+    }
+
+    let start = std::time::Instant::now();
+
+    // Build called_by reverse index (needed for embed_text + tags).
+    let t_idx = std::time::Instant::now();
+    let reverse_index = super::ingest::build_called_by_index(entries);
+    let chunk_total_map: HashMap<&str, usize> = {
+        let mut m: HashMap<&str, usize> = HashMap::new();
+        for entry in entries {
+            *m.entry(&entry.source).or_default() += 1;
+        }
+        m
+    };
+    let idx_ms = t_idx.elapsed().as_secs_f64() * 1000.0;
+
+    // Encode payloads + texts directly into contiguous buffers (zero-copy path).
+    // No IngestRecord or intermediate Payload allocation per record.
+    let t_enc = std::time::Instant::now();
+    let config = bincode::config::standard();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Parallel encode: each entry independently produces (id, payload_bytes, text_bytes).
+    use rayon::prelude::*;
+    let encoded: Vec<(u64, Vec<u8>, String)> = entries
+        .par_iter()
+        .map(|entry| {
+            let chunk = &entry.chunk;
+            let id = generate_id(&entry.source, chunk.chunk_index);
+            let chunk_total = chunk_total_map.get(entry.source.as_str()).copied().unwrap_or(1);
+            let called_by_refs = super::ingest::lookup_called_by(&reverse_index, &chunk.name);
+
+            let is_test = v_code_intel::graph::is_test_path(&entry.source)
+                || chunk.name.starts_with("test_");
+
+            let mut tags = Vec::with_capacity(4 + called_by_refs.len());
+            tags.push(format!("kind:{}", chunk.kind.as_str()));
+            tags.push(format!("lang:{}", entry.lang));
+            tags.push(format!("role:{}", if is_test { "test" } else { "prod" }));
+            if !chunk.visibility.is_empty() {
+                tags.push(format!("vis:{}", chunk.visibility));
+            }
+            for caller in &called_by_refs {
+                tags.push(format!("caller:{caller}"));
+            }
+
+            let called_by_strings: Vec<String> = called_by_refs.iter().map(|s| (*s).to_owned()).collect();
+            let custom = chunk.to_custom_fields(&called_by_strings);
+
+            let mut custom_with_title = custom;
+            custom_with_title.insert("title".into(), PayloadValue::String(chunk.name.clone()));
+
+            let payload = Payload {
+                source: entry.source.clone(),
+                tags,
+                created_at: now,
+                source_modified_at: entry.mtime,
+                chunk_index: chunk.chunk_index as u32,
+                chunk_total: chunk_total as u32,
+                custom: custom_with_title,
+            };
+
+            let payload_bytes = bincode::encode_to_vec(&payload, config)
+                .unwrap_or_default();
+
+            let embed_text = chunk.to_embed_text(&entry.file_path_str, &called_by_strings);
+
+            (id, payload_bytes, embed_text)
+        })
+        .collect();
+
+    // Sequential merge into contiguous buffers.
+    let mut payload_buf: Vec<u8> = Vec::with_capacity(entries.len() * 256);
+    let mut text_buf: Vec<u8> = Vec::with_capacity(entries.len() * 512);
+    let mut ids: Vec<u64> = Vec::with_capacity(encoded.len());
+    let mut payload_offsets: Vec<(u64, u32)> = Vec::with_capacity(encoded.len());
+    let mut text_offsets: Vec<(u64, u32)> = Vec::with_capacity(encoded.len());
+
+    for (id, p_bytes, embed_text) in &encoded {
+        let p_start = payload_buf.len() as u64;
+        payload_buf.extend_from_slice(p_bytes);
+        payload_offsets.push((p_start, p_bytes.len() as u32));
+
+        let t_start = text_buf.len() as u64;
+        let t_bytes = embed_text.as_bytes();
+        text_buf.extend_from_slice(t_bytes);
+        text_offsets.push((t_start, t_bytes.len() as u32));
+
+        ids.push(*id);
+    }
+    let enc_ms = t_enc.elapsed().as_secs_f64() * 1000.0;
+
+    // Write to engine using raw bulk API.
+    let t_write = std::time::Instant::now();
+    engine.bulk_load_raw(&ids, &payload_buf, &payload_offsets, &text_buf, &text_offsets)
+        .context("Failed to bulk load")?;
+    let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
+
+    // Update file index.
+    let t_fi = std::time::Instant::now();
+    let mut file_idx = file_index::load_file_index(db_path)?;
+    for (path, (mtime, size, chunk_ids)) in file_metadata_map {
+        file_idx.update_file(path.to_string(), *mtime, *size, chunk_ids.clone());
+    }
+    file_index::save_file_index(db_path, &file_idx)?;
+    let fi_ms = t_fi.elapsed().as_secs_f64() * 1000.0;
+
+    let inserted = entries.len() as u64;
+    println!("\nInserted {inserted} chunks in {:.2}s (idx={:.0}ms enc={:.0}ms write={:.0}ms fidx={:.0}ms)",
+        start.elapsed().as_secs_f64(), idx_ms, enc_ms, write_ms, fi_ms);
+
+    Ok(inserted)
+}
+
+/// Fast file scan: `git ls-files` (instant from index) with walkdir fallback.
+fn scan_files_fast(input_path: &std::path::Path, exclude: &[String]) -> Vec<PathBuf> {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .current_dir(input_path)
+        .output()
+    {
+        if output.status.success() {
+            let files: Vec<PathBuf> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let path = input_path.join(line);
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if chunk_code::is_supported_code_file(ext) {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !files.is_empty() {
+                return files;
+            }
+        }
+    }
+    // Fallback to walkdir.
+    scan_files(input_path, exclude, chunk_code::is_supported_code_file)
 }

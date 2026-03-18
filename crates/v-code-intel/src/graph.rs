@@ -7,7 +7,7 @@
 //! - Add new traversal methods (e.g., shortest path) as `impl CallGraph` methods.
 //! - Add new fields to `CallGraph` and update `build()` (cache auto-invalidates via source hash).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -19,6 +19,49 @@ use crate::rustdoc::RustdocTypes;
 /// Source hash of graph.rs — auto-computed by build.rs.
 /// Invalidates cache whenever resolve logic changes, no manual version bump needed.
 const GRAPH_SOURCE_HASH: &str = env!("GRAPH_SOURCE_HASH");
+
+/// Get current process RSS in MB (Windows).
+pub fn current_rss_mb() -> f64 {
+    #[cfg(windows)]
+    {
+        use std::mem::MaybeUninit;
+        #[repr(C)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn K32GetProcessMemoryInfo(
+                process: *mut std::ffi::c_void,
+                ppsmemcounters: *mut ProcessMemoryCounters,
+                cb: u32,
+            ) -> i32;
+        }
+        #[expect(unsafe_code, reason = "FFI for memory profiling")]
+        // SAFETY: GetCurrentProcess returns a pseudo-handle, K32GetProcessMemoryInfo reads only.
+        unsafe {
+            let mut pmc = MaybeUninit::<ProcessMemoryCounters>::zeroed().assume_init();
+            pmc.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+            if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) != 0 {
+                return pmc.working_set_size as f64 / (1024.0 * 1024.0);
+            }
+        }
+        0.0
+    }
+    #[cfg(not(windows))]
+    {
+        0.0
+    }
+}
 
 /// Pre-built call graph with bidirectional adjacency lists.
 #[derive(bincode::Encode, bincode::Decode)]
@@ -59,6 +102,9 @@ pub struct CallGraph {
     /// Sorted (type::field, [chunk_indices]) for field-level blast radius.
     /// Key format: "typename::fieldname" (lowercase).
     pub field_access_index: Vec<(String, Vec<u32>)>,
+    /// chunk index → extern calls [(call_name, reason)].
+    /// Populated during graph build when ExternMethodIndex is available.
+    pub extern_calls: Vec<Vec<(String, String)>>,
 }
 
 /// Shared chunk metadata collected during graph construction.
@@ -71,9 +117,9 @@ struct ChunkMeta {
     is_test: Vec<bool>,
     name_index: Vec<(String, u32)>,
     /// Single-value name → index map (tree-sitter resolution).
-    exact: BTreeMap<String, u32>,
+    exact: HashMap<String, u32>,
     /// Short (last `::` segment) → index map.
-    short: BTreeMap<String, u32>,
+    short: HashMap<String, u32>,
     /// Enum type short names (lowercase). Used to identify enum variant
     /// constructors (`Type::Variant(args)`) that look like function calls
     /// to tree-sitter but are not actual call edges.
@@ -86,8 +132,8 @@ struct ChunkMeta {
 impl ChunkMeta {
     fn collect(chunks: &[ParsedChunk]) -> Self {
         let len = chunks.len();
-        let mut exact = BTreeMap::new();
-        let mut short = BTreeMap::new();
+        let mut exact = HashMap::new();
+        let mut short = HashMap::new();
         let mut names = Vec::with_capacity(len);
         let mut files = Vec::with_capacity(len);
         let mut kinds = Vec::with_capacity(len);
@@ -214,266 +260,325 @@ impl CallGraph {
         Self::build_with_rustdoc(chunks, None)
     }
 
-    /// Build the call graph, optionally enriched with rustdoc JSON type info.
+    /// Build the call graph, optionally enriched with rustdoc JSON type info
+    /// and extern method index for internal/external call classification.
     pub fn build_with_rustdoc(chunks: &[ParsedChunk], rustdoc: Option<&RustdocTypes>) -> Self {
-        let meta = ChunkMeta::collect(chunks);
-        let mut adj = AdjState::new(chunks.len());
-        let owner_types = collect_owner_types(chunks, &meta);
-        let owner_field_types = collect_owner_field_types(chunks);
-        let return_type_map = build_return_type_map(chunks);
-        let trait_methods = collect_trait_methods(chunks);
-        let method_owners = build_method_owner_index(chunks);
-        let instantiated = collect_instantiated_types(chunks);
-        let trait_impl_methods = build_trait_impl_method_map(chunks);
-
-        // Pass 1: resolve with static type info.
-        for (src, c) in chunks.iter().enumerate() {
-            Self::resolve_chunk_edges(src, c, &meta.exact, &meta.short, &meta.kinds, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &mut adj, &HashSet::new(), &meta.enum_types, &meta.enum_variants);
-        }
-
-        // Pass 2+: iterative convergence.
-        // Use resolved callees to infer more receiver types via return_type_map,
-        // then re-resolve previously unresolved calls.
-        // Accumulate extra receiver types across iterations so earlier discoveries persist.
-        let mut extra_receiver_types: Vec<BTreeMap<String, String>> = vec![BTreeMap::new(); chunks.len()];
-        for _pass in 0..3 {
-            let prev_total: usize = adj.callees.iter().map(|c| c.len()).sum();
-            // Build enriched receiver types from two sources:
-            // (A) Forward: let_call_bindings + return_type_map (existing)
-            // (B) Reverse argument propagation: callee param_types → caller variables
-
-            // Build callee param_types index: chunk_idx → param_pos → type (lowercase)
-            let callee_param_index: Vec<BTreeMap<u8, String>> = chunks.iter().map(|c| {
-                c.param_types.iter().enumerate().filter_map(|(i, (name, ty))| {
-                    if name.to_lowercase() == "self" || ty.is_empty() { return None; }
-                    let ty_lower = extract_leaf_type(&ty.to_lowercase()).to_owned();
-                    Some((i as u8, ty_lower))
-                }).collect()
-            }).collect();
-
-            for (src, chunk) in chunks.iter().enumerate() {
-                // (A) Forward: let_call_bindings → return type propagation
-                for (var_name, callee_name) in &chunk.let_call_bindings {
-                    let callee_lower = callee_name.to_lowercase();
-                    for &callee_idx in &adj.callees[src] {
-                        let ci = callee_idx as usize;
-                        let resolved_lower = meta.names[ci].to_lowercase();
-                        let resolved_short = resolved_lower.rsplit("::").next().unwrap_or(&resolved_lower);
-                        let callee_short = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
-                        let callee_leaf = callee_short.rsplit('.').next().unwrap_or(callee_short);
-                        if resolved_short == callee_leaf
-                            && let Some(ret) = return_type_map.get(&resolved_lower) {
-                                extra_receiver_types[src]
-                                    .entry(var_name.to_lowercase())
-                                    .or_insert_with(|| ret.clone());
-                            }
-                    }
-                }
-
-                // (B) Reverse argument propagation (Andersen/PoTo style):
-                // For each param_flow (param_name, _, callee_raw, callee_arg, _),
-                // if callee_raw resolved to a known chunk, use that chunk's
-                // param_types[callee_arg] to infer param_name's type.
-                for (param_name, _param_pos, callee_raw, callee_arg, _line) in &chunk.param_flows {
-                    let callee_lower = callee_raw.to_lowercase();
-                    let callee_leaf = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
-                    let callee_leaf = callee_leaf.rsplit('.').next().unwrap_or(callee_leaf);
-                    for &callee_idx in &adj.callees[src] {
-                        let ci = callee_idx as usize;
-                        let resolved_lower = meta.names[ci].to_lowercase();
-                        let resolved_short = resolved_lower.rsplit("::").next().unwrap_or(&resolved_lower);
-                        if resolved_short != callee_leaf { continue; }
-                        // callee_arg is 0-based; +1 to skip self for methods
-                        let param_idx = *callee_arg;
-                        if let Some(ty) = callee_param_index[ci].get(&param_idx)
-                            && !ty.is_empty() {
-                                extra_receiver_types[src]
-                                    .entry(param_name.to_lowercase())
-                                    .or_insert_with(|| ty.clone());
-                            }
-                    }
-                }
-            }
-
-            // Re-resolve only chunks that got new receiver types.
-            let mut new_adj = AdjState::new(chunks.len());
-            for (src, c) in chunks.iter().enumerate() {
-                if extra_receiver_types[src].is_empty() {
-                    // Copy existing edges.
-                    new_adj.callees[src] = adj.callees[src].clone();
-                    new_adj.callers[src] = adj.callers[src].clone();
-                    new_adj.call_sites[src] = adj.call_sites[src].clone();
-                    continue;
-                }
-                // Build skip set from already-resolved callee short names.
-                let skip: HashSet<String> = adj.callees[src].iter().map(|&idx| {
-                    let name = &meta.names[idx as usize];
-                    name.rsplit("::").next().unwrap_or(name).to_lowercase()
-                }).collect();
-                // Merge extra receiver types into chunk's let_call_bindings context.
-                // We pass extra types via a temporary enriched chunk.
-                let mut enriched = c.clone();
-                for (var, ty) in &extra_receiver_types[src] {
-                    enriched.local_types.push((var.clone(), ty.clone()));
-                }
-                Self::resolve_chunk_edges(src, &enriched, &meta.exact, &meta.short, &meta.kinds, &owner_types, &owner_field_types, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &mut new_adj, &skip, &meta.enum_types, &meta.enum_variants);
-                // Merge with existing edges.
-                for &callee in &adj.callees[src] {
-                    if !new_adj.callees[src].contains(&callee) {
-                        new_adj.callees[src].push(callee);
-                    }
-                }
-                for &caller in &adj.callers[src] {
-                    if !new_adj.callers[src].contains(&caller) {
-                        new_adj.callers[src].push(caller);
-                    }
-                }
-                for &site in &adj.call_sites[src] {
-                    if !new_adj.call_sites[src].contains(&site) {
-                        new_adj.call_sites[src].push(site);
-                    }
-                }
-            }
-            adj = new_adj;
-            let new_total: usize = adj.callees.iter().map(|c| c.len()).sum();
-            if new_total == prev_total {
-                break; // Converged
-            }
-        }
-
-        adj.dedup();
-        Self::from_parts(meta, adj, chunks)
+        Self::build_full(chunks, rustdoc, None)
     }
 
-    /// Resolve tree-sitter edges for a single chunk.
-    ///
-    /// `skip_calls` contains short names already resolved — those are skipped.
-    #[expect(clippy::too_many_arguments, reason = "graph resolution needs all lookup tables")]
-    fn resolve_chunk_edges(
-        src: usize,
-        chunk: &ParsedChunk,
-        exact: &BTreeMap<String, u32>,
-        short: &BTreeMap<String, u32>,
-        kinds: &[String],
-        owner_types: &BTreeMap<String, Vec<String>>,
-        owner_field_types: &BTreeMap<String, BTreeMap<String, String>>,
-        return_type_map: &BTreeMap<String, String>,
-        trait_methods: &BTreeSet<String>,
-        method_owners: &BTreeMap<String, Vec<String>>,
-        instantiated: &HashSet<String>,
-        trait_impl_methods: &BTreeMap<String, Vec<String>>,
+    /// Build the call graph with all available type information.
+    pub fn build_full(
+        chunks: &[ParsedChunk],
         rustdoc: Option<&RustdocTypes>,
-        adj: &mut AdjState,
-        skip_calls: &HashSet<String>,
-        enum_types: &HashSet<String>,
-        enum_variants: &HashSet<String>,
-    ) {
-        let imports = build_import_map(&chunk.imports);
-        let self_type = owning_type(&chunk.name);
-        let call_types = extract_call_types(&chunk.calls);
-        let mut enriched_types = chunk.types.clone();
-        if let Some(ref owner) = self_type
-            && let Some(extra) = owner_types.get(owner.as_str()) {
-                for t in extra {
-                    if !enriched_types.contains(t) {
-                        enriched_types.push(t.clone());
-                    }
-                }
-            }
-        // Build receiver name → type lookup from param/local/field types.
-        let mut receiver_types = build_receiver_type_map(chunk);
-        // Register self type so chained access (self.field.method) can resolve.
-        if let Some(ref owner) = self_type {
-            receiver_types.entry("self".to_owned()).or_insert_with(|| owner.clone());
-            // Enrich with struct field types for self.field resolution.
-            if let Some(fields) = owner_field_types.get(owner.as_str()) {
-                for (field_name, field_type) in fields {
-                    receiver_types.entry(field_name.clone()).or_insert_with(|| field_type.clone());
-                }
-            }
-        }
-        // Infer local variable types from return_type_map.
-        // `let x = Foo::new()` → if return_type_map["foo::new"] = "foo", then x: foo.
-        infer_local_types_from_calls(&chunk.calls, &chunk.let_call_bindings, return_type_map, &mut receiver_types);
-        // Generic bound resolution: `fn foo<T: Trait>(x: T)` → x's type = trait name.
-        // This allows `x.method()` to resolve to `Trait::method`.
-        if let Some(ref sig) = chunk.signature {
-            let bounds = extract_generic_bounds(sig);
-            for (type_param, trait_bound) in &bounds {
-                // Find params whose type is this generic param (e.g., param type "T")
-                for (param_name, param_type) in &chunk.param_types {
-                    if param_type.to_lowercase() == *type_param {
-                        receiver_types
-                            .entry(param_name.to_lowercase())
-                            .or_insert_with(|| trait_bound.clone());
-                    }
-                }
-            }
-        }
-        // Iterative resolve: 2 passes.
-        // Pass 1: resolve what we can, collect resolved return types.
-        // Pass 2: re-attempt unresolved calls with enriched receiver_types.
-        let mut resolved_set = vec![false; chunk.calls.len()];
-        for pass in 0..2 {
-            for (call_idx, call) in chunk.calls.iter().enumerate() {
-                if resolved_set[call_idx] {
-                    continue;
-                }
-                if !skip_calls.is_empty() {
-                    let call_short = call.to_lowercase();
-                    let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
-                    if skip_calls.contains(call_leaf) {
-                        resolved_set[call_idx] = true;
-                        continue;
-                    }
-                }
-                if let Some(tgt) = resolve_with_imports(
-                    call, exact, short, &imports,
-                    self_type.as_deref(), &enriched_types, &call_types,
-                    &receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants,
-                ) {
-                    let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
-                    adj.add_edge(src, tgt, call_line);
-                    resolved_set[call_idx] = true;
+        extern_index: Option<&crate::extern_types::ExternMethodIndex>,
+    ) -> Self {
+        // Wrap extern_index in a pre-completed handle to reuse build_full_inner.
+        Self::build_full_inner(chunks, rustdoc, || extern_index.cloned())
+    }
 
-                    // After pass 1, propagate return types to receiver_types
-                    // for let_call_bindings that reference this callee.
-                    if pass == 0 {
-                        let call_lower = call.to_lowercase();
-                        if let Some(ret_type) = return_type_map.get(&call_lower).or_else(|| {
-                            // Try qualified lookup: for receiver.method calls,
-                            // build Type::method key from receiver_types.
-                            let (recv, method) = call_lower.rsplit_once('.')?;
-                            let recv_leaf = recv.rsplit_once('.').map_or(recv, |p| p.1);
-                            let recv_type = receiver_types.get(recv_leaf)?;
-                            let qualified = format!("{recv_type}::{method}");
-                            return_type_map.get(&qualified)
-                        }) {
-                            // Find bindings where callee matches this call
-                            for (var_name, callee_name) in &chunk.let_call_bindings {
-                                if callee_name.to_lowercase() == call_lower {
-                                    receiver_types
-                                        .entry(var_name.to_lowercase())
-                                        .or_insert_with(|| ret_type.clone());
+    /// Build the call graph with deferred extern index (runs in parallel).
+    ///
+    /// Resolves all graph edges first, then joins the extern index thread
+    /// for classify_extern_calls. This overlaps extern parsing with graph build.
+    pub fn build_full_deferred(
+        chunks: &[ParsedChunk],
+        rustdoc: Option<&RustdocTypes>,
+        extern_handle: std::thread::JoinHandle<Option<crate::extern_types::ExternMethodIndex>>,
+    ) -> Self {
+        Self::build_full_inner(chunks, rustdoc, || extern_handle.join().ok().flatten())
+    }
+
+
+    /// Core graph build logic. `get_extern` is called after edge resolution
+    /// to obtain the extern index for classification.
+    fn build_full_inner(
+        chunks: &[ParsedChunk],
+        rustdoc: Option<&RustdocTypes>,
+        get_extern: impl FnOnce() -> Option<crate::extern_types::ExternMethodIndex>,
+    ) -> Self {
+        let rss0 = current_rss_mb();
+        eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
+
+        let t0 = std::time::Instant::now();
+        let meta = ChunkMeta::collect(chunks);
+        eprintln!("      [graph] meta collect: {:.1}ms  RSS: {:.1}MB (+{:.1})", t0.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
+
+        let t1 = std::time::Instant::now();
+        let mut adj = AdjState::new(chunks.len());
+        // Build index tables in parallel (all read-only on chunks).
+        let (left, right) = rayon::join(
+            || rayon::join(
+                || rayon::join(
+                    || collect_owner_types(chunks, &meta),
+                    || collect_owner_field_types(chunks),
+                ),
+                || rayon::join(
+                    || build_return_type_map(chunks),
+                    || collect_trait_methods(chunks),
+                ),
+            ),
+            || rayon::join(
+                || build_method_owner_index(chunks),
+                || rayon::join(
+                    || collect_instantiated_types(chunks),
+                    || build_trait_impl_method_map(chunks),
+                ),
+            ),
+        );
+        let ((owner_types, owner_field_types), (return_type_map, trait_methods)) = left;
+        let (method_owners, (instantiated, trait_impl_methods)) = right;
+        eprintln!("      [graph] index tables: {:.1}ms  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
+
+        // Pre-compute per-chunk context (import_map, receiver_types, etc.) — done once.
+        let t2 = std::time::Instant::now();
+        use rayon::prelude::*;
+        let mut ctxs: Vec<ChunkCtx> = chunks.par_iter()
+            .map(|c| build_chunk_ctx(c, &owner_types, &owner_field_types, &return_type_map))
+            .collect();
+
+        // Pass 1: parallel resolve — each chunk independently collects edges.
+        let par_results: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>)> = chunks.par_iter()
+            .zip(ctxs.par_iter_mut())
+            .enumerate()
+            .map(|(src, (c, ctx))| {
+                let empty_skip = HashSet::new();
+                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &empty_skip, &meta.enum_types, &meta.enum_variants)
+            })
+            .collect();
+
+        // Merge parallel results into AdjState.
+        for (src, (edges, type_edges, _receiver_updates)) in par_results.iter().enumerate() {
+            for &(tgt, line) in edges {
+                adj.add_edge(src, tgt, line);
+            }
+            for &(tgt, _) in type_edges {
+                let tgt_usize = tgt as usize;
+                if tgt_usize != src {
+                    adj.callees[src].push(tgt);
+                    adj.callers[tgt_usize].push(src as u32);
+                }
+            }
+        }
+        // Apply receiver_type updates from pass 1.
+        for (src, (_, _, receiver_updates)) in par_results.into_iter().enumerate() {
+            for (var, ty) in receiver_updates {
+                ctxs[src].receiver_types.entry(var).or_insert(ty);
+            }
+        }
+        eprintln!("      [graph] pass 1 resolve: {:.1}ms ({} chunks)  RSS: {:.1}MB (+{:.1})", t2.elapsed().as_secs_f64() * 1000.0, chunks.len(), current_rss_mb(), current_rss_mb() - rss0);
+
+        // Pre-compute lowercase name + short (last :: segment) for each chunk.
+        let names_lower: Vec<String> = meta.names.iter().map(|n| n.to_lowercase()).collect();
+        let names_short: Vec<&str> = names_lower.iter().map(|n| n.rsplit("::").next().unwrap_or(n)).collect();
+
+        // Pre-compute callee param index (unchanged across passes).
+        let callee_param_index: Vec<HashMap<u8, String>> = chunks.iter().map(|c| {
+            c.param_types.iter().enumerate().filter_map(|(i, (name, ty))| {
+                if name.eq_ignore_ascii_case("self") || ty.is_empty() { return None; }
+                let ty_lower = extract_leaf_type(&ty.to_lowercase()).to_owned();
+                Some((i as u8, ty_lower))
+            }).collect()
+        }).collect();
+
+        // Pass 2+: iterative convergence.
+        let t_iter = std::time::Instant::now();
+        let mut iter_passes = 0u32;
+        for _pass in 0..3 {
+            let prev_total: usize = adj.callees.iter().map(|c| c.len()).sum();
+
+            // Parallel: compute extra_receiver_types per chunk (read-only on adj).
+            let extra_receiver_types: Vec<HashMap<String, String>> = chunks.par_iter()
+                .enumerate()
+                .map(|(src, chunk)| {
+                    let mut extra = HashMap::new();
+                    for (var_name, callee_name) in &chunk.let_call_bindings {
+                        let callee_lower = callee_name.to_lowercase();
+                        let callee_short = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
+                        let callee_leaf = callee_short.rsplit('.').next().unwrap_or(callee_short);
+                        for &callee_idx in &adj.callees[src] {
+                            let ci = callee_idx as usize;
+                            if names_short[ci] == callee_leaf {
+                                if let Some(ret) = return_type_map.get(&names_lower[ci]) {
+                                    extra.entry(var_name.to_lowercase())
+                                        .or_insert_with(|| ret.clone());
                                 }
                             }
                         }
                     }
+                    for (param_name, _param_pos, callee_raw, callee_arg, _line) in &chunk.param_flows {
+                        let callee_lower = callee_raw.to_lowercase();
+                        let callee_leaf_full = callee_lower.rsplit("::").next().unwrap_or(&callee_lower);
+                        let callee_leaf = callee_leaf_full.rsplit('.').next().unwrap_or(callee_leaf_full);
+                        for &callee_idx in &adj.callees[src] {
+                            let ci = callee_idx as usize;
+                            if names_short[ci] != callee_leaf { continue; }
+                            let param_idx = *callee_arg;
+                            if let Some(ty) = callee_param_index[ci].get(&param_idx) {
+                                if !ty.is_empty() {
+                                    extra.entry(param_name.to_lowercase())
+                                        .or_insert_with(|| ty.clone());
+                                }
+                            }
+                        }
+                    }
+                    extra
+                })
+                .collect();
+
+            // Merge extra receiver types into ctxs.
+            for (src, extra) in extra_receiver_types.iter().enumerate() {
+                for (var, ty) in extra {
+                    ctxs[src].receiver_types.entry(var.clone()).or_insert_with(|| ty.clone());
                 }
             }
+
+            // Parallel delta resolve: only enriched chunks (read-only ctx, no clone needed).
+            let enriched_indices: Vec<usize> = (0..chunks.len())
+                .filter(|&src| !extra_receiver_types[src].is_empty())
+                .collect();
+            let delta_results: Vec<(usize, Vec<(u32, u32)>)> = enriched_indices.par_iter()
+                .map(|&src| {
+                    let skip: HashSet<String> = adj.callees[src].iter().map(|&idx| {
+                        names_short[idx as usize].to_owned()
+                    }).collect();
+                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &skip, &meta.enum_types, &meta.enum_variants, &meta.kinds);
+                    (src, edges)
+                })
+                .collect();
+
+            // Merge delta into adj.
+            for (src, edges) in &delta_results {
+                for &(tgt, line) in edges {
+                    let tgt_usize = tgt as usize;
+                    if tgt_usize != *src && !adj.callees[*src].contains(&tgt) {
+                        adj.callees[*src].push(tgt);
+                        adj.callers[tgt_usize].push(*src as u32);
+                        adj.call_sites[*src].push((tgt, line));
+                    }
+                }
+            }
+            let new_total: usize = adj.callees.iter().map(|c| c.len()).sum();
+            iter_passes += 1;
+            let enriched_count = extra_receiver_types.iter().filter(|m| !m.is_empty()).count();
+            eprintln!("        [iter] pass {iter_passes}: edges {prev_total}->{new_total} (+{}), enriched chunks: {enriched_count}, RSS: {:.1}MB", new_total - prev_total, current_rss_mb());
+            if new_total == prev_total {
+                break;
+            }
         }
-        resolve_type_ref_edges(src, &chunk.types, exact, short, &imports, &mut adj.callees, &mut adj.callers);
+        eprintln!("      [graph] pass 2+ iterative: {:.1}ms ({iter_passes} passes)  RSS: {:.1}MB (+{:.1})", t_iter.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
+
+        let t3 = std::time::Instant::now();
+        adj.dedup();
+        eprintln!("      [graph] dedup: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
+
+        // Get extern index (may block on thread join or return immediately).
+        let t4 = std::time::Instant::now();
+        let extern_index = get_extern();
+        eprintln!("      [graph] extern join: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
+
+        let t5 = std::time::Instant::now();
+        let extern_calls = Self::classify_extern_calls(
+            chunks, &meta, &adj, &return_type_map, &owner_field_types, extern_index.as_ref(),
+        );
+        eprintln!("      [graph] classify extern: {:.1}ms  RSS: {:.1}MB (+{:.1})", t5.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
+
+        Self::from_parts(meta, adj, extern_calls, chunks, &owner_field_types)
+    }
+
+    // resolve_with_ctx is a free function defined outside impl CallGraph.
+
+
+    /// Classify unresolved calls as extern or truly unresolved.
+    ///
+    /// For each function chunk, finds calls not resolved by the graph and checks
+    /// if they match extern types (std/deps). Returns per-chunk extern call lists.
+    fn classify_extern_calls(
+        chunks: &[ParsedChunk],
+        meta: &ChunkMeta,
+        adj: &AdjState,
+        return_type_map: &HashMap<String, String>,
+        owner_field_types: &HashMap<String, HashMap<String, String>>,
+        extern_index: Option<&crate::extern_types::ExternMethodIndex>,
+    ) -> Vec<Vec<(String, String)>> {
+        let n = chunks.len();
+        let Some(ext) = extern_index else {
+            return vec![Vec::new(); n];
+        };
+
+        // Build project type short names for "is this a project type?" checks.
+        let project_type_shorts: HashSet<String> = {
+            let mut set = HashSet::new();
+            for (i, kind) in meta.kinds.iter().enumerate() {
+                if matches!(kind.as_str(), "struct" | "enum" | "trait" | "impl") {
+                    let leaf = meta.names[i].rsplit("::").next().unwrap_or(&meta.names[i]).to_lowercase();
+                    set.insert(leaf);
+                }
+            }
+            set
+        };
+
+        // Flat set for O(1) "any extern type has this method?" lookup.
+        let extern_all_methods = ext.all_method_set();
+
+        use rayon::prelude::*;
+        chunks.par_iter().enumerate().map(|(i, chunk)| {
+            if meta.kinds[i] != "function" {
+                return Vec::new();
+            }
+
+            let resolved_shorts: HashSet<String> = adj.callees[i].iter().map(|&idx| {
+                let name = &meta.names[idx as usize];
+                name.rsplit("::").next().unwrap_or(name).to_lowercase()
+            }).collect();
+
+            let receiver_types = build_receiver_type_map(chunk);
+            let mut extern_calls = Vec::new();
+
+            for call in &chunk.calls {
+                let call_lower = call.to_lowercase();
+                let short = if let Some((_, s)) = call_lower.rsplit_once("::") {
+                    s
+                } else if let Some((_, s)) = call_lower.rsplit_once('.') {
+                    s
+                } else {
+                    &call_lower
+                };
+
+                if resolved_shorts.contains(short) {
+                    continue;
+                }
+
+                if let Some(reason) = check_extern(
+                    &call_lower, &receiver_types, ext, &project_type_shorts,
+                    return_type_map, &extern_all_methods, owner_field_types,
+                ) {
+                    extern_calls.push((call.clone(), reason));
+                }
+            }
+            extern_calls
+        }).collect()
     }
 
     /// Assemble a `CallGraph` from pre-built metadata and adjacency state.
-    fn from_parts(meta: ChunkMeta, adj: AdjState, chunks: &[ParsedChunk]) -> Self {
-        let trait_impls = build_trait_impls(&meta.names, &meta.kinds, &meta.exact, &meta.short);
-        let string_args = collect_string_args(chunks);
+    fn from_parts(meta: ChunkMeta, adj: AdjState, extern_calls: Vec<Vec<(String, String)>>, chunks: &[ParsedChunk], owner_field_types: &HashMap<String, HashMap<String, String>>) -> Self {
+        let t = std::time::Instant::now();
+        let ((trait_impls, string_args), (field_access_index, param_flows)) = rayon::join(
+            || rayon::join(
+                || build_trait_impls(&meta.names, &meta.kinds, &meta.exact, &meta.short),
+                || collect_string_args(chunks),
+            ),
+            || rayon::join(
+                || build_field_access_index(chunks, owner_field_types),
+                || {
+                    #[expect(clippy::type_complexity, reason = "tuple layout mirrors string_args")]
+                    let pf: Vec<Vec<(String, u8, String, u8, u32)>> =
+                        chunks.iter().map(|c| c.param_flows.clone()).collect();
+                    pf
+                },
+            ),
+        );
         let string_index = build_string_index(&string_args);
-        #[expect(clippy::type_complexity, reason = "tuple layout mirrors string_args")]
-        let param_flows: Vec<Vec<(String, u8, String, u8, u32)>> =
-            chunks.iter().map(|c| c.param_flows.clone()).collect();
-        let field_access_index = build_field_access_index(chunks, &meta);
+        eprintln!("      [graph] from_parts: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
         Self {
             version: GRAPH_SOURCE_HASH.to_owned(),
             names: meta.names,
@@ -491,6 +596,7 @@ impl CallGraph {
             string_index,
             param_flows,
             field_access_index,
+            extern_calls,
         }
     }
 
@@ -642,38 +748,232 @@ fn graph_cache_path(db: &Path) -> std::path::PathBuf {
 ///    a type that has `::method` → resolve to that type's method
 /// 6. Short name fallback for `::` calls; type-gated for `.` calls (no hardcoded blocklist)
 #[expect(clippy::too_many_arguments, reason = "graph resolution needs all lookup tables")]
+/// Pre-computed per-chunk context for resolve. Built once, reused across passes.
+#[derive(Clone)]
+struct ChunkCtx {
+    imports: HashMap<String, String>,
+    self_type: Option<String>,
+    call_types_set: HashSet<String>,
+    import_leaves: HashSet<String>,
+    source_types_set: HashSet<String>,
+    receiver_types: HashMap<String, String>,
+}
+
+/// Build per-chunk context (expensive preprocessing done once).
+fn build_chunk_ctx(
+    chunk: &ParsedChunk,
+    owner_types: &HashMap<String, Vec<String>>,
+    owner_field_types: &HashMap<String, HashMap<String, String>>,
+    return_type_map: &HashMap<String, String>,
+) -> ChunkCtx {
+    let imports = build_import_map(&chunk.imports);
+    let self_type = owning_type(&chunk.name);
+    let call_types = extract_call_types(&chunk.calls);
+    let call_types_set: HashSet<String> = call_types.iter().map(|t| t.to_lowercase()).collect();
+    let import_leaves: HashSet<String> = imports.values()
+        .map(|v| v.rsplit("::").next().unwrap_or(v).to_owned())
+        .collect();
+    let mut enriched_types = chunk.types.clone();
+    if let Some(ref owner) = self_type
+        && let Some(extra) = owner_types.get(owner.as_str()) {
+            for t in extra {
+                if !enriched_types.contains(t) {
+                    enriched_types.push(t.clone());
+                }
+            }
+        }
+    let mut receiver_types = build_receiver_type_map(chunk);
+    if let Some(ref owner) = self_type {
+        receiver_types.entry("self".to_owned()).or_insert_with(|| owner.clone());
+        if let Some(fields) = owner_field_types.get(owner.as_str()) {
+            for (field_name, field_type) in fields {
+                receiver_types.entry(field_name.clone()).or_insert_with(|| field_type.clone());
+            }
+        }
+    }
+    infer_local_types_from_calls(&chunk.calls, &chunk.let_call_bindings, return_type_map, &mut receiver_types);
+    if let Some(ref sig) = chunk.signature {
+        let bounds = extract_generic_bounds(sig);
+        for (type_param, trait_bound) in &bounds {
+            for (param_name, param_type) in &chunk.param_types {
+                if param_type.to_lowercase() == *type_param {
+                    receiver_types
+                        .entry(param_name.to_lowercase())
+                        .or_insert_with(|| trait_bound.clone());
+                }
+            }
+        }
+    }
+    let source_types_set: HashSet<String> = enriched_types.iter().map(|t| t.to_lowercase()).collect();
+    ChunkCtx { imports, self_type, call_types_set, import_leaves, source_types_set, receiver_types }
+}
+
+/// Parallel-friendly resolve: returns (call_edges, type_edges, receiver_updates) instead of mutating AdjState.
+#[expect(clippy::too_many_arguments, reason = "graph resolution needs all lookup tables")]
+fn resolve_collect(
+    src: usize,
+    chunk: &ParsedChunk,
+    ctx: &mut ChunkCtx,
+    exact: &HashMap<String, u32>,
+    short: &HashMap<String, u32>,
+    kinds: &[String],
+    return_type_map: &HashMap<String, String>,
+    trait_methods: &BTreeSet<String>,
+    method_owners: &HashMap<String, Vec<String>>,
+    instantiated: &HashSet<String>,
+    trait_impl_methods: &HashMap<String, Vec<String>>,
+    rustdoc: Option<&RustdocTypes>,
+    skip_calls: &HashSet<String>,
+    enum_types: &HashSet<String>,
+    enum_variants: &HashSet<String>,
+) -> (Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>) {
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut receiver_updates: HashMap<String, String> = HashMap::new();
+    let mut resolved_set = vec![false; chunk.calls.len()];
+    for pass in 0..2 {
+        for (call_idx, call) in chunk.calls.iter().enumerate() {
+            if resolved_set[call_idx] {
+                continue;
+            }
+            if !skip_calls.is_empty() {
+                let call_short = call.to_lowercase();
+                let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
+                if skip_calls.contains(call_leaf) {
+                    resolved_set[call_idx] = true;
+                    continue;
+                }
+            }
+            if let Some(tgt) = resolve_with_imports(
+                call, exact, short, &ctx.imports,
+                ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
+                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
+            ) {
+                let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
+                let tgt_usize = tgt as usize;
+                if tgt_usize != src {
+                    edges.push((tgt, call_line));
+                }
+                resolved_set[call_idx] = true;
+
+                if pass == 0 {
+                    let call_lower = call.to_lowercase();
+                    if let Some(ret_type) = return_type_map.get(&call_lower).or_else(|| {
+                        let (recv, method) = call_lower.rsplit_once('.')?;
+                        let recv_leaf = recv.rsplit_once('.').map_or(recv, |p| p.1);
+                        let recv_type = ctx.receiver_types.get(recv_leaf)?;
+                        let qualified = format!("{recv_type}::{method}");
+                        return_type_map.get(&qualified)
+                    }) {
+                        for (var_name, callee_name) in &chunk.let_call_bindings {
+                            if callee_name.to_lowercase() == call_lower {
+                                let key = var_name.to_lowercase();
+                                receiver_updates.entry(key.clone()).or_insert_with(|| ret_type.clone());
+                                ctx.receiver_types
+                                    .entry(key)
+                                    .or_insert_with(|| ret_type.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Type ref edges.
+    let mut type_edges: Vec<(u32, u32)> = Vec::new();
+    for ty in &chunk.types {
+        let lower = ty.to_lowercase();
+        let tgt = if let Some(qualified) = ctx.imports.get(&lower) {
+            exact.get(qualified).copied()
+        } else {
+            None
+        };
+        let tgt = tgt.or_else(|| exact.get(&lower).copied());
+        let tgt = tgt.or_else(|| short.get(&lower).copied());
+        if let Some(tgt) = tgt {
+            type_edges.push((tgt, 0));
+        }
+    }
+    (edges, type_edges, receiver_updates)
+}
+
+/// Read-only delta resolve for iterative passes (no clone, no receiver_type updates).
+#[expect(clippy::too_many_arguments, reason = "graph resolution needs all lookup tables")]
+fn resolve_delta(
+    src: usize,
+    chunk: &ParsedChunk,
+    ctx: &ChunkCtx,
+    exact: &HashMap<String, u32>,
+    short: &HashMap<String, u32>,
+    return_type_map: &HashMap<String, String>,
+    trait_methods: &BTreeSet<String>,
+    method_owners: &HashMap<String, Vec<String>>,
+    instantiated: &HashSet<String>,
+    trait_impl_methods: &HashMap<String, Vec<String>>,
+    rustdoc: Option<&RustdocTypes>,
+    skip_calls: &HashSet<String>,
+    enum_types: &HashSet<String>,
+    enum_variants: &HashSet<String>,
+    kinds: &[String],
+) -> Vec<(u32, u32)> {
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    for (call_idx, call) in chunk.calls.iter().enumerate() {
+        if !skip_calls.is_empty() {
+            let call_short = call.to_lowercase();
+            let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
+            if skip_calls.contains(call_leaf) {
+                continue;
+            }
+        }
+        if let Some(tgt) = resolve_with_imports(
+            call, exact, short, &ctx.imports,
+            ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
+            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
+        ) {
+            let tgt_usize = tgt as usize;
+            if tgt_usize != src {
+                let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
+                edges.push((tgt, call_line));
+            }
+        }
+    }
+    edges
+}
+
 fn resolve_with_imports(
     call: &str,
-    exact: &BTreeMap<String, u32>,
-    short: &BTreeMap<String, u32>,
-    imports: &BTreeMap<String, String>,
+    exact: &HashMap<String, u32>,
+    short: &HashMap<String, u32>,
+    imports: &HashMap<String, String>,
     self_type: Option<&str>,
-    source_types: &[String],
-    call_types: &[String],
-    receiver_types: &BTreeMap<String, String>,
+    source_types: &HashSet<String>,
+    call_types: &HashSet<String>,
+    receiver_types: &HashMap<String, String>,
     _trait_methods: &BTreeSet<String>,
-    method_owners: &BTreeMap<String, Vec<String>>,
+    method_owners: &HashMap<String, Vec<String>>,
     instantiated: &HashSet<String>,
-    trait_impl_methods: &BTreeMap<String, Vec<String>>,
+    trait_impl_methods: &HashMap<String, Vec<String>>,
     rustdoc: Option<&RustdocTypes>,
     _kinds: &[String],
     _enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
+    return_type_map: &HashMap<String, String>,
+    import_leaves: &HashSet<String>,
 ) -> Option<u32> {
     // Normalize UFCS / turbofish syntax before resolution:
     //   `<Foo>::func`         → `Foo::func`
     //   `<Foo as Trait>::func` → `Foo::func`
-    let call = if let Some(rest) = call.strip_prefix('<') {
+    let call_owned;
+    let call: &str = if let Some(rest) = call.strip_prefix('<') {
         if let Some((inner, suffix)) = rest.split_once(">::") {
             let type_part = inner.split_once(" as ").map_or(inner, |p| p.0);
-            format!("{type_part}::{suffix}")
+            call_owned = format!("{type_part}::{suffix}");
+            &call_owned
         } else {
-            call.to_owned()
+            call
         }
     } else {
-        call.to_owned()
+        call
     };
-    let call: &str = &call;
     let lower = call.to_lowercase();
 
     // Skip Rust prelude enum variant constructors that tree-sitter sees as calls.
@@ -741,8 +1041,12 @@ fn resolve_with_imports(
                     && let Some(&idx) = short.get(leaf_method) {
                         return Some(idx);
                     }
-                // Field type is external → skip to avoid false positive
-                return None;
+                // Field type is external → skip to avoid false positive.
+                // But if field type is a likely generic param (single lowercase letter
+                // like "t", "u", "k", "v"), fall through to heuristic matching.
+                if !(field_type.len() == 1 && field_type.as_bytes()[0].is_ascii_lowercase()) {
+                    return None;
+                }
             }
             // Fallback: field name as type hint via underscore-stripped matching.
             // e.g. self.token_tree.method() → "token_tree" → "tokentree" ↔ "TokenTree"
@@ -769,12 +1073,12 @@ fn resolve_with_imports(
             }
             // Fallback: try type_refs heuristic
             for ty in source_types.iter().chain(call_types.iter()) {
-                let ty_lower = ty.to_lowercase();
-                let candidate = format!("{ty_lower}::{leaf_method}");
+                let candidate = format!("{ty}::{leaf_method}");
                 if let Some(&idx) = exact.get(&candidate) {
                     return Some(idx);
                 }
             }
+
             // Try field_leaf directly as a type name via imports
             if let Some(qualified) = imports.get(field_leaf) {
                 let candidate = format!("{qualified}::{leaf_method}");
@@ -823,8 +1127,20 @@ fn resolve_with_imports(
     if let Some((_, method)) = lower.rsplit_once('.') {
         let leaf_method = method.rsplit_once('.').map_or(method, |p| p.1);
         for ty in call_types.iter().chain(source_types.iter()) {
-            let ty_lower = ty.to_lowercase();
-            let candidate = format!("{ty_lower}::{leaf_method}");
+            let candidate = format!("{ty}::{leaf_method}");
+            if let Some(&idx) = exact.get(&candidate) {
+                return Some(idx);
+            }
+        }
+    }
+
+    // 5a. Return-type chain: receiver is a function name whose return type is known.
+    //     e.g. `type_of_expr.adjusted` where return_type_map["type_of_expr"] = "typeinfo"
+    //     → try exact["typeinfo::adjusted"]
+    if let Some((receiver, method)) = lower.rsplit_once('.') {
+        let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
+        if let Some(ret_type) = return_type_map.get(receiver_leaf) {
+            let candidate = format!("{ret_type}::{method}");
             if let Some(&idx) = exact.get(&candidate) {
                 return Some(idx);
             }
@@ -881,8 +1197,7 @@ fn resolve_with_imports(
                 } else {
                     // Multiple impls — narrow by type context or receiver name similarity
                     let matched = impl_types.iter().find(|t| {
-                        source_types.iter().chain(call_types.iter())
-                            .any(|st| st.to_lowercase() == **t)
+                        source_types.contains(t.as_str()) || call_types.contains(t.as_str())
                     }).or_else(|| impl_types.iter().find(|t| {
                         t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
                         || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
@@ -925,8 +1240,7 @@ fn resolve_with_imports(
                 // Check if any owner type appears in the function's type context.
                 let ctx_owner = owners.iter().find(|o| {
                     let ol = o.to_lowercase();
-                    source_types.iter().chain(call_types.iter())
-                        .any(|t| t.to_lowercase() == ol)
+                    source_types.contains(&ol) || call_types.contains(&ol)
                 });
                 if let Some(owner) = ctx_owner {
                     let qualified = format!("{owner}::{method}");
@@ -992,12 +1306,8 @@ fn resolve_with_imports(
                     }
                 // (5) Type context — source_types, call_types, imports
                 let ctx_owner = owners.iter().find(|o| {
-                    source_types.iter().chain(call_types.iter())
-                        .any(|t| t.to_lowercase() == **o)
-                    || imports.values().any(|v| {
-                        let leaf = v.rsplit("::").next().unwrap_or(v);
-                        leaf == o.as_str()
-                    })
+                    source_types.contains(o.as_str()) || call_types.contains(o.as_str())
+                    || import_leaves.contains(o.as_str())
                 });
                 if let Some(owner) = ctx_owner {
                     let qualified = format!("{owner}::{method}");
@@ -1022,8 +1332,7 @@ fn resolve_with_imports(
                         t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
                         || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
                     }).or_else(|| impl_types.iter().find(|t| {
-                        source_types.iter().chain(call_types.iter())
-                            .any(|st| st.to_lowercase() == **t)
+                        source_types.contains(t.as_str()) || call_types.contains(t.as_str())
                     }));
                     if let Some(t) = matched {
                         let qualified = format!("{t}::{method}");
@@ -1043,48 +1352,14 @@ fn resolve_with_imports(
 ///
 /// For each type in `types`, looks up the corresponding chunk (struct, enum, trait)
 /// and adds an edge from `src` to that chunk.
-fn resolve_type_ref_edges(
-    src: usize,
-    types: &[String],
-    exact: &BTreeMap<String, u32>,
-    short: &BTreeMap<String, u32>,
-    imports: &BTreeMap<String, String>,
-    callees: &mut [Vec<u32>],
-    callers: &mut [Vec<u32>],
-) {
-    for ty in types {
-        let lower = ty.to_lowercase();
-
-        // 1. Import-qualified lookup.
-        let tgt = if let Some(qualified) = imports.get(&lower) {
-            exact.get(qualified).copied()
-        } else {
-            None
-        };
-
-        // 2. Exact name match.
-        let tgt = tgt.or_else(|| exact.get(&lower).copied());
-
-        // 3. Short name fallback.
-        let tgt = tgt.or_else(|| short.get(&lower).copied());
-
-        if let Some(tgt) = tgt {
-            let tgt_usize = tgt as usize;
-            if tgt_usize != src {
-                callees[src].push(tgt);
-                callers[tgt_usize].push(src as u32);
-            }
-        }
-    }
-}
 
 /// Collect type_refs from struct/impl chunks keyed by owning type name (lowercase).
 ///
 /// For `impl SimpleHybridSearcher<D, T>` with type_refs `[Bm25Index, HnswGraph, ...]`,
 /// produces `{"simplehybridsearcher": ["Bm25Index", "HnswGraph", ...]}`.
 /// Methods of that type can then use these types to resolve `self.field.method()` calls.
-fn collect_owner_types(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> BTreeMap<String, Vec<String>> {
-    let mut result: BTreeMap<String, Vec<String>> = BTreeMap::new();
+fn collect_owner_types(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> HashMap<String, Vec<String>> {
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
     for c in chunks {
         if !matches!(c.kind.as_str(), "struct" | "impl") {
             continue;
@@ -1111,8 +1386,8 @@ fn collect_owner_types(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> BTreeMap<St
 ///
 /// E.g. struct `MmapStaticModel { tokenizer: Tokenizer, weights: Vec }` →
 /// `{"mmapmstaticmodel": {"tokenizer": "tokenizer", "weights": "vec"}}`.
-fn collect_owner_field_types(chunks: &[ParsedChunk]) -> BTreeMap<String, BTreeMap<String, String>> {
-    let mut result: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+fn collect_owner_field_types(chunks: &[ParsedChunk]) -> HashMap<String, HashMap<String, String>> {
+    let mut result: HashMap<String, HashMap<String, String>> = HashMap::new();
     for c in chunks {
         if c.kind != "struct" {
             continue;
@@ -1131,7 +1406,7 @@ fn collect_owner_field_types(chunks: &[ParsedChunk]) -> BTreeMap<String, BTreeMa
 /// Build function name → return type map (lowercase → lowercase leaf type).
 ///
 /// Resolves `Self` to the owning type: `Foo::new → Self` becomes `foo::new → foo`.
-fn build_return_type_map(chunks: &[ParsedChunk]) -> BTreeMap<String, String> {
+fn build_return_type_map(chunks: &[ParsedChunk]) -> HashMap<String, String> {
     // Collect all project type names (structs, enums, traits, etc.)
     let project_types: std::collections::HashSet<String> = chunks
         .iter()
@@ -1142,7 +1417,7 @@ fn build_return_type_map(chunks: &[ParsedChunk]) -> BTreeMap<String, String> {
         })
         .collect();
 
-    let mut map = BTreeMap::new();
+    let mut map = HashMap::new();
     for c in chunks {
         if c.kind != "function" {
             continue;
@@ -1160,6 +1435,11 @@ fn build_return_type_map(chunks: &[ParsedChunk]) -> BTreeMap<String, String> {
                 .unwrap_or_else(|| leaf.to_owned())
         };
         let name_lower = c.name.to_lowercase();
+        // Also insert bare method name for chained-call resolution
+        // (e.g. builder pattern: `.m(v).ef_construction(v)` → return_type_map["m"] → "hnswconfigbuilder")
+        if let Some(method) = name_lower.rsplit_once("::").map(|p| p.1) {
+            map.entry(method.to_owned()).or_insert_with(|| resolved.clone());
+        }
         map.insert(name_lower, resolved);
     }
     map
@@ -1169,8 +1449,8 @@ fn build_return_type_map(chunks: &[ParsedChunk]) -> BTreeMap<String, String> {
 ///
 /// Scans all `Type::method` function chunks and groups by method short name.
 /// Used for resolving `receiver.method()` when receiver type is unknown.
-fn build_method_owner_index(chunks: &[ParsedChunk]) -> BTreeMap<String, Vec<String>> {
-    let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
+fn build_method_owner_index(chunks: &[ParsedChunk]) -> HashMap<String, Vec<String>> {
+    let mut index: HashMap<String, Vec<String>> = HashMap::new();
     for c in chunks {
         if c.kind != "function" {
             continue;
@@ -1196,9 +1476,9 @@ fn build_method_owner_index(chunks: &[ParsedChunk]) -> BTreeMap<String, Vec<Stri
 /// This complements method_owners by adding trait-based disambiguation.
 fn build_trait_impl_method_map(
     chunks: &[ParsedChunk],
-) -> BTreeMap<String, Vec<String>> {
+) -> HashMap<String, Vec<String>> {
     // Step 1: Find all "impl Trait for Type" chunks → (trait_name, concrete_type)
-    let mut trait_to_types: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut trait_to_types: HashMap<String, Vec<String>> = HashMap::new();
     for c in chunks {
         if c.kind != "impl" {
             continue;
@@ -1221,7 +1501,7 @@ fn build_trait_impl_method_map(
     }
 
     // Step 2: Find trait methods (Trait::method chunks) → map method → concrete types
-    let mut method_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut method_map: HashMap<String, Vec<String>> = HashMap::new();
     for c in chunks {
         if c.kind != "function" {
             continue;
@@ -1482,8 +1762,8 @@ fn strip_generics_from_key(key: &str) -> String {
 /// Build a receiver→type map from a chunk's param/local/field types.
 ///
 /// Populates variable names → leaf type names for method resolution.
-pub fn build_receiver_type_map(chunk: &ParsedChunk) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
+pub fn build_receiver_type_map(chunk: &ParsedChunk) -> HashMap<String, String> {
+    let mut map = HashMap::new();
     for (name, ty) in &chunk.param_types {
         let name_lower = name.to_lowercase();
         let leaf = extract_leaf_type(&ty.to_lowercase()).to_owned();
@@ -1516,8 +1796,8 @@ pub fn build_receiver_type_map(chunk: &ParsedChunk) -> BTreeMap<String, String> 
 fn infer_local_types_from_calls(
     calls: &[String],
     let_call_bindings: &[(String, String)],
-    return_type_map: &BTreeMap<String, String>,
-    receiver_types: &mut BTreeMap<String, String>,
+    return_type_map: &HashMap<String, String>,
+    receiver_types: &mut HashMap<String, String>,
 ) {
     // 1) From `Type::method` patterns (constructors/static methods)
     for call in calls {
@@ -1572,8 +1852,8 @@ pub fn owning_type(name: &str) -> Option<String> {
 }
 
 /// Parse `use` declarations into a short_name → qualified_path map.
-fn build_import_map(imports: &[String]) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
+fn build_import_map(imports: &[String]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
     for imp in imports {
         let s = imp.trim().trim_start_matches("use ").trim_end_matches(';').trim();
         let s = s.trim_start_matches("crate::");
@@ -1619,8 +1899,8 @@ pub fn is_test_chunk(c: &ParsedChunk) -> bool {
 fn build_trait_impls(
     names: &[String],
     kinds: &[String],
-    exact: &BTreeMap<String, u32>,
-    short: &BTreeMap<String, u32>,
+    exact: &HashMap<String, u32>,
+    short: &HashMap<String, u32>,
 ) -> Vec<Vec<u32>> {
     let len = names.len();
     let mut trait_impls: Vec<Vec<u32>> = vec![Vec::new(); len];
@@ -1658,7 +1938,7 @@ fn collect_string_args(chunks: &[ParsedChunk]) -> Vec<Vec<(String, String, u32, 
 
 /// Build a sorted index from lowercase string value → [(chunk_idx, line)].
 fn build_string_index(all: &[Vec<(String, String, u32, u8)>]) -> Vec<(String, Vec<(u32, u32)>)> {
-    let mut map: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+    let mut map: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
     for (chunk_idx, args) in all.iter().enumerate() {
         for (_, value, line, _) in args {
             map.entry(value.to_lowercase())
@@ -1674,54 +1954,42 @@ fn build_string_index(all: &[Vec<(String, String, u32, u8)>]) -> Vec<(String, Ve
 /// For each chunk's `field_accesses`, resolve the receiver variable to a type
 /// using the same sources as edge resolution (self type, param types, local types,
 /// field types), then index as `"typename::fieldname"`.
-fn build_field_access_index(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> Vec<(String, Vec<u32>)> {
-    let mut map: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+fn build_field_access_index(
+    chunks: &[ParsedChunk],
+    owner_field_types: &HashMap<String, HashMap<String, String>>,
+) -> Vec<(String, Vec<u32>)> {
+    let mut map: HashMap<String, Vec<u32>> = HashMap::new();
 
     for (idx, chunk) in chunks.iter().enumerate() {
         if chunk.field_accesses.is_empty() {
             continue;
         }
 
-        // Build receiver→type mapping for this chunk
-        let mut receiver_types: BTreeMap<String, String> = BTreeMap::new();
+        let mut receiver_types: HashMap<String, String> = HashMap::new();
 
-        // self → owning type
         if let Some(owner) = owning_type(&chunk.name) {
-            receiver_types.insert("self".to_owned(), owner);
+            receiver_types.insert("self".to_owned(), owner.clone());
+            // Reuse pre-built owner_field_types (O(1) lookup, no inner loop).
+            if let Some(fields) = owner_field_types.get(&owner) {
+                for (fname, fty) in fields {
+                    let key = format!("self.{fname}");
+                    let leaf = extract_leaf_type(fty).to_owned();
+                    receiver_types.entry(key).or_insert(leaf);
+                }
+            }
         }
 
-        // param_types
         for (pname, pty) in &chunk.param_types {
             let leaf = extract_leaf_type(&pty.to_lowercase()).to_owned();
-            if !leaf.is_empty() && pname.to_lowercase() != "self" {
+            if !leaf.is_empty() && !pname.eq_ignore_ascii_case("self") {
                 receiver_types.entry(pname.to_lowercase()).or_insert(leaf);
             }
         }
 
-        // local_types
         for (vname, vty) in &chunk.local_types {
             let leaf = extract_leaf_type(&vty.to_lowercase()).to_owned();
             if !leaf.is_empty() {
                 receiver_types.entry(vname.to_lowercase()).or_insert(leaf);
-            }
-        }
-
-        // self.field → field type (for struct fields accessed via self)
-        if let Some(owner) = owning_type(&chunk.name) {
-            // Find struct chunk's field_types
-            let owner_lower = owner.to_lowercase();
-            for c in chunks {
-                let name_lower = c.name.to_lowercase();
-                if (name_lower == owner_lower || name_lower.ends_with(&format!("::{owner_lower}")))
-                    && c.kind == "struct"
-                {
-                    for (fname, fty) in &c.field_types {
-                        let key = format!("self.{}", fname.to_lowercase());
-                        let leaf = extract_leaf_type(&fty.to_lowercase()).to_owned();
-                        receiver_types.entry(key).or_insert(leaf);
-                    }
-                    break;
-                }
             }
         }
 
@@ -1733,17 +2001,89 @@ fn build_field_access_index(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> Vec<(S
                 let key = format!("{ty}::{field_lower}");
                 map.entry(key).or_default().push(idx as u32);
             }
-            // Also store unresolved as receiver_var::field for partial matches
-            // (blast can match on just the field name portion)
         }
     }
 
-    // Dedup each entry
     for list in map.values_mut() {
         list.sort_unstable();
         list.dedup();
     }
 
-    map.into_iter().collect()
+    let mut result: Vec<_> = map.into_iter().collect();
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+/// Check if a call is to an extern (std/deps) function.
+///
+/// Unified logic for extern classification — used by both graph build and verify.
+pub fn check_extern(
+    call_lower: &str,
+    receiver_types: &HashMap<String, String>,
+    extern_index: &crate::extern_types::ExternMethodIndex,
+    project_type_shorts: &HashSet<String>,
+    return_type_map: &HashMap<String, String>,
+    extern_all_methods: &HashSet<String>,
+    owner_field_types: &HashMap<String, HashMap<String, String>>,
+) -> Option<String> {
+    // Bare function (no receiver): `len`, `drop`, etc.
+    if !call_lower.contains('.') && !call_lower.contains("::") {
+        if extern_all_methods.contains(call_lower) {
+            return Some(format!("bare-extern: {call_lower}"));
+        }
+        return None;
+    }
+
+    let (receiver, method) = call_lower.rsplit_once('.')?;
+    let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
+
+    // self.field.method → field type lookup
+    if receiver.starts_with("self.") {
+        let field = receiver.strip_prefix("self.").unwrap_or(receiver);
+        let field_leaf = field.rsplit_once('.').map_or(field, |p| p.1);
+        // Try receiver_types (param/local types) first
+        if let Some(field_type) = receiver_types.get(field_leaf) {
+            let lowered = field_type.to_lowercase();
+            let leaf = extract_leaf_type(&lowered);
+            if extern_index.has_method(leaf, method) {
+                return Some(format!("self.field: {field_leaf}:{leaf}.{method}"));
+            }
+        }
+        // Try owner_field_types (struct field definitions)
+        for fields in owner_field_types.values() {
+            if let Some(field_type) = fields.get(field_leaf) {
+                let lowered = field_type.to_lowercase();
+                let leaf = extract_leaf_type(&lowered);
+                if extern_index.has_method(leaf, method) {
+                    return Some(format!("self.field: {field_leaf}:{leaf}.{method}"));
+                }
+            }
+        }
+    }
+
+    // Direct receiver lookup (param, local, inferred types).
+    if let Some(recv_type) = receiver_types.get(receiver_leaf) {
+        let lowered = recv_type.to_lowercase();
+        let leaf = extract_leaf_type(&lowered);
+        if extern_index.has_method(leaf, method) {
+            return Some(format!("receiver: {receiver_leaf}:{leaf}.{method}"));
+        }
+    }
+
+    // Return-type chain: receiver_leaf is a method whose return type is known.
+    if let Some(ret_type) = return_type_map.get(receiver_leaf) {
+        if extern_index.has_method(ret_type, method) {
+            return Some(format!("return-chain: {receiver_leaf}->{ret_type}.{method}"));
+        }
+    }
+
+    // Fallback: method exists in extern types AND receiver is not a project type.
+    if extern_all_methods.contains(method)
+        && !project_type_shorts.contains(receiver_leaf)
+    {
+        return Some(format!("untyped-extern: {receiver_leaf}.{method}"));
+    }
+
+    None
 }
 

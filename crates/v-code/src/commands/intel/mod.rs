@@ -48,6 +48,19 @@ pub fn load_or_build_graph(
     v_code_intel::loader::load_or_build_graph(db, Some(&hooks))
 }
 
+/// Load or build call graph, also returning chunks if they were loaded.
+///
+/// Avoids double-loading chunks when the caller also needs them.
+pub fn load_or_build_graph_with_chunks(
+    db: &std::path::Path,
+) -> anyhow::Result<(v_code_intel::graph::CallGraph, Option<Vec<v_code_intel::parse::ParsedChunk>>)> {
+    let hooks = DaemonHooks {
+        try_graph_build: daemon_try_graph_build,
+        spawn: daemon_spawn_and_wait,
+    };
+    v_code_intel::loader::load_or_build_graph_with_chunks(db, Some(&hooks))
+}
+
 fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
     if !v_hnsw_storage::daemon_client::is_running() {
         return DaemonBuildResult::Unavailable;
@@ -127,44 +140,40 @@ pub(super) fn cached_json(db: &Path, cache_key: &str, compute: impl FnOnce() -> 
     Ok(())
 }
 
-/// Print chunks grouped by parent directory.
+/// Print chunks grouped by file with path aliases.
 pub(crate) fn print_grouped(chunks: &[&ParsedChunk], compact: bool) {
-    let mut groups: BTreeMap<String, Vec<&ParsedChunk>> = BTreeMap::new();
-    for c in chunks {
-        let dir = parent_dir(&c.file);
-        groups.entry(dir).or_default().push(c);
+    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+
+    let files: Vec<&str> = chunks.iter().map(|c| relative_path(&c.file)).collect();
+    let (alias_map, legend) = build_path_aliases(&files);
+
+    let mut groups: BTreeMap<&str, Vec<&ParsedChunk>> = BTreeMap::new();
+    for (c, file) in chunks.iter().zip(files.iter()) {
+        groups.entry(file).or_default().push(c);
     }
 
-    for (dir, items) in &groups {
-        println!("  {dir}/");
+    for (file, items) in &groups {
+        let short = apply_alias(file, &alias_map);
+        println!("@ {short}");
         for c in items {
-            let filename = file_name(&c.file);
             let lines = format_lines_opt(c.lines);
-            println!("    {filename}{lines}  [{kind}] {name}",
+            let test_marker = if v_code_intel::graph::is_test_chunk(c) { " [test]" } else { "" };
+            println!("  {lines} {kind} {name}{test_marker}",
                 kind = c.kind, name = c.name);
             if !compact {
                 let sig = c.signature.as_deref().unwrap_or("");
                 if !sig.is_empty() {
-                    println!("      {sig}");
+                    println!("    {sig}");
                 }
             }
         }
         if !compact { println!(); }
     }
-}
 
-fn parent_dir(path: &str) -> String {
-    if let Some(idx) = path.rfind('/') {
-        path[..idx].to_owned()
-    } else {
-        ".".to_owned()
+    if !legend.is_empty() {
+        for (alias, dir) in &legend {
+            println!("{alias} = {dir}");
+        }
     }
 }
 
-fn file_name(path: &str) -> &str {
-    if let Some(idx) = path.rfind('/') {
-        &path[idx + 1..]
-    } else {
-        path
-    }
-}

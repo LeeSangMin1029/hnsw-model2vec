@@ -57,6 +57,9 @@ pub enum Commands {
         /// Include source code inline for each entry.
         #[arg(long, short = 's')]
         source: bool,
+        /// Show individual test entries (default: summary count only).
+        #[arg(long)]
+        include_tests: bool,
     },
     /// Show file-level dependency graph from code chunks.
     Deps {

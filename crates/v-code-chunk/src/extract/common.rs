@@ -200,12 +200,6 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
             let field = func_node.child_by_field_name("field")?;
             let method = field.utf8_text(src).ok()?;
             if let Some(value) = func_node.child_by_field_name("value") {
-                // Direct chained call: a(x).b(y) → receiver type is unknown.
-                // Skip entirely to avoid false positives (e.g. `.create(true)` on
-                // OpenOptions matching `collection::create`).
-                if value.kind() == "call_expression" {
-                    return None;
-                }
                 // Peel transparent wrappers: `?`, `.await`, `(expr)` — iteratively.
                 // Recovers receiver from `self.foo?.method()`, `(self.bar).method()`, etc.
                 let inner = peel_transparent(value);
@@ -217,6 +211,14 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                     "field_expression" => {
                         if let Some(recv) = extract_field_receiver(inner, src) {
                             return Some(format!("{recv}.{method}"));
+                        }
+                    }
+                    // Chained call: a().b() or a()?.b() — extract inner callee's
+                    // leaf method name as receiver hint for return-type resolution.
+                    // e.g. `sema.type_of_expr(x)?.adjusted()` → "type_of_expr.adjusted"
+                    "call_expression" => {
+                        if let Some(leaf) = extract_inner_call_leaf(inner, src) {
+                            return Some(format!("{leaf}.{method}"));
                         }
                     }
                     _ => {}
@@ -256,6 +258,17 @@ fn peel_transparent(mut node: tree_sitter::Node) -> tree_sitter::Node {
         }
     }
     node
+}
+
+/// Extract leaf method name from an inner `call_expression` for chained call resolution.
+/// `sema.type_of_expr(x)` → "type_of_expr", `Foo::new()` → "new"
+fn extract_inner_call_leaf(call_node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let func = call_node.child_by_field_name("function")?;
+    let name = extract_callee_name(func, src)?;
+    let leaf = name
+        .rsplit_once('.')
+        .map_or_else(|| name.rsplit_once("::").map_or(name.as_str(), |p| p.1), |p| p.1);
+    Some(leaf.to_owned())
 }
 
 /// Extract receiver path from nested field expressions: `self.foo.bar` → "self.foo.bar"

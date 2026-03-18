@@ -6,7 +6,7 @@
 //! **Recall**: For every function call that tree-sitter extracts from the source,
 //! did the graph resolve it to some callee? (Unresolved = "extern" in the graph.)
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -25,15 +25,19 @@ pub(crate) fn short_name(full: &str) -> &str {
 #[expect(clippy::needless_range_loop, clippy::type_complexity, reason = "multiple parallel arrays indexed together")]
 pub fn run(db: PathBuf) -> Result<()> {
     let start = std::time::Instant::now();
-    let graph = super::intel::load_or_build_graph(&db)?;
+    // Load graph + chunks in one pass to avoid double deserialization.
+    let (graph, cached_chunks) = super::intel::load_or_build_graph_with_chunks(&db)?;
 
     let project_root = DbConfig::load(&db)
         .ok()
         .and_then(|c| c.input_path)
         .map(PathBuf::from);
 
-    // Load DB chunks (already parsed, no tree-sitter needed for recall).
-    let chunks = v_code_intel::loader::load_chunks(&db)?;
+    // Reuse chunks from graph build if available, otherwise load separately.
+    let chunks = match cached_chunks {
+        Some(c) => c,
+        None => v_code_intel::loader::load_chunks(&db)?,
+    };
     let t_load = start.elapsed();
 
     let n = graph.names.len();
@@ -64,8 +68,8 @@ pub fn run(db: PathBuf) -> Result<()> {
     }
 
     // Build owner_field_types + return_type_map from DB chunks (no file I/O).
-    let mut owner_field_types: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let mut return_type_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut owner_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut return_type_map: HashMap<String, String> = HashMap::new();
     for c in &chunks {
         if c.kind == "struct" {
             let lower = c.name.to_lowercase();
@@ -85,13 +89,43 @@ pub fn run(db: PathBuf) -> Result<()> {
                 } else {
                     leaf.to_owned()
                 };
-                return_type_map.insert(c.name.to_lowercase(), resolved_type);
+                let name_lower = c.name.to_lowercase();
+                // Also insert bare method name for chained-call resolution
+                if let Some(method) = name_lower.rsplit_once("::").map(|p| p.1) {
+                    return_type_map.entry(method.to_owned()).or_insert_with(|| resolved_type.clone());
+                }
+                return_type_map.insert(name_lower, resolved_type);
             }
     }
 
-    // Build extern index (cached — fast on repeat runs).
-    let extern_root = project_root.as_deref().unwrap_or(Path::new("."));
-    let extern_index = ExternMethodIndex::build(extern_root);
+    // Use graph-embedded extern info if available, otherwise build ExternMethodIndex.
+    let has_graph_extern = !graph.extern_calls.is_empty()
+        && graph.extern_calls.iter().any(|v| !v.is_empty());
+
+    let extern_index = if has_graph_extern {
+        None // Graph already has extern classification
+    } else {
+        let extern_root = project_root.as_deref().unwrap_or(Path::new("."));
+        Some(ExternMethodIndex::build(extern_root))
+    };
+
+    if let Some(ref ext) = extern_index {
+        // Merge extern return types into return_type_map (fallback path).
+        let before = return_type_map.len();
+        for (key, ret_type) in &ext.return_types {
+            return_type_map.entry(key.clone()).or_insert_with(|| ret_type.clone());
+            if let Some(method) = key.rsplit_once("::").map(|p| p.1) {
+                return_type_map.entry(method.to_owned()).or_insert_with(|| ret_type.clone());
+            }
+        }
+        let extern_ret_count = return_type_map.len() - before;
+        if extern_ret_count > 0 {
+            println!("  Extern return types merged: {extern_ret_count} (total return_type_map: {})", return_type_map.len());
+        }
+    }
+
+    // Pre-build flat method set for O(1) lookups (only for fallback path).
+    let extern_all_methods = extern_index.as_ref().map(|e| e.all_method_set());
 
     let t_index = start.elapsed();
 
@@ -211,6 +245,23 @@ pub fn run(db: PathBuf) -> Result<()> {
     let mut unresolved_samples: Vec<String> = Vec::new();
     let mut extern_samples: Vec<String> = Vec::new();
 
+    // Pre-build graph extern call lookup: chunk_idx → set of extern call names (lowercase).
+    let graph_extern_set: Vec<HashSet<String>> = if has_graph_extern {
+        graph.extern_calls.iter().map(|calls| {
+            calls.iter().map(|(name, _)| name.to_lowercase()).collect()
+        }).collect()
+    } else {
+        vec![HashSet::new(); n]
+    };
+    // Also build extern reason lookup for samples.
+    let graph_extern_reasons: Vec<HashMap<String, String>> = if has_graph_extern {
+        graph.extern_calls.iter().map(|calls| {
+            calls.iter().map(|(name, reason)| (name.to_lowercase(), reason.clone())).collect()
+        }).collect()
+    } else {
+        vec![HashMap::new(); n]
+    };
+
     for i in 0..n {
         if graph.kinds[i] != "function" {
             continue;
@@ -218,13 +269,15 @@ pub fn run(db: PathBuf) -> Result<()> {
         let key = (graph.names[i].as_str(), graph.lines[i]);
         let Some(chunk) = chunk_map.get(&key) else { continue };
 
-        let receiver_types = build_db_chunk_receiver_types(
-            chunk, &owner_field_types, &return_type_map,
-        );
         let resolved_shorts = &chunk_callee_shorts[i];
-        // Self-call (recursion) is excluded from graph edges (no self-loops),
-        // so we consider the chunk's own short name as resolved.
         let self_short = short_name(&graph.names[i]).to_lowercase();
+
+        // Build receiver types only for fallback path.
+        let receiver_types = if !has_graph_extern {
+            build_db_chunk_receiver_types(chunk, &owner_field_types, &return_type_map)
+        } else {
+            HashMap::new()
+        };
 
         for call in &chunk.calls {
             let call_lower = call.to_lowercase();
@@ -240,22 +293,19 @@ pub fn run(db: PathBuf) -> Result<()> {
                 continue;
             }
 
-            // Skip enum variant constructors: these look like calls to tree-sitter
-            // but are not function calls.  Prelude variants (Ok, Err, Some, None)
-            // and project-defined variants are excluded from recall counting.
+            // Skip enum variant constructors.
             static PRELUDE_VARIANTS: &[&str] = &["ok", "err", "some", "none"];
             if call.starts_with(char::is_uppercase) && PRELUDE_VARIANTS.contains(&call_lower.as_str()) {
                 continue;
             }
-            // Qualified enum variant: `Type::Variant(args)` where Variant starts uppercase.
-            // Covers both project enums (via enum_variant_set) and external enums
-            // (prefix type not in project + suffix uppercase).
             if let Some((prefix, last)) = call.rsplit_once("::") {
                 if last.starts_with(char::is_uppercase) {
-                    if enum_variant_set.contains(&call_lower) {
+                    let prefix_lower = prefix.to_lowercase();
+                    let type_leaf = prefix_lower.rsplit_once("::").map_or(prefix_lower.as_str(), |p| p.1);
+                    let variant_key = format!("{type_leaf}::{}", last.to_lowercase());
+                    if enum_variant_set.contains(&variant_key) {
                         continue;
                     }
-                    // External enum variant: prefix type not in project index
                     let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix).to_lowercase();
                     if !project_shorts.contains(&prefix_leaf) && !project_type_shorts.contains(&prefix_leaf) {
                         continue;
@@ -267,12 +317,35 @@ pub fn run(db: PathBuf) -> Result<()> {
 
             if resolved_shorts.contains(short) || short == self_short {
                 recall_resolved += 1;
-            } else if let Some(reason) = check_extern_reason(
-                &call_lower, &receiver_types, &extern_index, &project_type_shorts,
-            ) {
+            } else if has_graph_extern && graph_extern_set[i].contains(&call_lower) {
+                // Graph already classified this call as extern.
                 recall_extern += 1;
                 if extern_samples.len() < 2000 {
+                    let reason = graph_extern_reasons[i].get(&call_lower)
+                        .map_or("graph-extern", |r| r.as_str());
                     extern_samples.push(format!("{call}  [{reason}]"));
+                }
+            } else if !has_graph_extern {
+                // Fallback: use ExternMethodIndex directly.
+                if let Some(ref ext) = extern_index {
+                    if let Some(ref all_methods) = extern_all_methods {
+                        if let Some(reason) = v_code_intel::graph::check_extern(
+                            &call_lower, &receiver_types, ext, &project_type_shorts,
+                            &return_type_map, all_methods, &owner_field_types,
+                        ) {
+                            recall_extern += 1;
+                            if extern_samples.len() < 2000 {
+                                extern_samples.push(format!("{call}  [{reason}]"));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                recall_unresolved += 1;
+                let cat = categorize_miss(call);
+                *miss_categories.entry(cat).or_default() += 1;
+                if unresolved_samples.len() < 2000 {
+                    unresolved_samples.push(call.clone());
                 }
             } else {
                 recall_unresolved += 1;
@@ -319,12 +392,17 @@ pub fn run(db: PathBuf) -> Result<()> {
             "    graph:      {recall_resolved} ({pct_graph:.1}%)  extern: {recall_extern}  (std/deps type match)"
         );
     }
-    if extern_index.type_count() > 0 {
-        println!(
-            "  Extern index: {} types, {} methods",
-            extern_index.type_count(),
-            extern_index.total_methods()
-        );
+    if let Some(ref ext) = extern_index {
+        if ext.type_count() > 0 {
+            println!(
+                "  Extern index: {} types, {} methods",
+                ext.type_count(),
+                ext.total_methods()
+            );
+        }
+    } else if has_graph_extern {
+        let total_extern: usize = graph.extern_calls.iter().map(|v| v.len()).sum();
+        println!("  Extern calls (from graph): {total_extern}");
     }
 
     if !miss_categories.is_empty() {
@@ -413,90 +491,15 @@ pub(crate) fn categorize_miss(call: &str) -> &'static str {
     }
 }
 
-/// Check if a call is to an external type method. Returns the reason if extern.
-///
-/// Resolves receiver type via pre-built `receiver_types` map (populated from
-/// param_types, local_types, owner_field_types, let_call_bindings, generic bounds).
-/// Also classifies calls as extern when the method exists only in external types
-/// (not in project), even without knowing the receiver type.
-fn check_extern_reason(
-    call_lower: &str,
-    receiver_types: &BTreeMap<String, String>,
-    extern_index: &ExternMethodIndex,
-    project_type_shorts: &HashSet<String>,
-) -> Option<String> {
-    // Handle bare function calls (no receiver): `len`, `drop`, `push`, etc.
-    if !call_lower.contains('.') && !call_lower.contains("::") {
-        if extern_index.any_type_has_method(call_lower) {
-            return Some(format!("bare-extern: {call_lower}"));
-        }
-        return None;
-    }
-
-    // Handle qualified path calls: `ast::Expr::cast`, `Command::new`, etc.
-    if let Some((prefix, method)) = call_lower.rsplit_once("::") {
-        let leaf_type = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
-
-        if extern_index.has_method(leaf_type, method) {
-            return Some(format!("qualified-extern: {leaf_type}::{method}"));
-        }
-        if extern_index.any_type_has_method(method)
-            && !project_type_shorts.contains(leaf_type)
-        {
-            return Some(format!("qualified-untyped-extern: {leaf_type}::{method}"));
-        }
-        return None;
-    }
-
-    let (receiver, method) = call_lower.rsplit_once('.')?;
-    let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
-
-    // self.field.method → field_leaf lookup (field types injected from owner_field_types).
-    if receiver.starts_with("self.") {
-        let field = receiver.strip_prefix("self.").unwrap_or(receiver);
-        let field_leaf = field.rsplit_once('.').map_or(field, |p| p.1);
-        if let Some(field_type) = receiver_types.get(field_leaf) {
-            let lowered = field_type.to_lowercase();
-            let leaf = extract_leaf_type(&lowered);
-            if extern_index.has_method(leaf, method) {
-                return Some(format!("self.field: {field_leaf}:{leaf}.{method}"));
-            }
-        }
-    }
-
-    // Direct receiver lookup (param, local, inferred types).
-    if let Some(recv_type) = receiver_types.get(receiver_leaf) {
-        let lowered = recv_type.to_lowercase();
-        let leaf = extract_leaf_type(&lowered);
-        if extern_index.has_method(leaf, method) {
-            return Some(format!("receiver: {receiver_leaf}:{leaf}.{method}"));
-        }
-    }
-
-    // Fallback: if receiver type is unknown and receiver name is not a known
-    // project type, but the method exists in extern types, classify as extern.
-    // This handles cases like `data.len`, `name.is_empty` where the receiver
-    // is clearly a variable (not a project type), and the method exists on
-    // std/dep types. This avoids false classification when the receiver could
-    // be a project type (e.g., `graph.len`).
-    if extern_index.any_type_has_method(method)
-        && !project_type_shorts.contains(receiver_leaf)
-    {
-        return Some(format!("untyped-extern: {receiver_leaf}.{method}"));
-    }
-
-    None
-}
-
 /// Build receiver_types from a DB `ParsedChunk`.
 ///
 /// Extends `build_receiver_type_map` with owning type (self/fields),
 /// let-call bindings, and generic bound resolution.
 fn build_db_chunk_receiver_types(
     chunk: &ParsedChunk,
-    owner_field_types: &BTreeMap<String, BTreeMap<String, String>>,
-    return_type_map: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+    owner_field_types: &HashMap<String, HashMap<String, String>>,
+    return_type_map: &HashMap<String, String>,
+) -> HashMap<String, String> {
     let mut map = build_receiver_type_map(chunk);
     if let Some(owner) = owning_type(&chunk.name) {
         map.entry("self".to_owned()).or_insert_with(|| owner.clone());

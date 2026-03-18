@@ -53,6 +53,41 @@ pub struct ParsedChunk {
     pub enum_variants: Vec<String>,
 }
 
+impl ParsedChunk {
+    /// Convert a `CodeChunk` directly into a `ParsedChunk` (no text re-parsing).
+    ///
+    /// This is much faster than serializing to text and re-parsing.
+    /// Used by `v-code add` to pre-build the chunks.bin cache.
+    pub fn from_code_chunk(chunk: &v_code_chunk::CodeChunk, file: &str, imports: Vec<String>) -> Self {
+        let lines = if chunk.start_line > 0 || chunk.end_line > 0 {
+            Some((chunk.start_line + 1, chunk.end_line + 1))
+        } else {
+            None
+        };
+        Self {
+            kind: chunk.kind.as_str().to_owned(),
+            name: chunk.name.clone(),
+            file: normalize_path(file),
+            lines,
+            signature: chunk.signature.clone(),
+            calls: chunk.calls.clone(),
+            // CodeChunk stores 0-based lines; ParsedChunk uses 1-based (matches text parsing).
+            call_lines: chunk.call_lines.iter().map(|l| l + 1).collect(),
+            types: chunk.type_refs.clone(),
+            imports,
+            string_args: chunk.string_args.clone(),
+            param_flows: chunk.param_flows.clone(),
+            param_types: chunk.param_types.clone(),
+            field_types: chunk.field_types.clone(),
+            local_types: chunk.local_types.clone(),
+            let_call_bindings: chunk.let_call_bindings.clone(),
+            return_type: chunk.return_type.clone(),
+            field_accesses: chunk.field_accesses.clone(),
+            enum_variants: chunk.enum_variants.clone(),
+        }
+    }
+}
+
 /// Parse the text field of a code chunk into a [`ParsedChunk`].
 ///
 /// Expected format (first line is `[kind] [vis] name`):
