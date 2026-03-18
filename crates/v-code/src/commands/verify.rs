@@ -365,7 +365,7 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                 let cat = categorize_miss(call);
                 *miss_categories.entry(cat).or_default() += 1;
                 if unresolved_samples.len() < 2000 {
-                    unresolved_samples.push(call.clone());
+                    unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
                 }
             }
         }

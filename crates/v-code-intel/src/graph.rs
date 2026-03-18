@@ -337,7 +337,7 @@ impl CallGraph {
             .collect();
 
         // Pass 1: parallel resolve — each chunk independently collects edges.
-        let par_results: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>)> = chunks.par_iter()
+        let par_results: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>, Vec<bool>)> = chunks.par_iter()
             .zip(ctxs.par_iter_mut())
             .enumerate()
             .map(|(src, (c, ctx))| {
@@ -346,8 +346,11 @@ impl CallGraph {
             })
             .collect();
 
+        // Per-chunk resolved call indices from pass 1.
+        let mut resolved_indices: Vec<Vec<bool>> = Vec::with_capacity(chunks.len());
+
         // Merge parallel results into AdjState.
-        for (src, (edges, type_edges, _receiver_updates)) in par_results.iter().enumerate() {
+        for (src, (edges, type_edges, _receiver_updates, _resolved)) in par_results.iter().enumerate() {
             for &(tgt, line) in edges {
                 adj.add_edge(src, tgt, line);
             }
@@ -359,11 +362,13 @@ impl CallGraph {
                 }
             }
         }
-        // Apply receiver_type updates from pass 1.
-        for (src, (_, _, receiver_updates)) in par_results.into_iter().enumerate() {
+        // Apply receiver_type updates and collect resolved indices from pass 1.
+        for (src, (_, _, receiver_updates, resolved)) in par_results.into_iter().enumerate() {
             for (var, ty) in receiver_updates {
                 ctxs[src].receiver_types.entry(var).or_insert(ty);
             }
+            debug_assert_eq!(src, resolved_indices.len());
+            resolved_indices.push(resolved);
         }
         eprintln!("      [graph] pass 1 resolve: {:.1}ms ({} chunks)  RSS: {:.1}MB (+{:.1})", t2.elapsed().as_secs_f64() * 1000.0, chunks.len(), current_rss_mb(), current_rss_mb() - rss0);
 
@@ -432,16 +437,13 @@ impl CallGraph {
                 }
             }
 
-            // Parallel delta resolve: only enriched chunks (read-only ctx, no clone needed).
+            // Parallel delta resolve: only enriched chunks, skip already-resolved call indices.
             let enriched_indices: Vec<usize> = (0..chunks.len())
                 .filter(|&src| !extra_receiver_types[src].is_empty())
                 .collect();
             let delta_results: Vec<(usize, Vec<(u32, u32)>)> = enriched_indices.par_iter()
                 .map(|&src| {
-                    let skip: HashSet<String> = adj.callees[src].iter().map(|&idx| {
-                        names_short[idx as usize].to_owned()
-                    }).collect();
-                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &skip, &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names);
+                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &resolved_indices[src], &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names);
                     (src, edges)
                 })
                 .collect();
@@ -827,7 +829,7 @@ fn resolve_collect(
     skip_calls: &HashSet<String>,
     enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
-) -> (Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>) {
+) -> (Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>, Vec<bool>) {
     let mut edges: Vec<(u32, u32)> = Vec::new();
     let mut receiver_updates: HashMap<String, String> = HashMap::new();
     let mut resolved_set = vec![false; chunk.calls.len()];
@@ -894,7 +896,7 @@ fn resolve_collect(
             type_edges.push((tgt, 0));
         }
     }
-    (edges, type_edges, receiver_updates)
+    (edges, type_edges, receiver_updates, resolved_set)
 }
 
 /// Read-only delta resolve for iterative passes (no clone, no receiver_type updates).
@@ -911,7 +913,7 @@ fn resolve_delta(
     instantiated: &HashSet<String>,
     trait_impl_methods: &HashMap<String, Vec<String>>,
     rustdoc: Option<&RustdocTypes>,
-    skip_calls: &HashSet<String>,
+    resolved_indices: &[bool],
     enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
     kinds: &[String],
@@ -919,12 +921,9 @@ fn resolve_delta(
 ) -> Vec<(u32, u32)> {
     let mut edges: Vec<(u32, u32)> = Vec::new();
     for (call_idx, call) in chunk.calls.iter().enumerate() {
-        if !skip_calls.is_empty() {
-            let call_short = call.to_lowercase();
-            let call_leaf = call_short.rsplit("::").next().unwrap_or(&call_short);
-            if skip_calls.contains(call_leaf) {
-                continue;
-            }
+        // Skip calls already resolved in pass 1.
+        if call_idx < resolved_indices.len() && resolved_indices[call_idx] {
+            continue;
         }
         if let Some(tgt) = resolve_with_imports(
             call, exact, short, &ctx.imports,
@@ -1260,8 +1259,9 @@ fn resolve_with_imports(
             if short.contains_key(&ty_lower) || exact.contains_key(&ty_lower) {
                 return short_fn(method);
             }
-            // Type is external (File, OpenOptions, etc.) → skip
-            return None;
+            // Type is not in project — could be external or macro-generated.
+            // Fall through to 6c/6d for method_owners disambiguation instead of
+            // returning None, which would block resolution of macro-generated types.
         }
         // 6c. Unknown receiver → try rustdoc method→owner disambiguation.
         //     Only resolve if the owner type appears in the function's type context
@@ -1857,6 +1857,18 @@ fn infer_local_types_from_calls(
                 .entry(var_name.to_lowercase())
                 .or_insert_with(|| ret_type.clone());
             continue;
+        }
+        // Fallback: `let x = Type::new(...)` → infer x: type (constructor pattern).
+        // Works even for macro-generated types not in return_type_map.
+        if let Some((prefix, method)) = callee_name.rsplit_once("::") {
+            let method_lower = method.to_lowercase();
+            if matches!(method_lower.as_str(), "new" | "default" | "from" | "create" | "builder" | "open" | "init") {
+                let leaf = prefix.rsplit("::").next().unwrap_or(prefix);
+                receiver_types
+                    .entry(var_name.to_lowercase())
+                    .or_insert_with(|| leaf.to_lowercase());
+                continue;
+            }
         }
         // For `receiver.method`, try looking up just the method part
         // with known receiver type prefix: e.g. `self.method` → `SelfType::method`
