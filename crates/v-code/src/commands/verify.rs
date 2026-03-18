@@ -23,7 +23,7 @@ pub(crate) fn short_name(full: &str) -> &str {
 
 /// Verify call-site accuracy for all function chunks in the database.
 #[expect(clippy::needless_range_loop, clippy::type_complexity, reason = "multiple parallel arrays indexed together")]
-pub fn run(db: PathBuf) -> Result<()> {
+pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
     let start = std::time::Instant::now();
     // Load graph + chunks in one pass to avoid double deserialization.
     let (graph, cached_chunks) = super::intel::load_or_build_graph_with_chunks(&db)?;
@@ -119,7 +119,7 @@ pub fn run(db: PathBuf) -> Result<()> {
             }
         }
         let extern_ret_count = return_type_map.len() - before;
-        if extern_ret_count > 0 {
+        if verbose && extern_ret_count > 0 {
             println!("  Extern return types merged: {extern_ret_count} (total return_type_map: {})", return_type_map.len());
         }
     }
@@ -137,6 +137,9 @@ pub fn run(db: PathBuf) -> Result<()> {
     let mut prec_wrong = 0usize;
     let mut ambig_total = 0usize;
     let mut ambig_wrong = 0usize;
+
+    // Per-language counters: (prec_total, prec_ok, recall_total, recall_resolved, recall_extern)
+    let mut lang_stats: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
     let mut wrong_unique: Vec<(String, Vec<String>)> = Vec::new();
     let mut wrong_ambig: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -164,6 +167,7 @@ pub fn run(db: PathBuf) -> Result<()> {
             if is_ambiguous {
                 ambig_total += 1;
             }
+            let lang = ext_to_lang(&graph.files[i]);
 
             let resolved = resolve_path(&graph.files[i], project_root.as_deref());
             let lines = file_cache
@@ -176,6 +180,7 @@ pub fn run(db: PathBuf) -> Result<()> {
                 if is_ambiguous {
                     ambig_wrong += 1;
                 }
+                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
                 errors.push(format!(
                     "    {callee_short} \u{2192} L{call_line}: OUT OF RANGE"
                 ));
@@ -185,11 +190,14 @@ pub fn run(db: PathBuf) -> Result<()> {
             let src = &lines[ln - 1];
             if src.contains(callee_short) {
                 prec_ok += 1;
+                let ls = lang_stats.entry(lang.to_owned()).or_default();
+                ls.0 += 1; ls.1 += 1;
             } else {
                 prec_wrong += 1;
                 if is_ambiguous {
                     ambig_wrong += 1;
                 }
+                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
                 let truncated: String = src.trim().chars().take(70).collect();
                 errors.push(format!(
                     "    {} \u{2192} L{call_line}: '{truncated}'",
@@ -314,12 +322,15 @@ pub fn run(db: PathBuf) -> Result<()> {
             }
 
             recall_total += 1;
+            let lang = ext_to_lang(&graph.files[i]);
 
             if resolved_shorts.contains(short) || short == self_short {
                 recall_resolved += 1;
+                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.3 += 1; }
             } else if has_graph_extern && graph_extern_set[i].contains(&call_lower) {
                 // Graph already classified this call as extern.
                 recall_extern += 1;
+                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
                 if extern_samples.len() < 2000 {
                     let reason = graph_extern_reasons[i].get(&call_lower)
                         .map_or("graph-extern", |r| r.as_str());
@@ -334,6 +345,7 @@ pub fn run(db: PathBuf) -> Result<()> {
                             &return_type_map, all_methods, &owner_field_types,
                         ) {
                             recall_extern += 1;
+                            { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
                             if extern_samples.len() < 2000 {
                                 extern_samples.push(format!("{call}  [{reason}]"));
                             }
@@ -342,6 +354,7 @@ pub fn run(db: PathBuf) -> Result<()> {
                     }
                 }
                 recall_unresolved += 1;
+                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
                 let cat = categorize_miss(call);
                 *miss_categories.entry(cat).or_default() += 1;
                 if unresolved_samples.len() < 2000 {
@@ -349,6 +362,7 @@ pub fn run(db: PathBuf) -> Result<()> {
                 }
             } else {
                 recall_unresolved += 1;
+                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
                 let cat = categorize_miss(call);
                 *miss_categories.entry(cat).or_default() += 1;
                 if unresolved_samples.len() < 2000 {
@@ -365,113 +379,160 @@ pub fn run(db: PathBuf) -> Result<()> {
     let uniq_ok = prec_ok - (ambig_total - ambig_wrong);
     let uniq_wrong = prec_wrong - ambig_wrong;
 
-    println!("{}", "=".repeat(60));
-    println!("  Call graph accuracy verification");
-    println!("{}", "=".repeat(60));
+    // ── Precision summary ────────────────────────────────────────
+    let prec_pct = if prec_total > 0 { prec_ok as f64 / prec_total as f64 * 100.0 } else { 100.0 };
+    let recall_internal = recall_resolved + recall_extern;
+    let recall_pct = if recall_total > 0 { recall_internal as f64 / recall_total as f64 * 100.0 } else { 100.0 };
+    println!(
+        "=== verify: precision {prec_pct:.1}% ({prec_ok}/{prec_total}), recall {recall_pct:.1}% ({recall_internal}/{recall_total}) ===\n"
+    );
 
-    println!("\n  [Precision] reported edges with correct call-site line");
+    println!("  [Precision] reported edges with correct call-site line");
     if prec_total > 0 {
-        let pct = prec_ok as f64 / prec_total as f64 * 100.0;
-        println!("  All edges:    {prec_total}  correct={prec_ok} ({pct:.1}%)  wrong={prec_wrong}");
+        println!("  {:30} {:>8}  {:>8}  {:>8}", "scope", "total", "correct", "wrong");
+        println!("  {}", "-".repeat(60));
+        println!(
+            "  {:30} {:>8}  {:>8}  {:>8}",
+            "all edges", prec_total, prec_ok, prec_wrong
+        );
+        if uniq_total > 0 {
+            println!(
+                "  {:30} {:>8}  {:>8}  {:>8}",
+                "unique names", uniq_total, uniq_ok, uniq_wrong
+            );
+        }
+        println!(
+            "  {:30} {:>8}  {:>8}  {:>8}",
+            "ambiguous (unreliable)", ambig_total, ambig_total - ambig_wrong, ambig_wrong
+        );
     }
-    if uniq_total > 0 {
-        let pct = uniq_ok as f64 / uniq_total as f64 * 100.0;
-        println!("  Unique names: {uniq_total}  correct={uniq_ok} ({pct:.1}%)  wrong={uniq_wrong}");
-    }
-    println!("  Ambiguous:    {ambig_total}  wrong={ambig_wrong} (same-name functions, unreliable)");
 
     println!("\n  [Recall] tree-sitter calls resolved by graph");
     if recall_total > 0 {
-        let internal_resolved = recall_resolved + recall_extern;
-        let pct = internal_resolved as f64 / recall_total as f64 * 100.0;
         let pct_graph = recall_resolved as f64 / recall_total as f64 * 100.0;
-        println!(
-            "  Total calls:  {recall_total}  resolved={internal_resolved} ({pct:.1}%)  unresolved={recall_unresolved}"
-        );
-        println!(
-            "    graph:      {recall_resolved} ({pct_graph:.1}%)  extern: {recall_extern}  (std/deps type match)"
-        );
+        println!("  {:30} {:>8}  {:>8}", "category", "count", "%");
+        println!("  {}", "-".repeat(50));
+        println!("  {:30} {:>8}  {:>7.1}%", "total calls", recall_total, recall_pct);
+        println!("  {:30} {:>8}  {:>7.1}%", "  graph resolved", recall_resolved, pct_graph);
+        println!("  {:30} {:>8}", "  extern (std/deps)", recall_extern);
+        println!("  {:30} {:>8}", "  unresolved", recall_unresolved);
     }
     if let Some(ref ext) = extern_index {
         if ext.type_count() > 0 {
             println!(
-                "  Extern index: {} types, {} methods",
-                ext.type_count(),
-                ext.total_methods()
+                "  {:30} {} types, {} methods",
+                "extern index", ext.type_count(), ext.total_methods()
             );
         }
     } else if has_graph_extern {
         let total_extern: usize = graph.extern_calls.iter().map(|v| v.len()).sum();
-        println!("  Extern calls (from graph): {total_extern}");
+        println!("  {:30} {total_extern}", "extern calls (from graph)");
     }
 
     if !miss_categories.is_empty() {
         let mut cats: Vec<_> = miss_categories.into_iter().collect();
         cats.sort_by(|a, b| b.1.cmp(&a.1));
-        println!("\n  Unresolved by category:");
+        println!("\n  [Unresolved by category]");
         for (cat, count) in &cats {
             println!("    {cat:30} {count:>5}");
         }
     }
 
-    println!("\n  Elapsed: {:.1}ms", start.elapsed().as_secs_f64() * 1000.0);
-    println!("    load:        {:.0}ms", t_load.as_secs_f64() * 1000.0);
-    println!("    index:       {:.0}ms", (t_index - t_load).as_secs_f64() * 1000.0);
-    println!("    precision:   {:.0}ms", (t_precision - t_index).as_secs_f64() * 1000.0);
-    println!("    recall:      {:.0}ms", (t_recall - t_precision).as_secs_f64() * 1000.0);
+    // ── Per-language breakdown ─────────────────────────────────────
+    if lang_stats.len() > 1 {
+        let mut langs: Vec<_> = lang_stats.iter().collect();
+        langs.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(b.1.2.cmp(&a.1.2)));
+        println!("\n  [Per-language]");
+        println!("  {:12} {:>8} {:>8} {:>8}  {:>8} {:>8} {:>8}", "lang", "p_total", "p_ok", "p_%", "r_total", "r_res", "r_%");
+        println!("  {}", "-".repeat(70));
+        for (lang, (pt, po, rt, rr, re)) in &langs {
+            let pp = if *pt > 0 { *po as f64 / *pt as f64 * 100.0 } else { 100.0 };
+            let rp = if *rt > 0 { (*rr + *re) as f64 / *rt as f64 * 100.0 } else { 100.0 };
+            println!("  {:12} {:>8} {:>8} {:>7.1}%  {:>8} {:>8} {:>7.1}%", lang, pt, po, pp, rt, rr + re, rp);
+        }
+    }
 
-    // ── Wrong lines detail ───────────────────────────────────────────
-    wrong_unique.sort_by(|a, b| a.0.cmp(&b.0));
-    wrong_ambig.sort_by(|a, b| a.0.cmp(&b.0));
+    println!(
+        "\n  [Elapsed] {:.1}ms  (load {:.0}, index {:.0}, prec {:.0}, recall {:.0})",
+        start.elapsed().as_secs_f64() * 1000.0,
+        t_load.as_secs_f64() * 1000.0,
+        (t_index - t_load).as_secs_f64() * 1000.0,
+        (t_precision - t_index).as_secs_f64() * 1000.0,
+        (t_recall - t_precision).as_secs_f64() * 1000.0,
+    );
 
-    if !wrong_unique.is_empty() {
-        println!(
-            "\n--- Wrong lines: unique names ({} functions) ---",
-            wrong_unique.len()
-        );
-        for (label, errs) in &wrong_unique {
-            println!("\n  {label}:");
-            for e in errs {
-                println!("  {e}");
+    // ── Verbose detail sections ─────────────────────────────────────
+    if verbose {
+        wrong_unique.sort_by(|a, b| a.0.cmp(&b.0));
+        wrong_ambig.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if !wrong_unique.is_empty() {
+            println!(
+                "\n  [Wrong lines] unique names ({} functions)",
+                wrong_unique.len()
+            );
+            for (label, errs) in &wrong_unique {
+                println!("\n  {label}:");
+                for e in errs {
+                    println!("      {e}");
+                }
             }
         }
-    }
-    if !wrong_ambig.is_empty() {
-        println!(
-            "\n--- Wrong lines: ambiguous names ({} functions, unreliable) ---",
-            wrong_ambig.len()
-        );
-        for (label, errs) in &wrong_ambig {
-            println!("\n  {label}:");
-            for e in errs {
-                println!("  {e}");
+        if !wrong_ambig.is_empty() {
+            println!(
+                "\n  [Wrong lines] ambiguous names ({} functions, unreliable)",
+                wrong_ambig.len()
+            );
+            for (label, errs) in &wrong_ambig {
+                println!("\n  {label}:");
+                for e in errs {
+                    println!("      {e}");
+                }
             }
         }
-    }
 
-    // ── Extern-classified calls (for audit) ─────────────────────────
-    if !extern_samples.is_empty() {
-        println!("\n--- Extern-classified calls ({} total) ---", extern_samples.len());
-        for s in &extern_samples {
-            println!("    {s}");
+        if !extern_samples.is_empty() {
+            println!("\n  [Extern-classified] {} total", extern_samples.len());
+            for s in &extern_samples {
+                println!("    {s}");
+            }
         }
-    }
 
-    // ── Top unresolved calls ─────────────────────────────────────────
-    if !unresolved_samples.is_empty() {
-        let mut freq: HashMap<&str, usize> = HashMap::new();
-        for s in &unresolved_samples {
-            *freq.entry(s.as_str()).or_default() += 1;
-        }
-        let mut sorted: Vec<_> = freq.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
-        println!("\n--- Top unresolved calls ({} unique, {} total samples) ---", sorted.len(), unresolved_samples.len());
-        for (call, count) in sorted.iter().take(80) {
-            println!("    {count:>4}x  {call}");
+        if !unresolved_samples.is_empty() {
+            let mut freq: HashMap<&str, usize> = HashMap::new();
+            for s in &unresolved_samples {
+                *freq.entry(s.as_str()).or_default() += 1;
+            }
+            let mut sorted: Vec<_> = freq.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("\n  [Top unresolved] {} unique, {} total", sorted.len(), unresolved_samples.len());
+            for (call, count) in sorted.iter().take(80) {
+                println!("    {count:>4}x  {call}");
+            }
         }
     }
 
     Ok(())
+}
+
+/// Map file extension to language name for per-language stats.
+fn ext_to_lang(file: &str) -> &'static str {
+    let ext = file.rsplit_once('.').map_or("", |p| p.1);
+    match ext {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" | "mjs" => "javascript",
+        "java" => "java",
+        "go" => "go",
+        "c" => "c",
+        "cpp" | "cc" | "cxx" | "h" | "hpp" => "c++",
+        "cs" => "c#",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "rb" => "ruby",
+        _ => "other",
+    }
 }
 
 /// Categorize an unresolved call for reporting.

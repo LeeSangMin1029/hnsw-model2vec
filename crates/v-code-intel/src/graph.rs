@@ -342,7 +342,7 @@ impl CallGraph {
             .enumerate()
             .map(|(src, (c, ctx))| {
                 let empty_skip = HashSet::new();
-                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &empty_skip, &meta.enum_types, &meta.enum_variants)
+                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &meta.names, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &empty_skip, &meta.enum_types, &meta.enum_variants)
             })
             .collect();
 
@@ -441,7 +441,7 @@ impl CallGraph {
                     let skip: HashSet<String> = adj.callees[src].iter().map(|&idx| {
                         names_short[idx as usize].to_owned()
                     }).collect();
-                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &skip, &meta.enum_types, &meta.enum_variants, &meta.kinds);
+                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &skip, &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names);
                     (src, edges)
                 })
                 .collect();
@@ -817,6 +817,7 @@ fn resolve_collect(
     exact: &HashMap<String, u32>,
     short: &HashMap<String, u32>,
     kinds: &[String],
+    chunk_names: &[String],
     return_type_map: &HashMap<String, String>,
     trait_methods: &BTreeSet<String>,
     method_owners: &HashMap<String, Vec<String>>,
@@ -846,7 +847,7 @@ fn resolve_collect(
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &ctx.imports,
                 ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
-                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
+                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 let tgt_usize = tgt as usize;
@@ -914,6 +915,7 @@ fn resolve_delta(
     enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
     kinds: &[String],
+    chunk_names: &[String],
 ) -> Vec<(u32, u32)> {
     let mut edges: Vec<(u32, u32)> = Vec::new();
     for (call_idx, call) in chunk.calls.iter().enumerate() {
@@ -927,7 +929,7 @@ fn resolve_delta(
         if let Some(tgt) = resolve_with_imports(
             call, exact, short, &ctx.imports,
             ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
-            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
+            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
         ) {
             let tgt_usize = tgt as usize;
             if tgt_usize != src {
@@ -953,7 +955,8 @@ fn resolve_with_imports(
     instantiated: &HashSet<String>,
     trait_impl_methods: &HashMap<String, Vec<String>>,
     rustdoc: Option<&RustdocTypes>,
-    _kinds: &[String],
+    kinds: &[String],
+    chunk_names: &[String],
     _enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
     return_type_map: &HashMap<String, String>,
@@ -975,6 +978,35 @@ fn resolve_with_imports(
         call
     };
     let lower = call.to_lowercase();
+
+    // Guard: fallback lookups must not resolve to enum variant chunks.
+    // Enum variants like `Expression::Sum` should not match `.sum()` method calls.
+    // Also check if the target chunk's method name starts with uppercase (variant constructor).
+    let names = chunk_names;
+    let is_callable = |idx: u32| -> bool {
+        let kind = kinds.get(idx as usize).map(|s| s.as_str()).unwrap_or("");
+        if kind == "enum" || kind == "struct" || kind == "trait" {
+            return false;
+        }
+        // Skip function chunks whose method name starts with uppercase (enum variant constructors
+        // from Python .pyi, TypeScript, etc.)
+        if let Some(name) = names.get(idx as usize) {
+            if let Some(method) = name.rsplit("::").next() {
+                if method.starts_with(|c: char| c.is_uppercase()) {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    let short_fn = |key: &str| -> Option<u32> {
+        let idx = short.get(key).copied()?;
+        if is_callable(idx) { Some(idx) } else { None }
+    };
+    let exact_fn = |key: &str| -> Option<u32> {
+        let idx = exact.get(key).copied()?;
+        if is_callable(idx) { Some(idx) } else { None }
+    };
 
     // Skip Rust prelude enum variant constructors that tree-sitter sees as calls.
     // `Ok(v)`, `Err(e)`, `Some(v)` are bare calls starting with uppercase.
@@ -1038,7 +1070,7 @@ fn resolve_with_imports(
                 }
                 // Field type exists in project → allow short fallback
                 if (short.contains_key(field_type) || exact.contains_key(field_type))
-                    && let Some(&idx) = short.get(leaf_method) {
+                    && let Some(idx) = short_fn(leaf_method) {
                         return Some(idx);
                     }
                 // Field type is external → skip to avoid false positive.
@@ -1124,11 +1156,12 @@ fn resolve_with_imports(
     // 5. Type-reference heuristic for `.method()` calls.
     //    Prefer call_types (from `Foo::bar` calls in the same chunk) over source_types,
     //    because `let x = Foo::new(); x.method()` means `.method()` is likely on Foo.
+    //    Use exact_fn to skip enum variant chunks (e.g. `Expression::Sum` for `.sum()`).
     if let Some((_, method)) = lower.rsplit_once('.') {
         let leaf_method = method.rsplit_once('.').map_or(method, |p| p.1);
         for ty in call_types.iter().chain(source_types.iter()) {
             let candidate = format!("{ty}::{leaf_method}");
-            if let Some(&idx) = exact.get(&candidate) {
+            if let Some(idx) = exact_fn(&candidate) {
                 return Some(idx);
             }
         }
@@ -1168,13 +1201,13 @@ fn resolve_with_imports(
         if let Some(&idx) = exact.get(&qualified) {
             return Some(idx);
         }
-        return short.get(suffix).copied();
+        return short_fn(suffix);
     }
     if let Some((receiver, method)) = lower.rsplit_once('.') {
         let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
         let recv_stripped: String = receiver_leaf.chars().filter(|&c| c != '_').collect();
         if imports.contains_key(receiver_leaf) || exact.contains_key(receiver_leaf) {
-            return short.get(method).copied();
+            return short_fn(method);
         }
         // 6b. Type-aware receiver check: if we know the receiver's type from
         // param_types/local_types/field_types, only match if that type is a
@@ -1225,7 +1258,7 @@ fn resolve_with_imports(
                 }
             // Type is in project (exact or short map) → allow short fallback
             if short.contains_key(&ty_lower) || exact.contains_key(&ty_lower) {
-                return short.get(method).copied();
+                return short_fn(method);
             }
             // Type is external (File, OpenOptions, etc.) → skip
             return None;
@@ -1457,6 +1490,11 @@ fn build_method_owner_index(chunks: &[ParsedChunk]) -> HashMap<String, Vec<Strin
         }
         // Only methods (Type::method pattern)
         let Some((prefix, method)) = c.name.rsplit_once("::") else { continue };
+        // Skip enum variant constructors: `Expression::Sum`, `Error::NotFound`
+        // These start with uppercase and should not match `.sum()`, `.not_found()` calls.
+        if method.starts_with(|c: char| c.is_uppercase()) {
+            continue;
+        }
         let owner = prefix.rsplit("::").next().unwrap_or(prefix);
         // Strip generics: "Foo<T>" → "Foo"
         let owner_clean = owner.split('<').next().unwrap_or(owner).to_lowercase();

@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+**/target/
 *.pdb
 
 # IDE
@@ -65,6 +66,9 @@ models/
 # Node.js
 node_modules/
 package-lock.json
+
+# Examples (scratch files)
+examples/
 
 docs/
 scripts/
