@@ -188,9 +188,47 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
 
             let src = &lines[ln - 1];
             if src.contains(callee_short) {
-                prec_ok += 1;
-                let ls = lang_stats.entry(lang.to_owned()).or_default();
-                ls.0 += 1; ls.1 += 1;
+                // For ambiguous names (same short name, multiple targets),
+                // verify that the owning type also appears on the source line.
+                // e.g. callee "Foo::process" → check "Foo" or "foo" on the line.
+                let callee_name = &graph.names[ci];
+                let owner_mismatch = if is_ambiguous {
+                    if let Some((owner_path, _)) = callee_name.rsplit_once("::") {
+                        let owner_leaf = owner_path.rsplit("::").next().unwrap_or(owner_path);
+                        let src_lower = src.to_lowercase();
+                        let owner_lower = owner_leaf.to_lowercase();
+                        // self.method() calls: owner won't appear in source.
+                        // Valid if caller's owning type matches callee's owner.
+                        let caller_owner = graph.names[i].rsplit_once("::")
+                            .map(|(p, _)| p.rsplit("::").next().unwrap_or(p).to_lowercase());
+                        let is_self_call = src_lower.contains("self.")
+                            && caller_owner.as_deref() == Some(&owner_lower);
+                        if is_self_call {
+                            false
+                        } else {
+                            !src_lower.contains(&owner_lower)
+                        }
+                    } else {
+                        false // bare function, no owner to check
+                    }
+                } else {
+                    false
+                };
+
+                if owner_mismatch {
+                    prec_wrong += 1;
+                    ambig_wrong += 1;
+                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
+                    let truncated: String = src.trim().chars().take(70).collect();
+                    errors.push(format!(
+                        "    {} \u{2192} L{call_line}: owner mismatch '{truncated}'",
+                        callee_name,
+                    ));
+                } else {
+                    prec_ok += 1;
+                    let ls = lang_stats.entry(lang.to_owned()).or_default();
+                    ls.0 += 1; ls.1 += 1;
+                }
             } else {
                 prec_wrong += 1;
                 if is_ambiguous {
@@ -339,9 +377,11 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                 // Fallback: use ExternMethodIndex directly.
                 if let Some(ref ext) = extern_index {
                     if let Some(ref all_methods) = extern_all_methods {
+                        let empty_owners = std::collections::HashMap::new();
                         if let Some(reason) = v_code_intel::graph::check_extern(
                             &call_lower, &receiver_types, ext, &project_type_shorts,
                             &return_type_map, all_methods, &owner_field_types,
+                            None, &empty_owners,
                         ) {
                             recall_extern += 1;
                             { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
@@ -505,7 +545,7 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
             let mut sorted: Vec<_> = freq.into_iter().collect();
             sorted.sort_by(|a, b| b.1.cmp(&a.1));
             println!("\n  [Top unresolved] {} unique, {} total", sorted.len(), unresolved_samples.len());
-            for (call, count) in sorted.iter().take(80) {
+            for (call, count) in &sorted {
                 println!("    {count:>4}x  {call}");
             }
         }

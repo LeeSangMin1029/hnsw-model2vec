@@ -1773,3 +1773,138 @@ fn gamma() {}
     sorted.sort();
     assert_eq!(keys, sorted, "name_index should be sorted for binary search");
 }
+
+// ── Co-method voting ────────────────────────────────────────────────
+
+#[test]
+fn co_method_voting_intersection_resolves_type() {
+    // Two methods called on `scanner` — only Scanner has both `scan` and `tokenize`.
+    // Co-method intersection should infer scanner: Scanner → resolve both calls.
+    let chunks = chunks_from_files(&[
+        ("src/scanner.rs", r#"
+pub struct Scanner;
+impl Scanner {
+    pub fn scan(&self) {}
+    pub fn tokenize(&self) -> Vec<String> { vec![] }
+}
+        "#),
+        ("src/lexer.rs", r#"
+pub struct Lexer;
+impl Lexer {
+    pub fn scan(&self) {}
+    pub fn lex(&self) {}
+}
+        "#),
+        ("src/main.rs", r#"
+fn process(scanner: &Scanner) {
+    scanner.scan();
+    scanner.tokenize();
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    assert!(has_edge(&g, "process", "Scanner::scan"),
+        "co-method voting should resolve scanner.scan → Scanner::scan");
+    assert!(has_edge(&g, "process", "Scanner::tokenize"),
+        "co-method voting should resolve scanner.tokenize → Scanner::tokenize");
+    assert!(!has_edge(&g, "process", "Lexer::scan"),
+        "should NOT resolve to Lexer::scan");
+}
+
+#[test]
+fn co_method_voting_ambiguous_no_false_edge() {
+    // `x.run()` called once — `run` exists on both Runner and Engine.
+    // Single method with multiple owners should NOT create a false edge.
+    let chunks = chunks_from_files(&[
+        ("src/runner.rs", r#"
+pub struct Runner;
+impl Runner { pub fn run(&self) {} }
+        "#),
+        ("src/engine.rs", r#"
+pub struct Engine;
+impl Engine { pub fn run(&self) {} }
+        "#),
+        ("src/main.rs", r#"
+fn start(x: &Runner) {
+    x.run();
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    // param type annotation `x: &Runner` should resolve, not co-method.
+    assert!(has_edge(&g, "start", "Runner::run"));
+    assert!(!has_edge(&g, "start", "Engine::run"));
+}
+
+#[test]
+fn co_method_single_unique_owner_resolves() {
+    // `db.execute()` called once — only Database has `execute`.
+    // Strategy 2: single project method with unique owner → resolve.
+    let chunks = chunks_from_files(&[
+        ("src/db.rs", r#"
+pub struct Database;
+impl Database { pub fn execute(&self, sql: &str) {} }
+        "#),
+        ("src/main.rs", r#"
+fn query(db: &Database) {
+    db.execute("SELECT 1");
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    assert!(has_edge(&g, "query", "Database::execute"),
+        "single unique owner should resolve db.execute → Database::execute");
+}
+
+#[test]
+fn co_method_extern_voting_blocks_false_edge() {
+    // `items` only calls methods NOT in any project type (push, len, iter).
+    // Extern voting should mark items as extern → should NOT connect to project types.
+    let chunks = chunks_from_files(&[
+        ("src/store.rs", r#"
+pub struct Store;
+impl Store { pub fn save(&self) {} }
+        "#),
+        ("src/main.rs", r#"
+fn process() {
+    let items = Vec::new();
+    items.push(1);
+    items.len();
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    // `push` and `len` don't exist in project → receiver is extern → no project edge.
+    let callees = callee_names(&g, "process");
+    // Should not resolve to any project type method.
+    assert!(!callees.iter().any(|c| c.to_lowercase().contains("store")),
+        "extern-voted receiver should not connect to project types, got: {:?}", callees);
+}
+
+#[test]
+fn co_method_intersection_two_types_both_methods() {
+    // Both TypeA and TypeB have `load` and `save`. Cannot disambiguate.
+    // Should NOT create edges to avoid false positives.
+    let chunks = chunks_from_files(&[
+        ("src/a.rs", r#"
+pub struct TypeA;
+impl TypeA { pub fn load(&self) {} pub fn save(&self) {} }
+        "#),
+        ("src/b.rs", r#"
+pub struct TypeB;
+impl TypeB { pub fn load(&self) {} pub fn save(&self) {} }
+        "#),
+        ("src/main.rs", r#"
+fn work(x: &TypeA) {
+    x.load();
+    x.save();
+}
+        "#),
+    ]);
+    let g = build_graph(&chunks);
+    // param type `x: &TypeA` resolves via receiver_types, not co-method.
+    assert!(has_edge(&g, "work", "TypeA::load"));
+    assert!(has_edge(&g, "work", "TypeA::save"));
+    assert!(!has_edge(&g, "work", "TypeB::load"));
+    assert!(!has_edge(&g, "work", "TypeB::save"));
+}

@@ -221,7 +221,16 @@ pub(crate) fn extract_callee_name(func_node: tree_sitter::Node, src: &[u8]) -> O
                             return Some(format!("{leaf}.{method}"));
                         }
                     }
-                    _ => {}
+                    // Fallback: use receiver text if it's a clean identifier/path.
+                    // Covers scoped identifiers (`AutoDistance::L2.distance`).
+                    // Skip complex expressions (calls, long chains) — bare method is safer.
+                    _ => {
+                        if let Ok(recv) = inner.utf8_text(src) {
+                            if !recv.contains('(') && recv.len() <= 60 {
+                                return Some(format!("{recv}.{method}"));
+                            }
+                        }
+                    }
                 }
             }
             Some(method.to_owned())
