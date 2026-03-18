@@ -252,19 +252,12 @@ pub fn run(db: PathBuf) -> Result<()> {
             // (prefix type not in project + suffix uppercase).
             if let Some((prefix, last)) = call.rsplit_once("::") {
                 if last.starts_with(char::is_uppercase) {
-                    // Match against enum_variant_set using leaf type + variant,
-                    // since call may have module prefix (e.g. `ast::Expr::Literal`
-                    // should match enum_variant_set entry `expr::literal`).
-                    let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix).to_lowercase();
-                    let last_lower = last.to_lowercase();
-                    let leaf_key = format!("{prefix_leaf}::{last_lower}");
-                    if enum_variant_set.contains(&leaf_key) {
+                    if enum_variant_set.contains(&call_lower) {
                         continue;
                     }
-                    // External enum variant: prefix type not a project-defined type.
-                    // Only check project_type_shorts (not project_shorts/function names)
-                    // since enum variant prefix is always a type, not a function.
-                    if !project_type_shorts.contains(&prefix_leaf) {
+                    // External enum variant: prefix type not in project index
+                    let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix).to_lowercase();
+                    if !project_shorts.contains(&prefix_leaf) && !project_type_shorts.contains(&prefix_leaf) {
                         continue;
                     }
                 }
