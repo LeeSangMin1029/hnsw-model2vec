@@ -83,7 +83,7 @@ fn run() -> anyhow::Result<()> {
         Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
         Commands::Embed { db } => commands::embed::run(db),
-        Commands::Verify { db, verbose, scip } => commands::verify::run(db, verbose, scip),
+        Commands::Verify { db, verbose } => commands::verify::run(db, verbose),
         Commands::Rustdoc { db } => commands::rustdoc::run(db),
         Commands::Replace { db, symbol, file, body, body_file } => {
             let body = read_body(body, body_file)?;

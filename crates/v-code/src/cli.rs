@@ -388,9 +388,6 @@ pub enum Commands {
         /// Show detailed wrong lines, extern calls, and unresolved samples.
         #[arg(short, long)]
         verbose: bool,
-        /// Path to SCIP index file for ground-truth comparison.
-        #[arg(long)]
-        scip: Option<PathBuf>,
     },
     /// Generate rustdoc JSON and rebuild graph with compiler type info.
     #[command(visible_alias = "rdoc")]
