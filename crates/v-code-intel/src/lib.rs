@@ -22,7 +22,6 @@ pub mod jump;
 pub mod loader;
 pub mod parse;
 pub mod reason;
-pub mod rustdoc;
 pub mod stats;
 pub mod lsp_client;
 pub mod stub_workspace;

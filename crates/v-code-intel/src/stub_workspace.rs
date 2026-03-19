@@ -1,11 +1,11 @@
 //! Auto-generate a minimal stub workspace for lightweight rust-analyzer analysis.
 //!
 //! Strategy:
-//! 1. `cargo metadata` → full dependency graph
-//! 2. Target crate: symlink src/ to real source
+//! 1. `cargo metadata` → full dependency graph (workspace + external versions)
+//! 2. Target crate: junction/symlink src/ to real source
 //! 3. Workspace crates (non-target): extract pub signatures via tree-sitter
-//! 4. External crates: one stub per unique crate (shared by all dependents)
-//! 5. Generate workspace Cargo.toml with `[patch.crates-io]` for external stubs
+//! 4. External crates: auto-extract pub signatures from cargo registry source
+//! 5. Generate workspace Cargo.toml listing all members
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,8 @@ struct CrateMeta {
 struct ExternalDep {
     name: String,
     features: Vec<String>,
+    /// Source directory from cargo registry (for auto-stub generation).
+    source_dir: Option<PathBuf>,
 }
 
 /// Result of stub workspace generation.
@@ -62,50 +64,54 @@ pub fn generate(
         "target crate '{target_crate}' not found in workspace"
     );
 
-    // 2. Collect ALL unique external deps (transitive through workspace crates)
-    let mut all_external: HashMap<String, ExternalDep> = HashMap::new();
-    let mut workspace_crates: Vec<&str> = Vec::new();
+    // 2. Collect workspace crate names
+    let workspace_crates: Vec<&str> = meta
+        .iter()
+        .filter(|(_, info)| info.is_workspace)
+        .map(|(name, _)| name.as_str())
+        .collect();
 
-    for (name, info) in &meta {
-        if info.is_workspace {
-            workspace_crates.push(name);
-            for dep in &info.external_deps {
-                all_external
-                    .entry(dep.name.clone())
-                    .and_modify(|existing| {
-                        // Merge features
-                        for f in &dep.features {
-                            if !existing.features.contains(f) {
-                                existing.features.push(f.clone());
-                            }
+    // 3. Collect unique external deps across all workspace crates
+    let mut all_external: HashMap<String, ExternalDep> = HashMap::new();
+    for info in meta.values().filter(|i| i.is_workspace) {
+        for dep in &info.external_deps {
+            all_external
+                .entry(dep.name.clone())
+                .and_modify(|existing| {
+                    for f in &dep.features {
+                        if !existing.features.contains(f) {
+                            existing.features.push(f.clone());
                         }
-                    })
-                    .or_insert_with(|| dep.clone());
-            }
+                    }
+                    if existing.source_dir.is_none() {
+                        existing.source_dir.clone_from(&dep.source_dir);
+                    }
+                })
+                .or_insert_with(|| dep.clone());
         }
     }
 
-    // 3. Create output directory structure
+    // 4. Create output directory structure
     std::fs::create_dir_all(output_dir)?;
     let stubs_dir = output_dir.join("stubs");
     std::fs::create_dir_all(&stubs_dir)?;
 
-    // 4. Generate external crate stubs (one per unique crate)
-    for (name, dep) in &all_external {
-        generate_external_stub(&stubs_dir, name, &dep.features)?;
+    // 5. Generate external crate stubs (auto-extracted from real source)
+    for dep in all_external.values() {
+        generate_external_stub(&stubs_dir, dep)?;
     }
 
-    // 5. Generate workspace crate stubs (non-target: pub signatures only)
+    // 6. Generate workspace crate stubs (non-target: pub signatures only)
     for &crate_name in &workspace_crates {
         let info = &meta[crate_name];
         let crate_dir = output_dir.join(format!("{crate_name}-stub"));
 
         if crate_name == target_crate {
             // Target crate: copy Cargo.toml, symlink src/
-            generate_target_crate(output_dir, info, &meta)?;
+            generate_target_crate(output_dir, info, &meta, target_crate)?;
         } else {
             // Non-target: extract pub signatures
-            generate_workspace_stub(&crate_dir, info, &meta)?;
+            generate_workspace_stub(&crate_dir, info, &meta, target_crate)?;
         }
     }
 
@@ -119,9 +125,12 @@ pub fn generate(
 }
 
 /// Parse `cargo metadata` output into our simplified format.
+///
+/// Runs full metadata (without `--no-deps`) to get external crate source paths
+/// from the cargo registry, enabling automatic stub generation.
 fn parse_cargo_metadata(project_root: &Path) -> Result<HashMap<String, CrateMeta>> {
     let output = Command::new("cargo")
-        .args(["metadata", "--format-version=1", "--no-deps"])
+        .args(["metadata", "--format-version=1"])
         .current_dir(project_root)
         .output()
         .context("failed to run cargo metadata")?;
@@ -129,17 +138,48 @@ fn parse_cargo_metadata(project_root: &Path) -> Result<HashMap<String, CrateMeta
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).context("failed to parse cargo metadata")?;
 
-    let mut result = HashMap::new();
-
     let packages = json["packages"]
         .as_array()
         .context("no packages in metadata")?;
 
+    // First pass: build name → source_dir map for external crates.
+    // Uses the lib target's src_path to find the actual Rust source directory,
+    // since some crates (e.g., tree-sitter) don't use the standard src/ layout.
+    let mut ext_source_dirs: HashMap<String, PathBuf> = HashMap::new();
     for pkg in packages {
-        let name = pkg["name"].as_str().unwrap_or("").to_owned();
-        let version = pkg["version"].as_str().unwrap_or("0.0.0").to_owned();
+        if pkg["source"].as_str().is_some() {
+            let name = pkg["name"].as_str().unwrap_or("");
+            let lib_src_dir = pkg["targets"]
+                .as_array()
+                .and_then(|targets| {
+                    targets.iter().find(|t| {
+                        t["kind"]
+                            .as_array()
+                            .is_some_and(|k| k.iter().any(|v| v.as_str() == Some("lib")))
+                    })
+                })
+                .and_then(|t| t["src_path"].as_str())
+                .and_then(|sp| PathBuf::from(sp).parent().map(Path::to_path_buf));
+
+            if let Some(dir) = lib_src_dir {
+                if dir.is_dir() {
+                    ext_source_dirs.insert(name.to_owned(), dir);
+                }
+            }
+        }
+    }
+
+    // Second pass: build workspace crate metadata with resolved external dep source dirs.
+    let mut result = HashMap::new();
+    for pkg in packages {
         let source = pkg["source"].as_str();
         let is_workspace = source.is_none();
+        if !is_workspace {
+            continue; // Only workspace crates go into our result map.
+        }
+
+        let name = pkg["name"].as_str().unwrap_or("").to_owned();
+        let version = pkg["version"].as_str().unwrap_or("0.0.0").to_owned();
         let manifest_path = PathBuf::from(pkg["manifest_path"].as_str().unwrap_or(""));
 
         let mut workspace_deps = Vec::new();
@@ -168,9 +208,11 @@ fn parse_cargo_metadata(project_root: &Path) -> Result<HashMap<String, CrateMeta
                 if has_path {
                     workspace_deps.push(dep_name);
                 } else {
+                    let source_dir = ext_source_dirs.get(&dep_name).cloned();
                     external_deps.push(ExternalDep {
                         name: dep_name,
                         features,
+                        source_dir,
                     });
                 }
             }
@@ -193,22 +235,27 @@ fn parse_cargo_metadata(project_root: &Path) -> Result<HashMap<String, CrateMeta
     Ok(result)
 }
 
-/// Generate a minimal stub for an external crate.
+/// Generate a stub for an external crate by extracting pub signatures from its real source.
 ///
-/// Contains an empty lib.rs — enough for rust-analyzer to resolve the crate name.
-/// Type signatures are intentionally omitted; RA falls back gracefully.
-fn generate_external_stub(stubs_dir: &Path, name: &str, features: &[String]) -> Result<()> {
+/// Uses the same `extract_pub_signatures` + `skeletonize_rust` pipeline as workspace
+/// stubs. Compilation errors in stubs are expected and acceptable — RA only needs
+/// parseable source, not compileable code, for type inference.
+fn generate_external_stub(stubs_dir: &Path, dep: &ExternalDep) -> Result<()> {
+    let name = &dep.name;
     let crate_dir = stubs_dir.join(name);
     let src_dir = crate_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
     // Cargo.toml with features declared
-    let features_toml = if features.is_empty() {
+    let features_toml = if dep.features.is_empty() {
         String::new()
     } else {
         let mut ft = String::from("\n[features]\ndefault = []\n");
-        for f in features {
-            ft.push_str(&format!("{f} = []\n"));
+        let mut seen = std::collections::HashSet::new();
+        for f in &dep.features {
+            if f != "default" && seen.insert(f) {
+                ft.push_str(&format!("{f} = []\n"));
+            }
         }
         ft
     };
@@ -218,12 +265,12 @@ fn generate_external_stub(stubs_dir: &Path, name: &str, features: &[String]) -> 
     );
     std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)?;
 
-    // Empty lib.rs — RA will see the crate exists but has no items.
-    // This is enough to prevent "unresolved crate" errors.
-    std::fs::write(
-        src_dir.join("lib.rs"),
-        format!("//! Stub for {name}\n"),
-    )?;
+    // Extract pub signatures from real source if available.
+    if let Some(real_src) = &dep.source_dir {
+        extract_pub_signatures(real_src, &src_dir)?;
+    } else {
+        std::fs::write(src_dir.join("lib.rs"), format!("//! Stub for {name}\n"))?;
+    }
 
     Ok(())
 }
@@ -233,12 +280,13 @@ fn generate_target_crate(
     output_dir: &Path,
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
+    target_crate: &str,
 ) -> Result<()> {
     let crate_dir = output_dir.join(&info.name);
     std::fs::create_dir_all(&crate_dir)?;
 
     // Generate Cargo.toml pointing to stubs
-    let cargo_toml = build_crate_cargo_toml(info, all_meta)?;
+    let cargo_toml = build_crate_cargo_toml(info, all_meta, target_crate)?;
     std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)?;
 
     // Symlink src/ → real source
@@ -257,7 +305,24 @@ fn generate_target_crate(
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real_src, &link_path)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&real_src, &link_path)?;
+    {
+        // Use junction (mklink /J) instead of symlink — no admin privileges required.
+        let link_str = link_path.to_string_lossy().replace('/', "\\");
+        let target_str = real_src.to_string_lossy().replace('/', "\\");
+        let output = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&*link_str)
+            .arg(&*target_str)
+            .output()
+            .context("failed to run mklink /J")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "mklink /J failed for {link_str}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     Ok(())
 }
@@ -267,6 +332,7 @@ fn generate_workspace_stub(
     crate_dir: &Path,
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
+    target_crate: &str,
 ) -> Result<()> {
     let src_dir = crate_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
@@ -281,7 +347,7 @@ fn generate_workspace_stub(
     extract_pub_signatures(&real_src, &src_dir)?;
 
     // Generate Cargo.toml
-    let cargo_toml = build_crate_cargo_toml(info, all_meta)?;
+    let cargo_toml = build_crate_cargo_toml(info, all_meta, target_crate)?;
     std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)?;
 
     Ok(())
@@ -291,6 +357,7 @@ fn generate_workspace_stub(
 fn build_crate_cargo_toml(
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
+    target_crate: &str,
 ) -> Result<String> {
     let mut toml = format!(
         "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
@@ -298,10 +365,10 @@ fn build_crate_cargo_toml(
     );
 
     // Workspace deps → point to stub dirs
-    // All crates are siblings under output_dir, so relative path is always "../<name>"
+    // Target crate has no -stub suffix; all others do.
     for dep_name in &info.workspace_deps {
         if all_meta.contains_key(dep_name.as_str()) {
-            let dir_name = if dep_name == &info.name {
+            let dir_name = if dep_name == target_crate {
                 dep_name.clone()
             } else {
                 format!("{dep_name}-stub")
@@ -312,10 +379,11 @@ fn build_crate_cargo_toml(
 
     // External deps → point to stubs/<name>
     for dep in &info.external_deps {
-        let rel_str = format!("../stubs/{}", dep.name);
-
+        let rel_path = format!("../stubs/{}", dep.name);
         if dep.features.is_empty() {
-            toml.push_str(&format!("{} = {{ path = \"{}\" }}\n", dep.name, rel_str));
+            toml.push_str(&format!(
+                "{} = {{ path = \"{}\" }}\n", dep.name, rel_path
+            ));
         } else {
             let feat_str = dep
                 .features
@@ -325,7 +393,7 @@ fn build_crate_cargo_toml(
                 .join(", ");
             toml.push_str(&format!(
                 "{} = {{ path = \"{}\", features = [{}] }}\n",
-                dep.name, rel_str, feat_str
+                dep.name, rel_path, feat_str
             ));
         }
     }
@@ -408,9 +476,11 @@ fn walkdir(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Replace function bodies with `unimplemented!()` and strip derive macros.
+/// Replace function bodies with `unimplemented!()` and strip problematic items.
 ///
-/// Simple brace-counting approach — works for well-formed Rust source.
+/// Strips: derive macros, serde/bincode attributes, extern crate imports,
+/// `#[cfg(test)]` blocks. Replaces fn bodies with `unimplemented!()`.
+/// Goal: produce code that rust-analyzer can parse without external proc macros.
 fn skeletonize_rust(source: &str) -> String {
     let mut result = String::with_capacity(source.len() / 2);
     let lines: Vec<&str> = source.lines().collect();
@@ -429,8 +499,28 @@ fn skeletonize_rust(source: &str) -> String {
             continue;
         }
 
-        // Strip #[derive(...)] lines (proc macros not available in stubs)
+        // Strip proc-macro derives but keep std derives.
+        // External crates are real versions now, so std derives (Clone, Debug, etc.)
+        // must remain for workspace stubs to compile.
         if trimmed.starts_with("#[derive(") {
+            let filtered = filter_std_derives(trimmed);
+            if let Some(kept) = filtered {
+                let indent = line.len() - line.trim_start().len();
+                result.push_str(&" ".repeat(indent));
+                result.push_str(&kept);
+                result.push('\n');
+            }
+            i += 1;
+            continue;
+        }
+
+        // Strip serde/bincode/thiserror attributes (not available in stubs)
+        if trimmed.starts_with("#[serde")
+            || trimmed.starts_with("#[error")
+            || trimmed.starts_with("#[from]")
+            || trimmed.starts_with("#[expect(")
+            || trimmed.starts_with("#[allow(")
+        {
             i += 1;
             continue;
         }
@@ -485,7 +575,54 @@ fn skeletonize_rust(source: &str) -> String {
         }
     }
 
+    // Strip inline proc-macro attributes that aren't available in stubs
+    let result = result.replace("#[from] ", "").replace("#[from]", "");
+
+    // Ensure brace balance — skeletonize may miscount braces inside
+    // char/string literals. Append missing closing braces if needed.
+    let mut depth: i32 = 0;
+    for ch in result.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        let mut result = result;
+        for _ in 0..depth {
+            result.push_str("}\n");
+        }
+        return result;
+    }
+
     result
+}
+
+/// Standard derives that don't need proc macros.
+const STD_DERIVES: &[&str] = &[
+    "Clone", "Copy", "Debug", "Default", "Hash",
+    "PartialEq", "Eq", "PartialOrd", "Ord",
+];
+
+/// Filter a `#[derive(...)]` line, keeping only std derives.
+/// Returns `None` if no std derives remain.
+fn filter_std_derives(line: &str) -> Option<String> {
+    let start = line.find('(')? + 1;
+    let end = line.rfind(')')?;
+    let inner = &line[start..end];
+
+    let kept: Vec<&str> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|d| STD_DERIVES.contains(d))
+        .collect();
+
+    if kept.is_empty() {
+        None
+    } else {
+        Some(format!("#[derive({})]", kept.join(", ")))
+    }
 }
 
 /// Skip lines until matching closing brace (brace_count goes to 0).

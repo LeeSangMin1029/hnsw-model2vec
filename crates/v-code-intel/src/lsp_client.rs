@@ -268,3 +268,168 @@ pub fn is_lspmux_available() -> bool {
         Duration::from_millis(500),
     ).is_ok()
 }
+
+/// Collect return types from LSP hover queries for let-call bindings.
+///
+/// For each `let x = foo()` binding in chunks, hovers on `x` to get its type,
+/// then records `foo → return_type`. Returns a map of fn_name → return_type
+/// suitable for `CallGraph::build_with_lsp`.
+pub fn collect_return_types(
+    chunks: &[crate::parse::ParsedChunk],
+    stub_root: &Path,
+) -> HashMap<String, String> {
+    let mut client = match LspClient::connect(stub_root) {
+        Some(c) => c,
+        None => {
+            eprintln!("    [lsp] lspmux not available, skipping type inference");
+            return HashMap::new();
+        }
+    };
+
+    // Collect hover queries: find variable positions in source files.
+    let queries = build_hover_queries(chunks, stub_root);
+    if queries.is_empty() {
+        return HashMap::new();
+    }
+    eprintln!("    [lsp] querying {} hover positions...", queries.len());
+
+    // Map var_name → callee_name for result processing.
+    let var_to_callee: HashMap<String, Vec<String>> = {
+        let mut m: HashMap<String, Vec<String>> = HashMap::new();
+        for chunk in chunks {
+            for (var_name, callee_name) in &chunk.let_call_bindings {
+                m.entry(var_name.to_lowercase())
+                    .or_default()
+                    .push(callee_name.to_lowercase());
+            }
+        }
+        m
+    };
+
+    let mut result: HashMap<String, String> = HashMap::new();
+    let mut resolved = 0usize;
+
+    for q in &queries {
+        let path = Path::new(&q.file);
+        if let Some(type_str) = client.hover(path, q.line, q.col) {
+            let leaf = extract_leaf_type_from_rust(&type_str);
+            if !leaf.is_empty() && leaf != "unknown" {
+                let var_lower = q.var_name.to_lowercase();
+                if let Some(callees) = var_to_callee.get(&var_lower) {
+                    for callee in callees {
+                        result.entry(callee.clone()).or_insert_with(|| {
+                            resolved += 1;
+                            leaf.clone()
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!("    [lsp] resolved {resolved} return types from {} queries", queries.len());
+    result
+}
+
+/// Build hover queries from chunks by finding variable declaration positions.
+///
+/// For each `let x = foo()` binding, finds the source line and column of `x`
+/// to construct a hover query.
+fn build_hover_queries(
+    chunks: &[crate::parse::ParsedChunk],
+    stub_root: &Path,
+) -> Vec<HoverQuery> {
+    let mut queries = Vec::new();
+    // Cache file contents to avoid re-reading.
+    let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
+
+    for chunk in chunks {
+        if chunk.let_call_bindings.is_empty() {
+            continue;
+        }
+        let Some((start_line, _end_line)) = chunk.lines else {
+            continue;
+        };
+
+        // Resolve file path relative to stub workspace root.
+        let file_path = resolve_chunk_file(&chunk.file, stub_root);
+        let file_key = chunk.file.clone();
+
+        let lines = file_cache.entry(file_key.clone()).or_insert_with(|| {
+            std::fs::read_to_string(&file_path)
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        });
+
+        for (var_name, _callee) in &chunk.let_call_bindings {
+            // Search for `let var_name` or `let mut var_name` in chunk's line range.
+            let search_start = start_line.saturating_sub(1); // 1-based → 0-based
+            let search_end = lines.len().min(start_line + 500); // reasonable range
+
+            for line_idx in search_start..search_end {
+                let line = &lines[line_idx];
+                if let Some(col) = find_let_var_column(line, var_name) {
+                    queries.push(HoverQuery {
+                        file: file_path.to_string_lossy().into_owned(),
+                        line: line_idx as u32,
+                        col,
+                        var_name: var_name.clone(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    // Deduplicate by (file, line, col).
+    queries.sort_by(|a, b| {
+        a.file.cmp(&b.file)
+            .then(a.line.cmp(&b.line))
+            .then(a.col.cmp(&b.col))
+    });
+    queries.dedup_by(|a, b| a.file == b.file && a.line == b.line && a.col == b.col);
+
+    queries
+}
+
+/// Find the column of a variable name in a `let` binding line.
+///
+/// Matches `let var_name` or `let mut var_name` patterns.
+/// Returns the 0-based column of the variable name.
+fn find_let_var_column(line: &str, var_name: &str) -> Option<u32> {
+    // Pattern 1: `let var_name`
+    let pat1 = format!("let {var_name}");
+    if let Some(pos) = line.find(&pat1) {
+        return Some((pos + 4) as u32); // skip "let "
+    }
+    // Pattern 2: `let mut var_name`
+    let pat2 = format!("let mut {var_name}");
+    if let Some(pos) = line.find(&pat2) {
+        return Some((pos + 8) as u32); // skip "let mut "
+    }
+    None
+}
+
+/// Resolve a chunk file path relative to the stub workspace.
+///
+/// Chunk files use normalized paths like `crates/v-code-intel/src/graph.rs`.
+/// In the stub workspace, the target crate's src/ is a junction to the real source,
+/// so the file should be accessible at `stub_root/<crate_name>/src/<rest>`.
+fn resolve_chunk_file(chunk_file: &str, stub_root: &Path) -> std::path::PathBuf {
+    // Try direct path first (works when chunk_file is absolute).
+    let direct = std::path::PathBuf::from(chunk_file);
+    if direct.is_absolute() && direct.exists() {
+        return direct;
+    }
+
+    // Try relative to stub root.
+    let relative = stub_root.join(chunk_file);
+    if relative.exists() {
+        return relative;
+    }
+
+    // Fallback: return as-is.
+    direct
+}

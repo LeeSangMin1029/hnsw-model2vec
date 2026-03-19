@@ -14,7 +14,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::parse::ParsedChunk;
-use crate::rustdoc::RustdocTypes;
 
 /// Source hash of graph.rs — auto-computed by build.rs.
 /// Invalidates cache whenever resolve logic changes, no manual version bump needed.
@@ -264,7 +263,18 @@ impl CallGraph {
     pub fn build_full(
         chunks: &[ParsedChunk],
     ) -> Self {
-        let rustdoc: Option<&RustdocTypes> = None;
+        Self::build_with_lsp(chunks, &HashMap::new())
+    }
+
+    /// Build the call graph with additional LSP-resolved return types.
+    ///
+    /// `lsp_return_types` maps lowercase function names to their return types
+    /// (e.g., `"callgraph::build_full"` → `"callgraph"`).
+    /// These supplement tree-sitter's type extraction with LSP hover results.
+    pub fn build_with_lsp(
+        chunks: &[ParsedChunk],
+        lsp_return_types: &HashMap<String, String>,
+    ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
 
@@ -295,40 +305,27 @@ impl CallGraph {
             ),
         );
         let ((owner_types, owner_field_types), (mut return_type_map, trait_methods)) = left;
-        let (mut method_owners, (instantiated, trait_impl_methods)) = right;
+        let (method_owners, (instantiated, trait_impl_methods)) = right;
 
-        // Enrich with rustdoc compiler-resolved types (overlay on tree-sitter heuristics).
-        if let Some(rdoc) = rustdoc {
-            // 1. Merge rustdoc fn_return_types into return_type_map.
-            //    Rustdoc has compiler-verified return types — prefer over tree-sitter guesses.
-            let mut rdoc_added = 0usize;
-            for (fn_name, ret_type) in &rdoc.fn_return_types {
+        // Merge LSP-resolved return types (overlay on tree-sitter heuristics).
+        if !lsp_return_types.is_empty() {
+            let mut lsp_added = 0usize;
+            for (fn_name, ret_type) in lsp_return_types {
                 use std::collections::hash_map::Entry;
                 match return_type_map.entry(fn_name.clone()) {
-                    Entry::Vacant(e) => { e.insert(ret_type.clone()); rdoc_added += 1; }
+                    Entry::Vacant(e) => { e.insert(ret_type.clone()); lsp_added += 1; }
                     Entry::Occupied(mut e) => {
-                        // Only override if tree-sitter result is a generic placeholder
                         let current = e.get();
                         if current.len() <= 1 || current == "self" {
                             e.insert(ret_type.clone());
-                            rdoc_added += 1;
+                            lsp_added += 1;
                         }
                     }
                 }
             }
-            // 2. Merge rustdoc method_owner into method_owners.
-            //    Adds owner information for methods that tree-sitter couldn't resolve.
-            let mut owner_added = 0usize;
-            for (method, owners) in &rdoc.method_owner {
-                let entry = method_owners.entry(method.clone()).or_default();
-                for owner in owners {
-                    if !entry.contains(owner) {
-                        entry.push(owner.clone());
-                        owner_added += 1;
-                    }
-                }
+            if lsp_added > 0 {
+                eprintln!("      [graph] LSP overlay: +{lsp_added} return types");
             }
-            eprintln!("      [graph] rustdoc overlay: +{rdoc_added} return types, +{owner_added} method owners");
         }
 
         eprintln!("      [graph] index tables: {:.1}ms  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
@@ -348,7 +345,7 @@ impl CallGraph {
             .enumerate()
             .map(|(src, (c, ctx))| {
                 let empty_skip = HashSet::new();
-                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &meta.names, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &empty_skip, &meta.enum_types, &meta.enum_variants, &extern_all_methods)
+                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &meta.names, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, &empty_skip, &meta.enum_types, &meta.enum_variants, &extern_all_methods)
             })
             .collect();
 
@@ -449,7 +446,7 @@ impl CallGraph {
                 .collect();
             let delta_results: Vec<(usize, Vec<(u32, u32)>)> = enriched_indices.par_iter()
                 .map(|&src| {
-                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &resolved_indices[src], &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names, &extern_all_methods);
+                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, &resolved_indices[src], &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names, &extern_all_methods);
                     (src, edges)
                 })
                 .collect();
@@ -755,7 +752,6 @@ fn resolve_collect(
     method_owners: &HashMap<String, Vec<String>>,
     instantiated: &HashSet<String>,
     trait_impl_methods: &HashMap<String, Vec<String>>,
-    rustdoc: Option<&RustdocTypes>,
     skip_calls: &HashSet<String>,
     enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
@@ -780,7 +776,7 @@ fn resolve_collect(
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &ctx.imports,
                 ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
-                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves, extern_all_methods,
+                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves, extern_all_methods,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 let tgt_usize = tgt as usize;
@@ -844,7 +840,6 @@ fn resolve_delta(
     method_owners: &HashMap<String, Vec<String>>,
     instantiated: &HashSet<String>,
     trait_impl_methods: &HashMap<String, Vec<String>>,
-    rustdoc: Option<&RustdocTypes>,
     resolved_indices: &[bool],
     enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
@@ -861,7 +856,7 @@ fn resolve_delta(
         if let Some(tgt) = resolve_with_imports(
             call, exact, short, &ctx.imports,
             ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
-            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves, extern_all_methods,
+            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves, extern_all_methods,
         ) {
             let tgt_usize = tgt as usize;
             let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
@@ -891,7 +886,6 @@ fn resolve_with_imports(
     method_owners: &HashMap<String, Vec<String>>,
     instantiated: &HashSet<String>,
     trait_impl_methods: &HashMap<String, Vec<String>>,
-    rustdoc: Option<&RustdocTypes>,
     kinds: &[String],
     chunk_names: &[String],
     _enum_types: &HashSet<String>,
@@ -1014,16 +1008,8 @@ fn resolve_with_imports(
         //     e.g. self.tokenizer.encode → receiver_types["tokenizer"] = "tokenizer" → Tokenizer::encode
         if let Some((field_path, _)) = method.rsplit_once('.') {
             let field_leaf = field_path.rsplit_once('.').map_or(field_path, |p| p.1);
-            // Direct field type lookup (from struct definition or rustdoc field_types)
-            let field_type_from_receiver = receiver_types.get(field_leaf).cloned();
-            let field_type_resolved = field_type_from_receiver.or_else(|| {
-                // Fallback: try rustdoc field_types for self.field resolution.
-                // Key format: "owner_type.field_name" → field_type
-                let owner = self_type?;
-                let rdoc = rustdoc?;
-                let key = format!("{owner}.{field_leaf}");
-                rdoc.field_types.get(&key).cloned()
-            });
+            // Direct field type lookup (from struct definition)
+            let field_type_resolved = receiver_types.get(field_leaf).cloned();
             if let Some(ref field_type) = field_type_resolved {
                 let candidate = format!("{field_type}::{leaf_method}");
                 if let Some(&idx) = exact.get(&candidate) {

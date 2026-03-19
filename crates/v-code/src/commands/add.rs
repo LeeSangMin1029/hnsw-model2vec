@@ -141,8 +141,6 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     };
 
 
-    // Lightweight type inference replaces rustdoc — zero-cost, extracted from chunks.
-
     // === Remove chunks from deleted files ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
     let deleted: Vec<String> = file_idx.files.keys()
@@ -259,8 +257,15 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
+    // LSP type inference via stub workspace + lspmux (optional).
+    let lsp_types = if let Some(root) = project_root {
+        collect_lsp_types(root, &chunks)
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
+    let graph = v_code_intel::graph::CallGraph::build_with_lsp(&chunks, &lsp_types);
     eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
     let t4 = std::time::Instant::now();
@@ -407,6 +412,57 @@ fn direct_bulk_write(
         start.elapsed().as_secs_f64(), idx_ms, enc_ms, write_ms, fi_ms);
 
     Ok(inserted)
+}
+
+/// Collect LSP return types via stub workspace + lspmux.
+///
+/// Creates/updates a minimal stub workspace, connects to lspmux,
+/// and queries hover for let-call bindings to resolve return types
+/// that tree-sitter cannot determine.
+fn collect_lsp_types(
+    project_root: &std::path::Path,
+    chunks: &[v_code_intel::parse::ParsedChunk],
+) -> std::collections::HashMap<String, String> {
+    use v_code_intel::lsp_client;
+
+    if !lsp_client::is_lspmux_available() {
+        return std::collections::HashMap::new();
+    }
+
+    let t_lsp = std::time::Instant::now();
+
+    // Determine target crate (the one with most chunks).
+    let target_crate = detect_target_crate(chunks);
+    let stub_dir = project_root.join("target").join("v-code-cache").join("stub-workspace");
+
+    // Ensure stub workspace is up-to-date.
+    match v_code_intel::stub_workspace::ensure_up_to_date(project_root, &target_crate, &stub_dir) {
+        Ok(ws) => {
+            let types = lsp_client::collect_return_types(chunks, &ws.root);
+            eprintln!("    [lsp] type collection: {:.1}ms", t_lsp.elapsed().as_secs_f64() * 1000.0);
+            types
+        }
+        Err(e) => {
+            eprintln!("    [lsp] stub workspace failed: {e}");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// Detect the target crate from chunks (the one with the most files).
+fn detect_target_crate(chunks: &[v_code_intel::parse::ParsedChunk]) -> String {
+    let mut crate_counts: HashMap<String, usize> = HashMap::new();
+    for chunk in chunks {
+        // Extract crate name from file path: "crates/<name>/src/..."
+        if let Some(name) = chunk.file.split('/').nth(1) {
+            *crate_counts.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+    crate_counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| "v-code-intel".to_owned())
 }
 
 /// Fast file scan: `git ls-files` (instant from index) with walkdir fallback.
