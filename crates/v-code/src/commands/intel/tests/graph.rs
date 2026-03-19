@@ -138,14 +138,18 @@ fn build_resolves_self_method_calls() {
 
 #[test]
 fn build_resolves_chained_self_method() {
+    // self.config.bar should NOT resolve to Foo::bar — config is a field,
+    // and without knowing config's type we can't assume bar belongs to Foo.
+    // This prevents false positives like self.manifest.get_collection → CollectionManager::get_collection
+    // when manifest is actually a Manifest.
     let chunks = vec![
         chunk("Foo::bar", "src/foo.rs", &[]),
         chunk("Foo::run", "src/foo.rs", &["self.config.bar"]),
     ];
     let graph = CallGraph::build(&chunks);
 
-    // self.config.bar → Foo::bar (last segment after stripping self.)
-    assert_eq!(graph.callees[1], vec![0], "self.config.bar should resolve to Foo::bar");
+    let empty: Vec<u32> = vec![];
+    assert_eq!(graph.callees[1], empty, "self.config.bar should not resolve without field type info");
 }
 
 // ── is_test detection ────────────────────────────────────────────────

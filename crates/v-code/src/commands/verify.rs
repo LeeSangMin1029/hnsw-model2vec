@@ -9,6 +9,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// Owner verification result for a callee edge.
+enum OwnerVerdict {
+    /// Owner confirmed in source (explicit type or receiver type match).
+    Confirmed,
+    /// `.method(` exists in source but owner cannot be confirmed.
+    Unverified,
+    /// Method name not found in source at all — likely wrong edge.
+    Wrong,
+}
+
 use anyhow::Result;
 
 use v_code_intel::extern_types::ExternMethodIndex;
@@ -119,8 +129,10 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
     let mut prec_total = 0usize;
     let mut prec_ok = 0usize;
     let mut prec_wrong = 0usize;
+    let mut prec_unverified = 0usize;
     let mut ambig_total = 0usize;
     let mut ambig_wrong = 0usize;
+    let mut ambig_unverified = 0usize;
 
     // Per-language counters: (prec_total, prec_ok, recall_total, recall_resolved, recall_extern)
     let mut lang_stats: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
@@ -178,7 +190,7 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                 // calls we check whether the owner appears on the source line or is a
                 // self-call within the same impl block.
                 let callee_name = &graph.names[ci];
-                let owner_mismatch = if let Some((owner_path, _)) = callee_name.rsplit_once("::") {
+                let owner_verdict = if let Some((owner_path, _)) = callee_name.rsplit_once("::") {
                     // Handle trait impl names: "Trait for Type" → extract "Type"
                     // Strip generic params: "Bm25Index<T>" → "Bm25Index"
                     let raw_leaf = owner_path.rsplit("::").next().unwrap_or(owner_path);
@@ -198,10 +210,28 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                             let after_for = leaf.split(" for ").last().unwrap_or(leaf);
                             after_for.split('<').next().unwrap_or(after_for).to_lowercase()
                         });
-                    let is_self_call = src_lower.contains("self.")
+                    let is_self_call = (src_lower.contains("self.") || src_lower.contains("self::"))
                         && caller_owner.as_deref() == Some(&owner_lower);
-                    if is_self_call || src_lower.contains(&owner_lower) {
+                    // For trait impl names ("Trait for Type"), also accept if the
+                    // trait name appears in the receiver's type context.
+                    // e.g. dc.distance() → dc's type is the trait itself.
+                    let trait_name_lower = if raw_leaf.contains(" for ") {
+                        Some(raw_leaf.split(" for ").next().unwrap_or("")
+                            .split('<').next().unwrap_or("").to_lowercase())
+                    } else {
+                        None
+                    };
+                    let trait_match = trait_name_lower.as_ref().map_or(false, |tn| {
+                        if tn.is_empty() { return false; }
+                        // Direct trait name in source or caller is the trait
+                        if src_lower.contains(tn.as_str())
+                            || caller_owner.as_deref() == Some(tn.as_str()) {
+                            return true;
+                        }
                         false
+                    });
+                    if is_self_call || src_lower.contains(&owner_lower) || trait_match {
+                        OwnerVerdict::Confirmed
                     } else {
                         let method_lower = callee_name.rsplit_once("::").map_or("", |(_, m)| m).to_lowercase();
                         let recv_types = &chunk_receiver_types[i];
@@ -291,26 +321,18 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                                 }
                             }
                         }
-                        // Strategy E: callee owner matches a graph callee's owner (DISABLED for audit).
-                        // If we call other methods on the same receiver AND those resolve to the
-                        // same owner type, it's strong evidence the receiver IS that type.
+                        // Strategy E: co-method on same receiver confirms owner.
                         if !matched {
                             if let Some(ref expr) = call_expr {
                                 if let Some((recv_part, _)) = expr.rsplit_once('.') {
                                     let recv_leaf = recv_part.rsplit_once('.').map_or(recv_part, |p| p.1);
-                                    // Check if any other callee from this chunk has the same owner
-                                    // and is called on the same receiver.
                                     let concrete_owner = owner_lower.split(" for ").last().unwrap_or(&owner_lower);
                                     for other_call in &chunks[i].calls {
                                         let other_lower = other_call.to_lowercase();
                                         if let Some((other_recv, _)) = other_lower.rsplit_once('.') {
                                             let other_recv_leaf = other_recv.rsplit_once('.').map_or(other_recv, |p| p.1);
                                             if other_recv_leaf == recv_leaf && other_lower != *expr {
-                                                // Same receiver, different method — check if it resolves
-                                                // to the same owner via chunk_callee_shorts
                                                 if let Some(other_method) = other_lower.rsplit_once('.').map(|p| p.1) {
-                                                    // Skip extern methods — using them as evidence
-                                                    // would cause circular validation.
                                                     let other_is_extern = extern_all_methods.as_ref()
                                                         .map_or(false, |m| m.contains(other_method));
                                                     if !other_is_extern {
@@ -331,27 +353,78 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                                 }
                             }
                         }
-                        !matched
+                        // Strategy F: trait impl callee — receiver type matches trait.
+                        if !matched && trait_name_lower.is_some() {
+                            let method_lower = callee_name.rsplit_once("::").map_or("", |(_, m)| m).to_lowercase();
+                            let dot_method = format!(".{method_lower}(");
+                            if src_lower.contains(&dot_method) {
+                                if let Some(ref expr) = call_expr {
+                                    if let Some((recv_part, _)) = expr.rsplit_once('.') {
+                                        let recv_leaf = recv_part.rsplit_once('.').map_or(recv_part, |p| p.1);
+                                        let tn = trait_name_lower.as_ref().expect("checked above");
+                                        if let Some(rt) = recv_types.get(recv_leaf) {
+                                            let rt_leaf = rt.split('<').next().unwrap_or(rt);
+                                            if rt_leaf == tn.as_str()
+                                                || rt_leaf == owner_lower
+                                                || type_matches(rt_leaf) {
+                                                matched = true;
+                                            }
+                                        }
+                                        if !matched && name_matches(recv_leaf) {
+                                            matched = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if matched {
+                            OwnerVerdict::Confirmed
+                        } else {
+                            // Check if `.method(` exists in source — if so, the call
+                            // site has a method invocation but we can't confirm the owner.
+                            let method_lower = callee_name.rsplit_once("::").map_or("", |(_, m)| m).to_lowercase();
+                            let dot_method = format!(".{method_lower}(");
+                            let colon_method = format!("::{method_lower}(");
+                            if src_lower.contains(&dot_method) || src_lower.contains(&colon_method) {
+                                OwnerVerdict::Unverified
+                            } else {
+                                OwnerVerdict::Wrong
+                            }
+                        }
                     }
                 } else {
-                    false // bare function, no owner to check
+                    OwnerVerdict::Confirmed // bare function, no owner to check
                 };
 
-                if owner_mismatch {
-                    prec_wrong += 1;
-                    if is_ambiguous { ambig_wrong += 1; }
-                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
-                    let truncated: String = src.trim().chars().take(70).collect();
-                    errors.push(format!(
-                        "    {} \u{2192} L{call_line}: owner mismatch '{truncated}'",
-                        callee_name,
-                    ));
-                } else {
-                    prec_ok += 1;
-                    let ls = lang_stats.entry(lang.to_owned()).or_default();
-                    ls.0 += 1; ls.1 += 1;
+                match owner_verdict {
+                    OwnerVerdict::Wrong => {
+                        prec_wrong += 1;
+                        if is_ambiguous { ambig_wrong += 1; }
+                        { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
+                        let truncated: String = src.trim().chars().take(70).collect();
+                        errors.push(format!(
+                            "    {} \u{2192} L{call_line}: wrong '{truncated}'",
+                            callee_name,
+                        ));
+                    }
+                    OwnerVerdict::Unverified => {
+                        prec_unverified += 1;
+                        if is_ambiguous { ambig_unverified += 1; }
+                        { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
+                        let truncated: String = src.trim().chars().take(70).collect();
+                        errors.push(format!(
+                            "    {} \u{2192} L{call_line}: unverified '{truncated}'",
+                            callee_name,
+                        ));
+                    }
+                    OwnerVerdict::Confirmed => {
+                        prec_ok += 1;
+                        let ls = lang_stats.entry(lang.to_owned()).or_default();
+                        ls.0 += 1; ls.1 += 1;
+                    }
                 }
             } else {
+                // callee short name not found in source line at all
                 prec_wrong += 1;
                 if is_ambiguous {
                     ambig_wrong += 1;
@@ -359,7 +432,7 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                 { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
                 let truncated: String = src.trim().chars().take(70).collect();
                 errors.push(format!(
-                    "    {} \u{2192} L{call_line}: '{truncated}'",
+                    "    {} \u{2192} L{call_line}: wrong '{truncated}'",
                     graph.names[ci]
                 ));
             }
@@ -473,10 +546,20 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                     if enum_variant_set.contains(&variant_key) {
                         continue;
                     }
-                    let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix).to_lowercase();
-                    if !project_shorts.contains(&prefix_leaf) && !project_type_shorts.contains(&prefix_leaf) {
-                        continue;
-                    }
+                }
+                // For qualified calls Type::method, if Type is not a project type
+                // and not an internal path (self/super/crate), it's extern.
+                let prefix_leaf = prefix.rsplit("::").next().unwrap_or(prefix).to_lowercase();
+                let is_internal_path = prefix_leaf == "super" || prefix_leaf == "crate"
+                    || prefix_leaf == "self";
+                if !is_internal_path
+                    && !project_type_shorts.contains(&prefix_leaf)
+                {
+                    recall_total += 1;
+                    recall_extern += 1;
+                    let lang = ext_to_lang(&graph.files[i]);
+                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
+                    continue;
                 }
             }
 
@@ -522,12 +605,34 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
                     unresolved_samples.push(call.clone());
                 }
             } else {
-                recall_unresolved += 1;
-                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
-                let cat = categorize_miss(call);
-                *miss_categories.entry(cat).or_default() += 1;
-                if unresolved_samples.len() < 2000 {
-                    unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
+                // Graph has extern data but this call wasn't classified.
+                // Try ExternMethodIndex as fallback before marking unresolved.
+                let mut is_extern = false;
+                if let Some(ref ext) = extern_index {
+                    if let Some(ref all_methods) = extern_all_methods {
+                        let empty_owners = std::collections::HashMap::new();
+                        if let Some(reason) = v_code_intel::graph::check_extern(
+                            &call_lower, &receiver_types, ext, &project_type_shorts,
+                            &return_type_map, all_methods, &owner_field_types,
+                            None, &empty_owners,
+                        ) {
+                            recall_extern += 1;
+                            { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
+                            if extern_samples.len() < 2000 {
+                                extern_samples.push(format!("{call}  [{reason}]"));
+                            }
+                            is_extern = true;
+                        }
+                    }
+                }
+                if !is_extern {
+                    recall_unresolved += 1;
+                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
+                    let cat = categorize_miss(call);
+                    *miss_categories.entry(cat).or_default() += 1;
+                    if unresolved_samples.len() < 2000 {
+                        unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
+                    }
                 }
             }
         }
@@ -537,34 +642,37 @@ pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()>
 
     // ── Output ───────────────────────────────────────────────────────
     let uniq_total = prec_total - ambig_total;
-    let uniq_ok = prec_ok - (ambig_total - ambig_wrong);
+    let uniq_ok = prec_ok - (ambig_total - ambig_wrong - ambig_unverified);
     let uniq_wrong = prec_wrong - ambig_wrong;
+    let uniq_unverified = prec_unverified - ambig_unverified;
 
     // ── Precision summary ────────────────────────────────────────
-    let prec_pct = if prec_total > 0 { prec_ok as f64 / prec_total as f64 * 100.0 } else { 100.0 };
+    // confirmed = owner verified in source.  unverified = .method( exists but owner unconfirmed.
+    let verifiable = prec_ok + prec_wrong;
+    let prec_pct = if verifiable > 0 { prec_ok as f64 / verifiable as f64 * 100.0 } else { 100.0 };
     let recall_internal = recall_resolved + recall_extern;
     let recall_pct = if recall_total > 0 { recall_internal as f64 / recall_total as f64 * 100.0 } else { 100.0 };
     println!(
-        "=== verify: precision {prec_pct:.1}% ({prec_ok}/{prec_total}), recall {recall_pct:.1}% ({recall_internal}/{recall_total}) ===\n"
+        "=== verify: precision {prec_pct:.1}% ({prec_ok}/{verifiable}), recall {recall_pct:.1}% ({recall_internal}/{recall_total}) ===\n"
     );
 
     println!("  [Precision] reported edges with correct call-site line");
     if prec_total > 0 {
-        println!("  {:30} {:>8}  {:>8}  {:>8}", "scope", "total", "correct", "wrong");
-        println!("  {}", "-".repeat(60));
+        println!("  {:30} {:>8}  {:>8}  {:>8}  {:>10}", "scope", "total", "confirmed", "wrong", "unverified");
+        println!("  {}", "-".repeat(72));
         println!(
-            "  {:30} {:>8}  {:>8}  {:>8}",
-            "all edges", prec_total, prec_ok, prec_wrong
+            "  {:30} {:>8}  {:>8}  {:>8}  {:>10}",
+            "all edges", prec_total, prec_ok, prec_wrong, prec_unverified
         );
         if uniq_total > 0 {
             println!(
-                "  {:30} {:>8}  {:>8}  {:>8}",
-                "unique names", uniq_total, uniq_ok, uniq_wrong
+                "  {:30} {:>8}  {:>8}  {:>8}  {:>10}",
+                "unique names", uniq_total, uniq_ok, uniq_wrong, uniq_unverified
             );
         }
         println!(
-            "  {:30} {:>8}  {:>8}  {:>8}",
-            "ambiguous (unreliable)", ambig_total, ambig_total - ambig_wrong, ambig_wrong
+            "  {:30} {:>8}  {:>8}  {:>8}  {:>10}",
+            "ambiguous (unreliable)", ambig_total, ambig_total - ambig_wrong - ambig_unverified, ambig_wrong, ambig_unverified
         );
     }
 

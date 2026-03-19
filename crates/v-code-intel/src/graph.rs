@@ -324,8 +324,43 @@ impl CallGraph {
                 ),
             ),
         );
-        let ((owner_types, owner_field_types), (return_type_map, trait_methods)) = left;
-        let (method_owners, (instantiated, trait_impl_methods)) = right;
+        let ((owner_types, owner_field_types), (mut return_type_map, trait_methods)) = left;
+        let (mut method_owners, (instantiated, trait_impl_methods)) = right;
+
+        // Enrich with rustdoc compiler-resolved types (overlay on tree-sitter heuristics).
+        if let Some(rdoc) = rustdoc {
+            // 1. Merge rustdoc fn_return_types into return_type_map.
+            //    Rustdoc has compiler-verified return types — prefer over tree-sitter guesses.
+            let mut rdoc_added = 0usize;
+            for (fn_name, ret_type) in &rdoc.fn_return_types {
+                use std::collections::hash_map::Entry;
+                match return_type_map.entry(fn_name.clone()) {
+                    Entry::Vacant(e) => { e.insert(ret_type.clone()); rdoc_added += 1; }
+                    Entry::Occupied(mut e) => {
+                        // Only override if tree-sitter result is a generic placeholder
+                        let current = e.get();
+                        if current.len() <= 1 || current == "self" {
+                            e.insert(ret_type.clone());
+                            rdoc_added += 1;
+                        }
+                    }
+                }
+            }
+            // 2. Merge rustdoc method_owner into method_owners.
+            //    Adds owner information for methods that tree-sitter couldn't resolve.
+            let mut owner_added = 0usize;
+            for (method, owners) in &rdoc.method_owner {
+                let entry = method_owners.entry(method.clone()).or_default();
+                for owner in owners {
+                    if !entry.contains(owner) {
+                        entry.push(owner.clone());
+                        owner_added += 1;
+                    }
+                }
+            }
+            eprintln!("      [graph] rustdoc overlay: +{rdoc_added} return types, +{owner_added} method owners");
+        }
+
         eprintln!("      [graph] index tables: {:.1}ms  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
 
         // Get extern index early (before resolve) so extern_all_methods can be used
@@ -541,6 +576,7 @@ impl CallGraph {
             }).collect();
 
             let mut receiver_types = build_receiver_type_map(chunk);
+            infer_local_types_from_calls(&chunk.calls, &chunk.let_call_bindings, return_type_map, &mut receiver_types);
             infer_receiver_types_by_co_methods(&chunk.calls, method_owners, &mut receiver_types);
             let mut extern_calls = Vec::new();
 
@@ -971,9 +1007,15 @@ fn trait_fan_out(
     edges: &mut Vec<(u32, u32)>,
 ) {
     let call_lower = call.to_lowercase();
-    let method_leaf = call_lower.rsplit_once('.')
-        .or_else(|| call_lower.rsplit_once("::"))
-        .map_or(call_lower.as_str(), |p| p.1);
+    // Only fan out for receiver.method() calls (dynamic dispatch).
+    // Type::method() calls have an explicit type — fan out would add
+    // every trait impl as a callee (e.g. SparseBlockCodec::serialize
+    // would add all BinarySerializable::serialize impls).
+    // Bare function calls (no receiver, no ::) also skip — the resolved
+    // target is already the correct function.
+    let Some(method_leaf) = call_lower.rsplit_once('.').map(|p| p.1) else {
+        return;
+    };
     if extern_all_methods.contains(method_leaf) {
         return;
     }
@@ -1088,15 +1130,29 @@ fn resolve_with_imports(
         return Some(idx);
     }
 
+    // 1b. Self::method → OwningType::method (Rust associated function syntax).
+    if let Some(method) = lower.strip_prefix("self::") {
+        if let Some(owner) = self_type {
+            let qualified = format!("{owner}::{method}");
+            if let Some(&idx) = exact.get(&qualified) {
+                return Some(idx);
+            }
+        }
+    }
+
     // 2. self.method → OwningType::method.
     //    self.field.method → try field name as type hint against source_types.
     if let Some(method) = lower.strip_prefix("self.") {
         let leaf_method = method.rsplit_once('.').map_or(method, |p| p.1);
-        // 2a. Try owning type first.
-        if let Some(owner) = self_type {
-            let qualified = format!("{owner}::{leaf_method}");
-            if let Some(&idx) = exact.get(&qualified) {
-                return Some(idx);
+        let is_field_chain = method.contains('.');
+        // 2a. Try owning type first — only for direct self.method() calls,
+        //     not self.field.method() chains where the receiver is the field.
+        if !is_field_chain {
+            if let Some(owner) = self_type {
+                let qualified = format!("{owner}::{leaf_method}");
+                if let Some(&idx) = exact.get(&qualified) {
+                    return Some(idx);
+                }
             }
         }
         // 2b. self.field.method → look up field type from receiver_types (populated
@@ -1220,8 +1276,11 @@ fn resolve_with_imports(
         if let Some(ret_type) = return_type_map.get(receiver_leaf) {
             // Only trust return_type_map when receiver is a known project entity,
             // not just a bare method name that happens to match (e.g. "map", "filter").
+            // For chained builder calls (e.g. `ef_construction.max_elements`), the receiver
+            // IS a unique project method name registered in return_type_map as a bare key.
             let receiver_is_known = exact.contains_key(receiver_leaf)
-                || imports.contains_key(receiver_leaf);
+                || imports.contains_key(receiver_leaf)
+                || return_type_map.contains_key(receiver_leaf);
             if receiver_is_known {
                 let candidate = format!("{ret_type}::{method}");
                 if let Some(&idx) = exact.get(&candidate) {
@@ -1420,6 +1479,15 @@ fn resolve_with_imports(
                         }
                     }
                 }
+                // Trait receiver fallback: if receiver is a trait type and all
+                // qualified lookups failed (common with salsa/macro-generated DB
+                // methods), try short_fn. The method is likely a bare function
+                // generated by a proc macro that belongs to this trait.
+                if recv_is_trait {
+                    if let Some(idx) = short_fn(method) {
+                        return Some(idx);
+                    }
+                }
             }
             // recv_type is known but doesn't own this method.
             // If the type is not a project type (no struct/enum/trait chunk)
@@ -1431,28 +1499,12 @@ fn resolve_with_imports(
             }
             // Otherwise fall through to 6c/6d for disambiguation.
         }
-        // 6c. Unknown receiver → try rustdoc method→owner disambiguation.
-        //     Only resolve if the owner type appears in the function's type context
-        //     (source_types or call_types). This prevents false positives like
-        //     resolving HashMap::get() to Sq8VectorStore::get() just because
-        //     Sq8VectorStore is the only project type with a `get` method.
-        if let Some(rdoc) = rustdoc
-            && let Some(owners) = rdoc.owners_of(method) {
-                // Check if any owner type appears in the function's type context.
-                let ctx_owner = owners.iter().find(|o| {
-                    let ol = o.to_lowercase();
-                    source_types.contains(&ol) || call_types.contains(&ol)
-                });
-                if let Some(owner) = ctx_owner {
-                    let qualified = format!("{owner}::{method}");
-                    if let Some(&idx) = exact.get(&qualified) {
-                        return Some(idx);
-                    }
-                }
-                // Rustdoc knows this method exists on project types but none in context.
-                // Fall through to 6d — method_owners has its own guards (unique owner,
-                // receiver name match, self_type, receiver_types, type context).
-            }
+        // 6c. (disabled for receiver.method() calls)
+        // Type context alone is insufficient evidence for receiver.method() disambiguation.
+        // e.g. lut.tf_norm() should not resolve to Bm25Params::tf_norm just because
+        // Bm25Params appears in the function's type context.
+        // Resolution for receiver.method() relies on receiver_types (6b) and
+        // method_owners with receiver name matching (6d).
         // 6d. Project-internal method→owner disambiguation.
         //     method_name → [owner_types] reverse index from all project functions.
         //     Resolution priority:
@@ -2013,6 +2065,69 @@ pub(crate) fn strip_generics_from_key(key: &str) -> String {
     out
 }
 
+/// Parse generic trait bounds from a function signature string.
+///
+/// E.g. `"fn foo<N: NodeGraph, T: Tokenizer + Clone>(nodes: &N)"` →
+///       `{"n": "nodegraph", "t": "tokenizer"}` (first trait bound, lowercase).
+fn parse_generic_trait_bounds(signature: &str) -> HashMap<String, String> {
+    let mut bounds = HashMap::new();
+    // Extract the `<...>` section from the signature.
+    let Some(start) = signature.find('<') else { return bounds };
+    let mut depth = 0;
+    let mut end = start;
+    for (i, ch) in signature[start..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end <= start + 1 { return bounds; }
+    let generics = &signature[start + 1..end];
+
+    // Split by ',' but respect nested <> depth.
+    let mut params = Vec::new();
+    let mut current_start = 0;
+    let mut nest = 0;
+    for (i, ch) in generics.char_indices() {
+        match ch {
+            '<' => nest += 1,
+            '>' => nest -= 1,
+            ',' if nest == 0 => {
+                params.push(generics[current_start..i].trim());
+                current_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    params.push(generics[current_start..].trim());
+
+    // Parse each param: "N: NodeGraph + Clone" → ("n", "nodegraph")
+    // Also handle where-clause style: just "N" with no bound → skip.
+    for param in params {
+        // Skip lifetime params ('a, 'b)
+        if param.starts_with('\'') { continue; }
+        // Skip const generics (const N: usize)
+        if param.starts_with("const ") { continue; }
+        let Some((name, bound_str)) = param.split_once(':') else { continue };
+        let name = name.trim().to_lowercase();
+        // Take the first trait bound (before any '+').
+        let first_bound = bound_str.split('+').next().unwrap_or("").trim();
+        // Strip generic params from bound: Trait<Item=Foo> → Trait
+        let first_bound = first_bound.split('<').next().unwrap_or(first_bound).trim();
+        if !first_bound.is_empty() && first_bound != "?" {
+            bounds.insert(name, first_bound.to_lowercase());
+        }
+    }
+    bounds
+}
+
 /// Build a receiver name → type map from param_types, local_types, field_types.
 ///
 /// E.g. `param_types = [("handle", "File")]` → `{"handle": "file"}` (lowercase).
@@ -2022,11 +2137,22 @@ pub(crate) fn strip_generics_from_key(key: &str) -> String {
 /// Populates variable names → leaf type names for method resolution.
 pub fn build_receiver_type_map(chunk: &ParsedChunk) -> HashMap<String, String> {
     let mut map = HashMap::new();
+    // Parse generic trait bounds from signature for substitution.
+    let generic_bounds = chunk.signature.as_deref()
+        .map(|s| parse_generic_trait_bounds(s))
+        .unwrap_or_default();
     for (name, ty) in &chunk.param_types {
         let name_lower = name.to_lowercase();
         let leaf = extract_leaf_type(&ty.to_lowercase()).to_owned();
         if name_lower != "self" && !leaf.is_empty() {
-            map.insert(name_lower, leaf);
+            // If the leaf type is a single-letter generic parameter (e.g. "n"),
+            // substitute with the trait bound (e.g. "nodegraph").
+            let resolved = if leaf.len() == 1 && leaf.as_bytes()[0].is_ascii_lowercase() {
+                generic_bounds.get(&leaf).cloned().unwrap_or(leaf)
+            } else {
+                leaf
+            };
+            map.insert(name_lower, resolved);
         }
     }
     for (name, ty) in &chunk.local_types {

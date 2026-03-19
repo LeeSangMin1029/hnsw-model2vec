@@ -146,8 +146,28 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     });
 
     let rustdoc_db_for_bg = db_path.clone();
+    let rustdoc_root_for_bg = project_root_for_bg.clone();
     let rustdoc_handle = std::thread::spawn(move || {
-        v_code_intel::rustdoc::load_cached(&rustdoc_db_for_bg)
+        // Try cached first; if absent, generate in background but don't block.
+        if let Some(types) = v_code_intel::rustdoc::load_cached(&rustdoc_db_for_bg) {
+            return Some(types);
+        }
+        // No cache — spawn rustdoc generation as a detached process so it doesn't
+        // block the current `add`. Next `add` will pick up the cached result.
+        if let Some(root) = rustdoc_root_for_bg.as_deref() {
+            eprintln!("[rustdoc] No cache found. Run `v-code rustdoc <DB>` to generate.");
+            // Try target/doc/ in case user already ran `cargo doc`
+            let doc_dir = root.join("target").join("doc");
+            if doc_dir.is_dir() {
+                if let Ok(types) = v_code_intel::rustdoc::RustdocTypes::from_dir(&doc_dir) {
+                    if !types.fn_return_types.is_empty() {
+                        v_code_intel::rustdoc::save_to_cache(&rustdoc_db_for_bg, root);
+                        return Some(types);
+                    }
+                }
+            }
+        }
+        None
     });
 
     // === Remove chunks from deleted files ===

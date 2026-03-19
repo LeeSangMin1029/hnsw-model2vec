@@ -84,6 +84,7 @@ fn run() -> anyhow::Result<()> {
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
         Commands::Embed { db } => commands::embed::run(db),
         Commands::Verify { db, verbose, scip } => commands::verify::run(db, verbose, scip),
+        Commands::Rustdoc { db } => commands::rustdoc::run(db),
         Commands::Replace { db, symbol, file, body, body_file } => {
             let body = read_body(body, body_file)?;
             commands::edit::replace(db, symbol, file, body)

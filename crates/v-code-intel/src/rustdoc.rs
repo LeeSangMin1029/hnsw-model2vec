@@ -340,43 +340,124 @@ pub fn generate_and_load(project_root: &Path) -> Option<RustdocTypes> {
         return None;
     }
 
-    eprintln!("[rustdoc] Generating rustdoc JSON for {} crate(s)", crates.len());
+    // Skip crates whose JSON already exists and is newer than their src/.
+    let doc_dir = project_root.join("target").join("doc");
+    let crates_to_build: Vec<&String> = crates
+        .iter()
+        .filter(|krate| {
+            let json_name = format!("{}.json", krate.replace('-', "_"));
+            let json_path = doc_dir.join(&json_name);
+            if !json_path.exists() {
+                return true;
+            }
+            // Rebuild if JSON is older than 24 hours (simple heuristic).
+            json_path
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .is_none_or(|t| {
+                    t.elapsed().unwrap_or_default() > std::time::Duration::from_secs(86400)
+                })
+        })
+        .collect();
+
+    eprintln!(
+        "[rustdoc] {} crate(s) total, {} need rebuild",
+        crates.len(),
+        crates_to_build.len(),
+    );
     let start = std::time::Instant::now();
 
-    let mut succeeded = 0u32;
-    for krate in &crates {
-        let output = Command::new("cargo")
-            .args([
-                "+nightly", "rustdoc", "--lib",
-                "-p", krate,
-                "--manifest-path", &manifest.to_string_lossy(),
-                "--", "-Z", "unstable-options", "--output-format", "json",
-                "--document-private-items",
-            ])
-            .env("RUSTDOCFLAGS", "")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .current_dir(project_root)
-            .output()
-            .ok();
+    // Per-crate timeout: 90 seconds.
+    let per_crate_timeout = std::time::Duration::from_secs(90);
 
-        match output {
-            Some(o) if o.status.success() => succeeded += 1,
-            Some(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                let short: String = stderr.lines().take(2).collect::<Vec<_>>().join(" ");
-                eprintln!("[rustdoc] {krate}: failed ({short})");
+    // Cargo uses target/.cargo-lock to serialize concurrent builds, so spawning
+    // multiple `cargo rustdoc` processes in parallel is safe — cargo handles the
+    // locking internally. We use a bounded thread pool to overlap compilation of
+    // independent crates while keeping resource usage reasonable.
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(2);
+
+    let manifest_str = manifest.to_string_lossy().to_string();
+    let root = project_root.to_path_buf();
+    let succeeded = std::sync::atomic::AtomicU32::new(0);
+
+    // Process crates in parallel batches.
+    let _total = crates_to_build.len();
+    std::thread::scope(|s| {
+        let manifest_str = &manifest_str;
+        let root = &root;
+        let succeeded = &succeeded;
+
+        for chunk in crates_to_build.chunks(parallelism) {
+            let handles: Vec<_> = chunk
+                .iter()
+                .enumerate()
+                .map(|(_, krate)| {
+                    let krate = (*krate).clone();
+                    s.spawn(move || {
+                        let mut child = match Command::new("cargo")
+                            .args([
+                                "+nightly", "rustdoc", "--lib",
+                                "-p", &krate,
+                                "--manifest-path", manifest_str,
+                                "--", "-Z", "unstable-options", "--output-format", "json",
+                                "--document-private-items",
+                            ])
+                            .env("RUSTDOCFLAGS", "")
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::piped())
+                            .current_dir(root)
+                            .spawn() {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    eprintln!("[rustdoc] {krate}... failed to spawn");
+                                    return;
+                                }
+                            };
+
+                        let t_crate = std::time::Instant::now();
+                        loop {
+                            match child.try_wait() {
+                                Ok(Some(status)) => {
+                                    if status.success() {
+                                        succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        eprintln!("[rustdoc] {krate}... ok ({:.1}s)", t_crate.elapsed().as_secs_f64());
+                                    } else {
+                                        eprintln!("[rustdoc] {krate}... failed ({:.1}s)", t_crate.elapsed().as_secs_f64());
+                                    }
+                                    return;
+                                }
+                                Ok(None) => {
+                                    if t_crate.elapsed() > per_crate_timeout {
+                                        let _ = child.kill();
+                                        let _ = child.wait();
+                                        eprintln!("[rustdoc] {krate}... timeout (>{:.0}s)", per_crate_timeout.as_secs_f64());
+                                        return;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
+                                }
+                                Err(_) => { eprintln!("[rustdoc] {krate}... error"); return; }
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                let _ = h.join();
             }
-            None => eprintln!("[rustdoc] {krate}: failed to spawn"),
         }
-    }
+    });
+
+    let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed) as usize;
 
     let elapsed = start.elapsed();
     eprintln!("[rustdoc] {succeeded}/{} crates completed in {:.1}s",
         crates.len(), elapsed.as_secs_f64());
 
     // Load and merge all JSON files from target/doc/
-    let doc_dir = project_root.join("target").join("doc");
     match RustdocTypes::from_dir(&doc_dir) {
         Ok(types) if !types.fn_return_types.is_empty() => {
             eprintln!(

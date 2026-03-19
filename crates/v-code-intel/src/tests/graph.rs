@@ -1908,3 +1908,33 @@ fn work(x: &TypeA) {
     assert!(!has_edge(&g, "work", "TypeB::load"));
     assert!(!has_edge(&g, "work", "TypeB::save"));
 }
+
+// ── Generic trait bound → receiver type resolution ──────────────────
+
+#[test]
+fn generic_trait_bound_resolves_receiver() {
+    let chunks = chunks_from_src(r#"
+trait NodeGraph {
+    fn neighbors(&self, id: u32) -> Vec<u32>;
+    fn is_deleted(&self, id: u32) -> bool;
+}
+struct SnapshotGraph;
+impl NodeGraph for SnapshotGraph {
+    fn neighbors(&self, _id: u32) -> Vec<u32> { vec![] }
+    fn is_deleted(&self, _id: u32) -> bool { false }
+}
+fn greedy<N: NodeGraph>(nodes: &N) {
+    nodes.neighbors(1);
+    nodes.is_deleted(2);
+}
+    "#);
+    let g = build_graph(&chunks);
+    // nodes: &N where N: NodeGraph → receiver_types["nodes"] = "nodegraph"
+    // nodes.neighbors() should resolve to NodeGraph trait impl
+    assert!(has_edge(&g, "greedy", "NodeGraph for SnapshotGraph::neighbors")
+        || has_edge(&g, "greedy", "SnapshotGraph::neighbors"),
+        "generic trait bound should resolve receiver.method to trait impl");
+    assert!(has_edge(&g, "greedy", "NodeGraph for SnapshotGraph::is_deleted")
+        || has_edge(&g, "greedy", "SnapshotGraph::is_deleted"),
+        "generic trait bound should resolve receiver.method to trait impl");
+}
