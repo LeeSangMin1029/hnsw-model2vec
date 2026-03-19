@@ -259,34 +259,6 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Lightweight type inference: extract types from chunks (replaces rustdoc).
-    // Macro expansion: load cached chunks (fast), spawn background if stale.
-    if let Some(root) = project_root {
-        let t_macro = std::time::Instant::now();
-        let existing_names: std::collections::HashSet<String> = chunks
-            .iter()
-            .map(|c| c.name.to_lowercase())
-            .collect();
-        let changed_sources: std::collections::HashSet<String> = new_entries
-            .iter()
-            .map(|e| e.source.clone())
-            .collect();
-        let (macro_chunks, has_stale) = v_code_intel::macro_expand::try_load_macro_cache(
-            root,
-            db_path,
-            &existing_names,
-            &changed_sources,
-        );
-        if !macro_chunks.is_empty() {
-            eprintln!("    [cache] macro cache: {:.1}ms ({} chunks)",
-                t_macro.elapsed().as_secs_f64() * 1000.0, macro_chunks.len());
-            chunks.extend(macro_chunks);
-        }
-        if has_stale {
-            spawn_background_macro_expand(db_path, root);
-        }
-    }
-
     let t3 = std::time::Instant::now();
     let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
     eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
@@ -435,64 +407,6 @@ fn direct_bulk_write(
         start.elapsed().as_secs_f64(), idx_ms, enc_ms, write_ms, fi_ms);
 
     Ok(inserted)
-}
-
-/// Background macro expansion entry point (called by `_macro-expand` subcommand).
-///
-/// Expands all stale crates, saves cache, and rebuilds graph.bin with macro chunks.
-pub fn run_macro_expand_bg(db_path: PathBuf, project_root: PathBuf) -> Result<()> {
-    let chunks = v_code_intel::loader::load_chunks(&db_path)?;
-
-    let mut all_chunks = chunks;
-
-    // Full macro expansion (slow — runs cargo rustc).
-    let existing_names: std::collections::HashSet<String> = all_chunks
-        .iter()
-        .map(|c| c.name.to_lowercase())
-        .collect();
-    let macro_chunks = v_code_intel::macro_expand::expand_macro_chunks_full(
-        &project_root,
-        &db_path,
-        &existing_names,
-    );
-    if !macro_chunks.is_empty() {
-        eprintln!(
-            "    [macro-bg] {} macro-expanded chunks",
-            macro_chunks.len()
-        );
-        all_chunks.extend(macro_chunks);
-    }
-
-    // Rebuild graph with macro chunks included.
-    let graph = v_code_intel::graph::CallGraph::build_full(&all_chunks);
-    let _ = graph.save(&db_path);
-    eprintln!("    [macro-bg] graph rebuilt with macro chunks");
-
-    Ok(())
-}
-
-/// Spawn background process for macro expansion + graph rebuild.
-///
-/// Runs `v-code _macro-expand <db> <project_root>` as a detached process.
-/// This avoids blocking `add` while doing slow `cargo rustc -Zunpretty=expanded`.
-fn spawn_background_macro_expand(db_path: &std::path::Path, project_root: &std::path::Path) {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let db = db_path.to_string_lossy().to_string();
-    let root = project_root.to_string_lossy().to_string();
-
-    match std::process::Command::new(exe)
-        .args(["_macro-expand", &db, &root])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-    {
-        Ok(_) => eprintln!("    [macro] background expansion spawned"),
-        Err(e) => eprintln!("    [macro] failed to spawn background: {e}"),
-    }
 }
 
 /// Fast file scan: `git ls-files` (instant from index) with walkdir fallback.

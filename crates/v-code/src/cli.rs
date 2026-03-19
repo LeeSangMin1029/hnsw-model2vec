@@ -389,12 +389,6 @@ pub enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Generate rustdoc JSON and rebuild graph with compiler type info.
-    #[command(visible_alias = "rdoc")]
-    Rustdoc {
-        /// Path to the database directory.
-        db: PathBuf,
-    },
     /// Create a new file at a project-relative path.
     #[command(visible_alias = "cf")]
     CreateFile {
