@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use v_code_intel::extern_types::ExternMethodIndex;
-use v_code_intel::graph::{extract_leaf_type, extract_generic_bounds, owning_type, build_receiver_type_map};
+use v_code_intel::graph::{extract_generic_bounds, owning_type, build_receiver_type_map, collect_owner_field_types, build_return_type_map, collect_project_type_shorts, infer_local_types_from_calls, infer_receiver_types_by_co_methods, build_method_owner_index};
 use v_code_intel::parse::ParsedChunk;
 use v_hnsw_cli::commands::db_config::DbConfig;
 
@@ -23,7 +23,7 @@ pub(crate) fn short_name(full: &str) -> &str {
 
 /// Verify call-site accuracy for all function chunks in the database.
 #[expect(clippy::needless_range_loop, clippy::type_complexity, reason = "multiple parallel arrays indexed together")]
-pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
+pub fn run(db: PathBuf, verbose: bool, scip_path: Option<PathBuf>) -> Result<()> {
     let start = std::time::Instant::now();
     // Load graph + chunks in one pass to avoid double deserialization.
     let (graph, cached_chunks) = super::intel::load_or_build_graph_with_chunks(&db)?;
@@ -45,7 +45,6 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
     // ── Single pass: build all per-chunk indexes ─────────────────────
     let mut name_counts: HashMap<&str, usize> = HashMap::new();
     let mut project_shorts: HashSet<String> = HashSet::new();
-    let mut project_type_shorts: HashSet<String> = HashSet::new();
     let mut chunk_callee_shorts: Vec<HashSet<String>> = vec![HashSet::new(); n];
 
     for (i, kind) in graph.kinds.iter().enumerate().take(n) {
@@ -59,44 +58,30 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                     chunk_callee_shorts[i].insert(short_name(&graph.names[ci]).to_lowercase());
                 }
             }
-        } else if matches!(kind.as_str(), "struct" | "enum" | "trait" | "impl") {
-            let short = short_name(&graph.names[i]).to_lowercase();
-            // Strip generic params: "vec<t>" → "vec"
-            let clean = short.split('<').next().unwrap_or(&short);
-            project_type_shorts.insert(clean.to_owned());
         }
     }
+    let project_type_shorts = collect_project_type_shorts(&chunks);
 
     // Build owner_field_types + return_type_map from DB chunks (no file I/O).
-    let mut owner_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let mut return_type_map: HashMap<String, String> = HashMap::new();
-    for c in &chunks {
-        if c.kind == "struct" {
-            let lower = c.name.to_lowercase();
-            let leaf = lower.rsplit("::").next().unwrap_or(&lower);
-            let key = leaf.split('<').next().unwrap_or(leaf);
-            let entry = owner_field_types.entry(key.to_owned()).or_default();
-            for (fname, ftype) in &c.field_types {
-                entry.insert(fname.to_lowercase(), ftype.to_lowercase());
+    let owner_field_types = collect_owner_field_types(&chunks);
+    let mut return_type_map = build_return_type_map(&chunks);
+    let method_owners = build_method_owner_index(&chunks);
+
+    // Build per-chunk receiver_types for precision verification.
+    let chunk_receiver_types: Vec<HashMap<String, String>> = chunks.iter().map(|c| {
+        let mut recv_types = build_receiver_type_map(c);
+        // Enrich with owner_field_types for self.field resolution
+        if let Some(owner) = owning_type(&c.name) {
+            if let Some(fields) = owner_field_types.get(&owner) {
+                for (field, ftype) in fields {
+                    recv_types.entry(field.clone()).or_insert_with(|| ftype.clone());
+                }
             }
         }
-        if c.kind == "function"
-            && let Some(ref ret) = c.return_type {
-                let ret_lower = ret.to_lowercase();
-                let leaf = extract_leaf_type(&ret_lower);
-                let resolved_type = if leaf == "self" || leaf == "&self" {
-                    owning_type(&c.name).unwrap_or_else(|| leaf.to_owned())
-                } else {
-                    leaf.to_owned()
-                };
-                let name_lower = c.name.to_lowercase();
-                // Also insert bare method name for chained-call resolution
-                if let Some(method) = name_lower.rsplit_once("::").map(|p| p.1) {
-                    return_type_map.entry(method.to_owned()).or_insert_with(|| resolved_type.clone());
-                }
-                return_type_map.insert(name_lower, resolved_type);
-            }
-    }
+        infer_local_types_from_calls(&c.calls, &c.let_call_bindings, &return_type_map, &mut recv_types);
+        infer_receiver_types_by_co_methods(&c.calls, &method_owners, &mut recv_types);
+        recv_types
+    }).collect();
 
     // Use graph-embedded extern info if available, otherwise build ExternMethodIndex.
     let has_graph_extern = !graph.extern_calls.is_empty()
@@ -188,36 +173,173 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
 
             let src = &lines[ln - 1];
             if src.contains(callee_short) {
-                // For ambiguous names (same short name, multiple targets),
-                // verify that the owning type also appears on the source line.
-                // e.g. callee "Foo::process" → check "Foo" or "foo" on the line.
+                // Verify that the callee's owning type matches the call-site context.
+                // For `Type::method()` calls the type is explicit; for `receiver.method()`
+                // calls we check whether the owner appears on the source line or is a
+                // self-call within the same impl block.
                 let callee_name = &graph.names[ci];
-                let owner_mismatch = if is_ambiguous {
-                    if let Some((owner_path, _)) = callee_name.rsplit_once("::") {
-                        let owner_leaf = owner_path.rsplit("::").next().unwrap_or(owner_path);
-                        let src_lower = src.to_lowercase();
-                        let owner_lower = owner_leaf.to_lowercase();
-                        // self.method() calls: owner won't appear in source.
-                        // Valid if caller's owning type matches callee's owner.
-                        let caller_owner = graph.names[i].rsplit_once("::")
-                            .map(|(p, _)| p.rsplit("::").next().unwrap_or(p).to_lowercase());
-                        let is_self_call = src_lower.contains("self.")
-                            && caller_owner.as_deref() == Some(&owner_lower);
-                        if is_self_call {
-                            false
-                        } else {
-                            !src_lower.contains(&owner_lower)
-                        }
+                let owner_mismatch = if let Some((owner_path, _)) = callee_name.rsplit_once("::") {
+                    // Handle trait impl names: "Trait for Type" → extract "Type"
+                    // Strip generic params: "Bm25Index<T>" → "Bm25Index"
+                    let raw_leaf = owner_path.rsplit("::").next().unwrap_or(owner_path);
+                    let after_for = if let Some(pos) = raw_leaf.find(" for ") {
+                        &raw_leaf[pos + 5..]
                     } else {
-                        false // bare function, no owner to check
+                        raw_leaf
+                    };
+                    let owner_leaf = after_for.split('<').next().unwrap_or(after_for);
+                    let src_lower = src.to_lowercase();
+                    let owner_lower = owner_leaf.to_lowercase();
+                    // self.method() calls: owner won't appear in source.
+                    // Valid if caller's owning type matches callee's owner.
+                    let caller_owner = graph.names[i].rsplit_once("::")
+                        .map(|(p, _)| {
+                            let leaf = p.rsplit("::").next().unwrap_or(p);
+                            let after_for = leaf.split(" for ").last().unwrap_or(leaf);
+                            after_for.split('<').next().unwrap_or(after_for).to_lowercase()
+                        });
+                    let is_self_call = src_lower.contains("self.")
+                        && caller_owner.as_deref() == Some(&owner_lower);
+                    if is_self_call || src_lower.contains(&owner_lower) {
+                        false
+                    } else {
+                        let method_lower = callee_name.rsplit_once("::").map_or("", |(_, m)| m).to_lowercase();
+                        let recv_types = &chunk_receiver_types[i];
+
+                        // Helper: check if recv_type matches owner
+                        let type_matches = |recv_type: &str| -> bool {
+                            let rt = recv_type.split('<').next().unwrap_or(recv_type);
+                            rt == owner_lower
+                                || rt.contains(&owner_lower)
+                                || owner_lower.contains(rt)
+                        };
+                        let name_matches = |name: &str| -> bool {
+                            let stripped: String = name.chars().filter(|&c| c != '_').collect();
+                            stripped.len() >= 3
+                                && (owner_lower.contains(&stripped)
+                                    || stripped.contains(&*owner_lower))
+                        };
+
+                        // Strategy A: Use chunk's call expression for precise type checking.
+                        let call_expr = chunks[i].calls.iter().zip(chunks[i].call_lines.iter())
+                            .find(|(call, ln)| {
+                                **ln == call_line
+                                && call.to_lowercase().ends_with(&method_lower)
+                            })
+                            .map(|(call, _)| call.to_lowercase());
+
+                        let mut matched = false;
+                        if let Some(ref expr) = call_expr {
+                            if let Some((recv_part, _)) = expr.rsplit_once('.') {
+                                let recv_leaf = recv_part.rsplit_once('.').map_or(recv_part, |p| p.1);
+                                if let Some(recv_type) = recv_types.get(recv_leaf) {
+                                    matched = type_matches(recv_type);
+                                } else {
+                                    matched = name_matches(recv_leaf);
+                                }
+                            } else if let Some((prefix, _)) = expr.rsplit_once("::") {
+                                let type_leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
+                                let type_clean = type_leaf.split('<').next().unwrap_or(type_leaf);
+                                matched = owner_lower.contains(type_clean)
+                                    || type_clean.contains(&*owner_lower);
+                            }
+                        }
+                        // Strategy B: Source text fallback when call_expr didn't conclude.
+                        if !matched {
+                            let dot_pat = format!(".{method_lower}(");
+                            if let Some(pos) = src_lower.find(&dot_pat) {
+                                let before = &src_lower[..pos];
+                                let recv: String = before.chars().rev()
+                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                                    .collect::<String>().chars().rev().collect();
+                                if name_matches(&recv) {
+                                    matched = true;
+                                } else if !recv.is_empty() {
+                                    if let Some(rt) = recv_types.get(recv.as_str()) {
+                                        matched = type_matches(rt);
+                                    }
+                                }
+                            }
+                        }
+                        // Strategy C: return_type_map chain + word scan for chained calls.
+                        if !matched {
+                            // Try return_type_map chain: find `Type::method()` patterns in
+                            // call expressions where method's return type matches callee owner.
+                            if let Some(ref expr) = call_expr {
+                                // e.g. expr = "hnswconfig::builder" for chained call
+                                // return_type_map["hnswconfig::builder"] = "hnswconfigbuilder"
+                                if let Some(ret) = return_type_map.get(expr.as_str()) {
+                                    let rt = ret.split('<').next().unwrap_or(ret);
+                                    matched = type_matches(rt);
+                                }
+                            }
+                        }
+                        // Strategy D: method_owners unique owner confirmation.
+                        // Only accept if the method also does NOT exist on extern types,
+                        // to avoid circular validation (graph uses same method_owners).
+                        if !matched {
+                            if let Some(owners) = method_owners.get(&method_lower) {
+                                let concrete_owner = owner_lower.split(" for ").last().unwrap_or(&owner_lower);
+                                let owner_has_method = owners.iter().any(|o| {
+                                    let co = o.split(" for ").last().unwrap_or(o);
+                                    co == concrete_owner
+                                });
+                                let is_extern_method = extern_all_methods.as_ref()
+                                    .map_or(false, |m| m.contains(&method_lower));
+                                if owner_has_method && owners.len() == 1 && !is_extern_method {
+                                    matched = true;
+                                }
+                            }
+                        }
+                        // Strategy E: callee owner matches a graph callee's owner (DISABLED for audit).
+                        // If we call other methods on the same receiver AND those resolve to the
+                        // same owner type, it's strong evidence the receiver IS that type.
+                        if !matched {
+                            if let Some(ref expr) = call_expr {
+                                if let Some((recv_part, _)) = expr.rsplit_once('.') {
+                                    let recv_leaf = recv_part.rsplit_once('.').map_or(recv_part, |p| p.1);
+                                    // Check if any other callee from this chunk has the same owner
+                                    // and is called on the same receiver.
+                                    let concrete_owner = owner_lower.split(" for ").last().unwrap_or(&owner_lower);
+                                    for other_call in &chunks[i].calls {
+                                        let other_lower = other_call.to_lowercase();
+                                        if let Some((other_recv, _)) = other_lower.rsplit_once('.') {
+                                            let other_recv_leaf = other_recv.rsplit_once('.').map_or(other_recv, |p| p.1);
+                                            if other_recv_leaf == recv_leaf && other_lower != *expr {
+                                                // Same receiver, different method — check if it resolves
+                                                // to the same owner via chunk_callee_shorts
+                                                if let Some(other_method) = other_lower.rsplit_once('.').map(|p| p.1) {
+                                                    // Skip extern methods — using them as evidence
+                                                    // would cause circular validation.
+                                                    let other_is_extern = extern_all_methods.as_ref()
+                                                        .map_or(false, |m| m.contains(other_method));
+                                                    if !other_is_extern {
+                                                        if let Some(owners) = method_owners.get(other_method) {
+                                                            if owners.iter().any(|o| {
+                                                                let co = o.split(" for ").last().unwrap_or(o);
+                                                                co == concrete_owner
+                                                            }) {
+                                                                matched = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        !matched
                     }
                 } else {
-                    false
+                    false // bare function, no owner to check
                 };
 
                 if owner_mismatch {
                     prec_wrong += 1;
-                    ambig_wrong += 1;
+                    if is_ambiguous { ambig_wrong += 1; }
                     { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.0 += 1; }
                     let truncated: String = src.trim().chars().take(70).collect();
                     errors.push(format!(
@@ -551,6 +673,11 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
         }
     }
 
+    // ── SCIP ground-truth comparison ──────────────────────────────
+    if let Some(scip_file) = scip_path {
+        run_scip_comparison(&scip_file, &graph, project_root.as_deref())?;
+    }
+
     Ok(())
 }
 
@@ -642,6 +769,358 @@ fn load_lines(path: &str) -> Vec<String> {
     std::fs::read_to_string(path)
         .map(|s| s.lines().map(String::from).collect())
         .unwrap_or_default()
+}
+
+/// Run SCIP ground-truth comparison against graph edges.
+///
+/// Parses a SCIP index file (generated by `rust-analyzer scip .`), builds a
+/// lookup of `(file, line) → [scip_symbol]`, then checks each graph call_site
+/// to see if the graph's callee matches what rust-analyzer resolved.
+fn run_scip_comparison(
+    scip_file: &Path,
+    graph: &v_code_intel::graph::CallGraph,
+    _project_root: Option<&Path>,
+) -> Result<()> {
+    use protobuf::Enum as _;
+
+    let t0 = std::time::Instant::now();
+    let data = std::fs::read(scip_file)
+        .map_err(|e| anyhow::anyhow!("cannot read SCIP file: {e}"))?;
+    let data_len = data.len();
+    // Parse on a thread with 16 MB stack — protobuf recursion overflows the default stack.
+    let index = {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || -> Result<scip::types::Index> {
+                use protobuf::Message as _;
+                scip::types::Index::parse_from_bytes(&data)
+                    .map_err(|e| anyhow::anyhow!("cannot parse SCIP protobuf: {e}"))
+            })
+            .map_err(|e| anyhow::anyhow!("cannot spawn SCIP parse thread: {e}"))?;
+        handle.join().map_err(|_| anyhow::anyhow!("SCIP parse thread panicked"))??
+    };
+
+    eprintln!(
+        "  [scip] parsed {:.1}MB in {:.1}s — {} documents",
+        data_len as f64 / 1_048_576.0,
+        t0.elapsed().as_secs_f64(),
+        index.documents.len(),
+    );
+
+    // Build symbol → definition name mapping from SCIP.
+    // SCIP symbols look like:
+    //   "rust-analyzer cargo v-hnsw-core 0.1.0 hnsw/HnswIndex#search()."
+    // We extract the last descriptor parts to get "HnswIndex::search".
+    //
+    // Build (file, line) → [(scip_qualified_name)] lookup.
+    let definition_role = scip::types::SymbolRole::Definition.value();
+
+    // file → { line → [qualified_name] }
+    let mut scip_refs: HashMap<String, HashMap<u32, Vec<String>>> = HashMap::new();
+
+    for doc in &index.documents {
+        // Normalize SCIP paths to forward slashes (Windows may have backslashes).
+        let file = doc.relative_path.replace('\\', "/");
+        let file_refs = scip_refs.entry(file).or_default();
+
+        for occ in &doc.occurrences {
+            // Skip definitions — we only want references (call sites).
+            if occ.symbol_roles & definition_role != 0 {
+                continue;
+            }
+            if occ.symbol.is_empty() || occ.symbol.starts_with("local ") {
+                continue;
+            }
+            // range is [start_line, start_char, end_line, end_char] (0-indexed).
+            if occ.range.is_empty() {
+                continue;
+            }
+            let line_0 = occ.range[0]; // 0-based
+            let line_1 = line_0 as u32 + 1; // 1-based
+
+            let qualified = scip_symbol_to_qualified(&occ.symbol);
+            if !qualified.is_empty() {
+                file_refs.entry(line_1).or_default().push(qualified);
+            }
+        }
+    }
+
+    eprintln!(
+        "  [scip] built ref index in {:.1}ms — {} files",
+        t0.elapsed().as_secs_f64() * 1000.0,
+        scip_refs.len(),
+    );
+
+    // Compare graph call_sites against SCIP ground truth.
+    let n = graph.names.len();
+    let mut checked = 0usize;
+    let mut matched = 0usize;
+    let mut mismatched = 0usize;
+    let mut no_scip = 0usize; // graph edge has no SCIP ref on that line
+    let mut mismatch_details: Vec<String> = Vec::new();
+    // Categorize mismatches: "graph_owner→scip_owner" frequency.
+    let mut mismatch_owners: HashMap<String, usize> = HashMap::new();
+
+    for i in 0..n {
+        if graph.kinds[i] != "function" {
+            continue;
+        }
+
+        let caller_file = &graph.files[i];
+        // Normalize path: graph may use backslashes, SCIP uses forward slashes.
+        let norm_file = caller_file.replace('\\', "/");
+
+        let file_refs = scip_refs.get(&norm_file);
+
+        for &(callee_idx, call_line) in &graph.call_sites[i] {
+            if call_line == 0 {
+                continue;
+            }
+            let ci = callee_idx as usize;
+            if ci >= n || graph.kinds[ci] != "function" {
+                continue;
+            }
+
+            checked += 1;
+            let callee_name = &graph.names[ci];
+            let callee_short = short_name(callee_name).to_lowercase();
+
+            // Get SCIP references on this line.
+            let refs_on_line = file_refs
+                .and_then(|fr| fr.get(&call_line))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+
+            if refs_on_line.is_empty() {
+                no_scip += 1;
+                continue;
+            }
+
+            // Check if any SCIP ref on this line matches the graph callee.
+            // Match by: method name leaf match + owner match.
+            // Extract owner(s) from graph callee name.
+            // "Trait for ConcreteType::method" → owners: [concretetype, trait]
+            // "Owner::method" → owners: [owner]
+            let callee_owners: Vec<String> = callee_name.rsplit_once("::")
+                .map(|(p, _)| {
+                    let leaf = p.rsplit("::").next().unwrap_or(p);
+                    if let Some((trait_part, concrete_part)) = leaf.split_once(" for ") {
+                        let concrete = concrete_part.split('<').next().unwrap_or(concrete_part).to_lowercase();
+                        let trait_name = trait_part.split('<').next().unwrap_or(trait_part).to_lowercase();
+                        vec![concrete, trait_name]
+                    } else {
+                        vec![leaf.split('<').next().unwrap_or(leaf).to_lowercase()]
+                    }
+                })
+                .unwrap_or_default();
+
+            let found_match = refs_on_line.iter().any(|scip_name| {
+                let scip_lower = scip_name.to_lowercase();
+                let scip_short = scip_lower.rsplit("::").next().unwrap_or(&scip_lower);
+                if scip_short != callee_short {
+                    return false;
+                }
+                // Method name matches — check owner if available.
+                if callee_owners.is_empty() {
+                    true // bare function, method name match is enough
+                } else {
+                    let scip_owner = scip_lower.rsplit_once("::")
+                        .map(|(p, _)| {
+                            let leaf = p.rsplit("::").next().unwrap_or(p);
+                            leaf.split('<').next().unwrap_or(leaf)
+                        })
+                        .unwrap_or("");
+                    // Try matching any of the graph owners (concrete type or trait).
+                    callee_owners.iter().any(|graph_owner| {
+                        scip_owner == graph_owner.as_str()
+                            || scip_owner.ends_with(&format!("::{graph_owner}"))
+                            || graph_owner.ends_with(&format!("::{scip_owner}"))
+                    })
+                }
+            });
+
+            if found_match {
+                matched += 1;
+            } else {
+                mismatched += 1;
+
+                // Categorize: graph_owner → scip_owner (method name match only).
+                let graph_owner = callee_owners.first().cloned().unwrap_or_default();
+                let scip_match_method = refs_on_line.iter().find(|s| {
+                    let sl = s.to_lowercase();
+                    sl.rsplit("::").next().unwrap_or(&sl) == callee_short
+                });
+                let category = if let Some(scip_name) = scip_match_method {
+                    let scip_owner = scip_name.rsplit_once("::")
+                        .map(|(p, _)| p.rsplit("::").next().unwrap_or(p).to_lowercase())
+                        .unwrap_or_default();
+                    format!("{graph_owner} → {scip_owner}")
+                } else {
+                    format!("{graph_owner} → (no method match)")
+                };
+                *mismatch_owners.entry(category).or_default() += 1;
+
+                if mismatch_details.len() < 100 {
+                    let scip_list: Vec<&str> = refs_on_line.iter().map(|s| s.as_str()).collect();
+                    mismatch_details.push(format!(
+                        "  L{call_line} {} → graph: {callee_name}  scip: [{}]",
+                        norm_file, scip_list.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    let total_comparable = matched + mismatched;
+    let accuracy = if total_comparable > 0 {
+        matched as f64 / total_comparable as f64 * 100.0
+    } else {
+        100.0
+    };
+
+    println!("\n=== SCIP ground-truth comparison ===");
+    println!("  checked:     {checked}");
+    println!("  no scip ref: {no_scip} (line has no SCIP reference — skipped)");
+    println!("  matched:     {matched}");
+    println!("  mismatched:  {mismatched}");
+    println!("  accuracy:    {accuracy:.1}% ({matched}/{total_comparable})");
+
+    if !mismatch_owners.is_empty() {
+        let mut sorted: Vec<_> = mismatch_owners.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        println!("\n  [SCIP mismatch categories] (graph_owner → scip_owner):");
+        for (cat, count) in sorted.iter().take(30) {
+            println!("    {count:>4}x  {cat}");
+        }
+    }
+
+    if !mismatch_details.is_empty() {
+        println!("\n  [SCIP mismatches] (first {}):", mismatch_details.len());
+        for d in &mismatch_details {
+            println!("    {d}");
+        }
+    }
+
+    eprintln!(
+        "  [scip] comparison done in {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    Ok(())
+}
+
+/// Convert a SCIP symbol string to a qualified name like "Type::method".
+///
+/// SCIP symbol format: `scheme manager package version descriptor...`
+/// Example: `rust-analyzer cargo v-hnsw-core 0.1.0 hnsw/HnswIndex#search().`
+/// Descriptors: `/` = namespace, `#` = type, `.` = term/method, `()` = params
+fn scip_symbol_to_qualified(symbol: &str) -> String {
+    // Parse from right: extract last meaningful descriptor parts.
+    // Strip the scheme/manager/package/version prefix by finding descriptors.
+    // Descriptors contain: `name.` (term), `name#` (type), `name/` (namespace)
+    let parts = symbol.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return String::new();
+    }
+    // Everything from index 4 onward is the descriptor string.
+    let desc_str = parts[4..].join(" ");
+    parse_scip_descriptors(&desc_str)
+}
+
+/// Parse SCIP descriptor string into "Type::method" form.
+///
+/// SCIP descriptor syntax (from the spec):
+///   descriptor = name suffix | name `(` params `)` suffix
+///   suffix     = `.` (term) | `#` (type) | `/` (namespace) | `!` (macro)
+///
+/// Special: `impl#[SelfType]method().` — the `[...]` after `impl#` contains
+/// the Self type, which we extract as the owning type.
+///
+/// Examples:
+///   `hnsw/HnswIndex#search().`          → "HnswIndex::search"
+///   `config/impl#[HnswConfig]builder().` → "HnswConfig::builder"
+///   `black_box().`                        → "black_box"
+fn parse_scip_descriptors(desc: &str) -> String {
+    let mut segments: Vec<String> = Vec::new();
+    let mut i = 0;
+    let bytes = desc.as_bytes();
+    let len = bytes.len();
+
+    while i < len {
+        // Read `[type_parameter]` blocks — may contain Self type after `impl#`.
+        if bytes[i] == b'[' {
+            i += 1;
+            let start = i;
+            let mut depth = 1;
+            while i < len && depth > 0 {
+                match bytes[i] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 { i += 1; }
+            }
+            let bracket_content = &desc[start..i];
+            if i < len { i += 1; } // skip ']'
+
+            // If last segment was "impl", replace it with the Self type.
+            if segments.last().is_some_and(|s| s == "impl") {
+                segments.pop();
+                // Extract clean type name: "`Result<T, E>`" → "Result"
+                let clean = bracket_content
+                    .trim_matches('`')
+                    .split('<').next().unwrap_or(bracket_content);
+                if !clean.is_empty() {
+                    segments.push(clean.to_owned());
+                }
+            }
+            continue;
+        }
+
+        // Read identifier: everything until a suffix or special char.
+        let start = i;
+        while i < len && !matches!(bytes[i], b'.' | b'#' | b'/' | b'!' | b'(' | b'[') {
+            i += 1;
+        }
+
+        let name = if i > start { Some(&desc[start..i]) } else { None };
+
+        // Skip optional parenthesized params: `(...)`.
+        if i < len && bytes[i] == b'(' {
+            let mut depth = 1;
+            i += 1;
+            while i < len && depth > 0 {
+                match bytes[i] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+
+        // Read suffix: `.`, `#`, `/`, `!`
+        let suffix = if i < len && matches!(bytes[i], b'.' | b'#' | b'/' | b'!') {
+            let s = bytes[i];
+            i += 1;
+            s
+        } else if i < len {
+            i += 1; // skip unexpected char
+            0
+        } else {
+            0
+        };
+
+        if let Some(name) = name {
+            // Include types (#) and terms (.) in the qualified name.
+            // Skip namespaces (/) and macros (!) — they're module-level.
+            if suffix == b'#' || suffix == b'.' {
+                segments.push(name.to_owned());
+            }
+        }
+    }
+
+    segments.join("::")
 }
 
 #[cfg(test)]

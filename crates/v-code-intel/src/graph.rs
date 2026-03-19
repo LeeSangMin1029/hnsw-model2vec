@@ -272,8 +272,17 @@ impl CallGraph {
         rustdoc: Option<&RustdocTypes>,
         extern_index: Option<&crate::extern_types::ExternMethodIndex>,
     ) -> Self {
-        // Wrap extern_index in a pre-completed handle to reuse build_full_inner.
         Self::build_full_inner(chunks, rustdoc, || extern_index.cloned())
+    }
+
+    /// Build with all type information + compiler-inferred type map.
+    pub fn build_full_with_type_map(
+        chunks: &[ParsedChunk],
+        rustdoc: Option<&RustdocTypes>,
+        extern_index: Option<&crate::extern_types::ExternMethodIndex>,
+        type_map: Option<&crate::type_probes::TypeMap>,
+    ) -> Self {
+        Self::build_full_inner_with_type_map(chunks, rustdoc, || extern_index.cloned(), type_map)
     }
 
     /// Build the call graph with deferred extern index (runs in parallel).
@@ -285,7 +294,17 @@ impl CallGraph {
         rustdoc: Option<&RustdocTypes>,
         extern_handle: std::thread::JoinHandle<Option<crate::extern_types::ExternMethodIndex>>,
     ) -> Self {
-        Self::build_full_inner(chunks, rustdoc, || extern_handle.join().ok().flatten())
+        Self::build_full_deferred_with_type_map(chunks, rustdoc, extern_handle, None)
+    }
+
+    /// Build with deferred extern index + compiler-inferred type map.
+    pub fn build_full_deferred_with_type_map(
+        chunks: &[ParsedChunk],
+        rustdoc: Option<&RustdocTypes>,
+        extern_handle: std::thread::JoinHandle<Option<crate::extern_types::ExternMethodIndex>>,
+        type_map: Option<&crate::type_probes::TypeMap>,
+    ) -> Self {
+        Self::build_full_inner_with_type_map(chunks, rustdoc, || extern_handle.join().ok().flatten(), type_map)
     }
 
 
@@ -295,6 +314,16 @@ impl CallGraph {
         chunks: &[ParsedChunk],
         rustdoc: Option<&RustdocTypes>,
         get_extern: impl FnOnce() -> Option<crate::extern_types::ExternMethodIndex>,
+    ) -> Self {
+        Self::build_full_inner_with_type_map(chunks, rustdoc, get_extern, None)
+    }
+
+    /// Core graph build with optional compiler-inferred type map.
+    fn build_full_inner_with_type_map(
+        chunks: &[ParsedChunk],
+        rustdoc: Option<&RustdocTypes>,
+        get_extern: impl FnOnce() -> Option<crate::extern_types::ExternMethodIndex>,
+        type_map: Option<&crate::type_probes::TypeMap>,
     ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
@@ -329,6 +358,15 @@ impl CallGraph {
         let (method_owners, (instantiated, trait_impl_methods)) = right;
         eprintln!("      [graph] index tables: {:.1}ms  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
 
+        // Get extern index early (before resolve) so extern_all_methods can be used
+        // to avoid resolving std methods (len, push, get) to project types.
+        let t_ext = std::time::Instant::now();
+        let extern_index = get_extern();
+        let extern_all_methods = extern_index.as_ref()
+            .map(|ext| ext.all_method_set())
+            .unwrap_or_default();
+        eprintln!("      [graph] extern join (early): {:.1}ms ({} methods)", t_ext.elapsed().as_secs_f64() * 1000.0, extern_all_methods.len());
+
         // Pre-compute per-chunk context (import_map, receiver_types, etc.) — done once.
         let t2 = std::time::Instant::now();
         use rayon::prelude::*;
@@ -336,13 +374,34 @@ impl CallGraph {
             .map(|c| build_chunk_ctx(c, &owner_types, &owner_field_types, &return_type_map, &method_owners))
             .collect();
 
+        // Inject compiler-inferred types from type probes into receiver_types.
+        if let Some(tmap) = type_map {
+            let mut injected = 0usize;
+            for (src, chunk) in chunks.iter().enumerate() {
+                let func_lower = chunk.name.to_lowercase();
+                for (var, _callee) in &chunk.let_call_bindings {
+                    let key = format!("{func_lower}::{}", var.to_lowercase());
+                    if let Some(ty) = tmap.types.get(&key) {
+                        let var_lower = var.to_lowercase();
+                        if !ctxs[src].receiver_types.contains_key(&var_lower) {
+                            ctxs[src].receiver_types.insert(var_lower, ty.clone());
+                            injected += 1;
+                        }
+                    }
+                }
+            }
+            if injected > 0 {
+                eprintln!("      [graph] type-probe injected: {injected} receiver types");
+            }
+        }
+
         // Pass 1: parallel resolve — each chunk independently collects edges.
         let par_results: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>, Vec<bool>)> = chunks.par_iter()
             .zip(ctxs.par_iter_mut())
             .enumerate()
             .map(|(src, (c, ctx))| {
                 let empty_skip = HashSet::new();
-                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &meta.names, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &empty_skip, &meta.enum_types, &meta.enum_variants)
+                resolve_collect(src, c, ctx, &meta.exact, &meta.short, &meta.kinds, &meta.names, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &empty_skip, &meta.enum_types, &meta.enum_variants, &extern_all_methods)
             })
             .collect();
 
@@ -443,7 +502,7 @@ impl CallGraph {
                 .collect();
             let delta_results: Vec<(usize, Vec<(u32, u32)>)> = enriched_indices.par_iter()
                 .map(|&src| {
-                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &resolved_indices[src], &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names);
+                    let edges = resolve_delta(src, &chunks[src], &ctxs[src], &meta.exact, &meta.short, &return_type_map, &trait_methods, &method_owners, &instantiated, &trait_impl_methods, rustdoc, &resolved_indices[src], &meta.enum_types, &meta.enum_variants, &meta.kinds, &meta.names, &extern_all_methods);
                     (src, edges)
                 })
                 .collect();
@@ -472,11 +531,6 @@ impl CallGraph {
         let t3 = std::time::Instant::now();
         adj.dedup();
         eprintln!("      [graph] dedup: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
-
-        // Get extern index (may block on thread join or return immediately).
-        let t4 = std::time::Instant::now();
-        let extern_index = get_extern();
-        eprintln!("      [graph] extern join: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
 
         let t5 = std::time::Instant::now();
         let extern_calls = Self::classify_extern_calls(
@@ -509,17 +563,7 @@ impl CallGraph {
             return vec![Vec::new(); n];
         };
 
-        // Build project type short names for "is this a project type?" checks.
-        let project_type_shorts: HashSet<String> = {
-            let mut set = HashSet::new();
-            for (i, kind) in meta.kinds.iter().enumerate() {
-                if matches!(kind.as_str(), "struct" | "enum" | "trait" | "impl") {
-                    let leaf = meta.names[i].rsplit("::").next().unwrap_or(&meta.names[i]).to_lowercase();
-                    set.insert(leaf);
-                }
-            }
-            set
-        };
+        let project_type_shorts = collect_project_type_shorts(chunks);
 
         // Build project function short names for bare-fn extern classification.
         let project_fn_shorts: HashSet<String> = {
@@ -847,6 +891,7 @@ fn resolve_collect(
     skip_calls: &HashSet<String>,
     enum_types: &HashSet<String>,
     enum_variants: &HashSet<String>,
+    extern_all_methods: &HashSet<String>,
 ) -> (Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>, Vec<bool>) {
     let mut edges: Vec<(u32, u32)> = Vec::new();
     let mut receiver_updates: HashMap<String, String> = HashMap::new();
@@ -867,13 +912,14 @@ fn resolve_collect(
             if let Some(tgt) = resolve_with_imports(
                 call, exact, short, &ctx.imports,
                 ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
-                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
+                &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves, extern_all_methods,
             ) {
                 let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 let tgt_usize = tgt as usize;
                 if tgt_usize != src {
                     edges.push((tgt, call_line));
                 }
+                trait_fan_out(call, tgt, src, call_line, trait_impl_methods, exact, extern_all_methods, &mut edges);
                 resolved_set[call_idx] = true;
 
                 if pass == 0 {
@@ -936,6 +982,7 @@ fn resolve_delta(
     enum_variants: &HashSet<String>,
     kinds: &[String],
     chunk_names: &[String],
+    extern_all_methods: &HashSet<String>,
 ) -> Vec<(u32, u32)> {
     let mut edges: Vec<(u32, u32)> = Vec::new();
     for (call_idx, call) in chunk.calls.iter().enumerate() {
@@ -946,16 +993,53 @@ fn resolve_delta(
         if let Some(tgt) = resolve_with_imports(
             call, exact, short, &ctx.imports,
             ctx.self_type.as_deref(), &ctx.source_types_set, &ctx.call_types_set,
-            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves,
+            &ctx.receiver_types, trait_methods, method_owners, instantiated, trait_impl_methods, rustdoc, kinds, chunk_names, enum_types, enum_variants, return_type_map, &ctx.import_leaves, extern_all_methods,
         ) {
             let tgt_usize = tgt as usize;
+            let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
             if tgt_usize != src {
-                let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
                 edges.push((tgt, call_line));
             }
+            trait_fan_out(call, tgt, src, call_line, trait_impl_methods, exact, extern_all_methods, &mut edges);
         }
     }
     edges
+}
+
+/// Add edges to all concrete trait impls for project-specific trait methods.
+///
+/// When a call resolves to one impl of a trait method, also add edges to
+/// all other impls. Skips std/dep trait methods (Default, Clone, etc.)
+/// to avoid edge explosion.
+fn trait_fan_out(
+    call: &str,
+    resolved_tgt: u32,
+    src: usize,
+    call_line: u32,
+    trait_impl_methods: &HashMap<String, Vec<String>>,
+    exact: &HashMap<String, u32>,
+    extern_all_methods: &HashSet<String>,
+    edges: &mut Vec<(u32, u32)>,
+) {
+    let call_lower = call.to_lowercase();
+    let method_leaf = call_lower.rsplit_once('.')
+        .or_else(|| call_lower.rsplit_once("::"))
+        .map_or(call_lower.as_str(), |p| p.1);
+    if extern_all_methods.contains(method_leaf) {
+        return;
+    }
+    let Some(impl_types) = trait_impl_methods.get(method_leaf) else { return };
+    if impl_types.len() <= 1 {
+        return;
+    }
+    for impl_type in impl_types {
+        let qualified = format!("{impl_type}::{method_leaf}");
+        if let Some(&alt_idx) = exact.get(&qualified) {
+            if alt_idx != resolved_tgt && (alt_idx as usize) != src {
+                edges.push((alt_idx, call_line));
+            }
+        }
+    }
 }
 
 fn resolve_with_imports(
@@ -978,6 +1062,7 @@ fn resolve_with_imports(
     enum_variants: &HashSet<String>,
     return_type_map: &HashMap<String, String>,
     _import_leaves: &HashSet<String>,
+    extern_all_methods: &HashSet<String>,
 ) -> Option<u32> {
     // Normalize UFCS / turbofish syntax before resolution:
     //   `<Foo>::func`         → `Foo::func`
@@ -1085,11 +1170,9 @@ fn resolve_with_imports(
                 if let Some(&idx) = exact.get(&candidate) {
                     return Some(idx);
                 }
-                // Field type exists in project → allow short fallback
-                if (short.contains_key(field_type) || exact.contains_key(field_type))
-                    && let Some(idx) = short_fn(leaf_method) {
-                        return Some(idx);
-                    }
+                // Field type exists in project → try qualified lookup only.
+                // short_fn fallback would pick an arbitrary chunk (e.g. DeltaNeighbors::push
+                // for Vec::push) — never use short_fn for receiver.method() calls.
                 // Field type is external → skip to avoid false positive.
                 // But if field type is a likely generic param (single lowercase letter
                 // like "t", "u", "k", "v"), fall through to heuristic matching.
@@ -1131,6 +1214,8 @@ fn resolve_with_imports(
                 }
             }
             // Try method_owners for self.field.method — RTA-filtered unique resolve
+            // Only resolve if field name is similar to the owner type.
+            // Prevents `self.callees.push()` → `DeltaNeighbors::push`.
             if let Some(owners) = method_owners.get(leaf_method) {
                 let rta: Vec<&String> = if !instantiated.is_empty() {
                     let f: Vec<&String> = owners.iter().filter(|o| instantiated.contains(o.as_str())).collect();
@@ -1139,9 +1224,15 @@ fn resolve_with_imports(
                     owners.iter().collect()
                 };
                 if rta.len() == 1 {
-                    let qualified = format!("{}::{}", rta[0], leaf_method);
-                    if let Some(&idx) = exact.get(&qualified) {
-                        return Some(idx);
+                    let owner = &rta[0];
+                    let field_match = field_stripped.len() >= 3
+                        && (owner.contains(field_leaf) || field_leaf.contains(owner.as_str())
+                            || owner.contains(&field_stripped) || field_stripped.contains(owner.as_str()));
+                    if field_match {
+                        let qualified = format!("{owner}::{leaf_method}");
+                        if let Some(&idx) = exact.get(&qualified) {
+                            return Some(idx);
+                        }
                     }
                 }
             }
@@ -1173,12 +1264,27 @@ fn resolve_with_imports(
     // 5a. Return-type chain: receiver is a function name whose return type is known.
     //     e.g. `type_of_expr.adjusted` where return_type_map["type_of_expr"] = "typeinfo"
     //     → try exact["typeinfo::adjusted"]
+    //     Only trust return_type_map when the method actually belongs to the inferred type
+    //     (prevents `map.collect()` → `chunkmeta::collect` via return_type_map["map"]).
     if let Some((receiver, method)) = lower.rsplit_once('.') {
         let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
         if let Some(ret_type) = return_type_map.get(receiver_leaf) {
-            let candidate = format!("{ret_type}::{method}");
-            if let Some(&idx) = exact.get(&candidate) {
-                return Some(idx);
+            // Only trust return_type_map when receiver is a known project entity,
+            // not just a bare method name that happens to match (e.g. "map", "filter").
+            let receiver_is_known = exact.contains_key(receiver_leaf)
+                || imports.contains_key(receiver_leaf);
+            if receiver_is_known {
+                let candidate = format!("{ret_type}::{method}");
+                if let Some(&idx) = exact.get(&candidate) {
+                    // Verify: method must belong to ret_type (or method_owners unknown)
+                    let valid = method_owners.get(method).map_or(true, |owners| {
+                        owners.iter().any(|o| *o == *ret_type
+                            || o.split(" for ").last().map_or(false, |c| c == *ret_type))
+                    });
+                    if valid {
+                        return Some(idx);
+                    }
+                }
             }
         }
     }
@@ -1208,15 +1314,87 @@ fn resolve_with_imports(
         // (exists in exact map = has a chunk definition in the project).
         // Prevents `Vec::new()` → project's `Scanner::new` false positive.
         if exact.contains_key(prefix_leaf) {
-            return short_fn(suffix);
+            // Validate that short_fn result's owner matches prefix_leaf.
+            // Prevents `CCodeChunker::new` → `Scanner::new` when macro-generated
+            // method is not in exact map but short_fn("new") returns first-registered.
+            if let Some(idx) = short_fn(suffix) {
+                let resolved_name = &chunk_names[idx as usize];
+                let resolved_owner = resolved_name.rsplit_once("::")
+                    .map(|(p, _)| {
+                        let leaf = p.rsplit("::").next().unwrap_or(p);
+                        let after_for = leaf.split(" for ").last().unwrap_or(leaf);
+                        after_for.split('<').next().unwrap_or(after_for)
+                    })
+                    .unwrap_or("");
+                if resolved_owner == prefix_leaf
+                    || resolved_owner.contains(prefix_leaf)
+                    || prefix_leaf.contains(resolved_owner) {
+                    return Some(idx);
+                }
+            }
         }
         return None;
     }
     if let Some((receiver, method)) = lower.rsplit_once('.') {
         let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
         let recv_stripped: String = receiver_leaf.chars().filter(|&c| c != '_').collect();
-        if imports.contains_key(receiver_leaf) || exact.contains_key(receiver_leaf) {
-            return short_fn(method);
+        // 6a. Name-based receiver matching (receiver name matches a type/import).
+        // Skip this when receiver_types has a known type — prefer the precise
+        // type from let bindings / param types (6b) over name similarity.
+        // Prevents `let tokenizer = WhitespaceTokenizer::new(); tokenizer.tokenize()`
+        // from matching `KoreanBm25Tokenizer` because "tokenizer" contains "tokenizer".
+        if !receiver_types.contains_key(receiver_leaf)
+            && (imports.contains_key(receiver_leaf) || exact.contains_key(receiver_leaf)) {
+            // If method has known owners, verify receiver matches one of them.
+            // Prevents `scanner.new()` → `CallGraph::new` when receiver "scanner"
+            // is a known import but not related to the method's owner.
+            if let Some(owners) = method_owners.get(method) {
+                // Find the best matching owner for the receiver.
+                let matched_owner = owners.iter().find(|o| {
+                    // Strip "trait for " prefix to match concrete type against receiver.
+                    let concrete = o.split(" for ").last().unwrap_or(o);
+                    concrete.contains(receiver_leaf) || receiver_leaf.contains(concrete)
+                    || concrete.contains(recv_stripped.as_str()) || recv_stripped.contains(concrete)
+                });
+                if let Some(owner) = matched_owner {
+                    // Try exact lookup with concrete type (strip "trait for " prefix).
+                    let concrete = owner.split(" for ").last().unwrap_or(owner);
+                    let qualified = format!("{concrete}::{method}");
+                    if let Some(&idx) = exact.get(&qualified) {
+                        return Some(idx);
+                    }
+                    // Also try full owner key (for trait impl chunks).
+                    let qualified_full = format!("{owner}::{method}");
+                    if let Some(&idx) = exact.get(&qualified_full) {
+                        return Some(idx);
+                    }
+                    // Owner matched but not in exact — don't fall to short_fn
+                    // which would pick an arbitrary chunk.
+                }
+                // No owner matches receiver — fall through to 6b+ for more context.
+            } else {
+                // method_owners has no entry — may be a trait method.
+                // Check trait_impl_methods for receiver-specific dispatch first.
+                // Prevents `l2distance.distance()` → `MockL2::distance` via short_fn.
+                if let Some(impl_types) = trait_impl_methods.get(method) {
+                    let matched = impl_types.iter().find(|t| {
+                        t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
+                        || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
+                    });
+                    if let Some(t) = matched {
+                        let qualified = format!("{t}::{method}");
+                        if let Some(&idx) = exact.get(&qualified) {
+                            return Some(idx);
+                        }
+                    }
+                    // No receiver match in trait impls — don't fall to short_fn
+                    // as it would pick an arbitrary impl.
+                    // Fall through to 6b+ for more context regardless of count.
+                } else {
+                    // No method_owners, no trait_impl_methods — no project evidence.
+                    // Fall through to 6b+ rather than short_fn blind fallback.
+                }
+            }
         }
         // 6b. Type-aware receiver check: if we know the receiver's type from
         // param_types/local_types/field_types, only match if that type is a
@@ -1227,55 +1405,82 @@ fn resolve_with_imports(
                 return None;
             }
             let ty_lower = recv_type.to_lowercase();
-            // Type exists in project → resolve via Type::method or short fallback
-            let qualified = format!("{ty_lower}::{method}");
-            if let Some(&idx) = exact.get(&qualified) {
-                return Some(idx);
-            }
-            // Trait dispatch: receiver is a trait → look up concrete impl via trait_impl_methods.
-            // e.g. pstore: &dyn PayloadStore → trait_impl_methods["get_payload"] → ["filepayloadstore"]
-            if let Some(impl_types) = trait_impl_methods.get(method) {
-                if impl_types.len() == 1 {
-                    let qualified = format!("{}::{}", impl_types[0], method);
-                    if let Some(&idx) = exact.get(&qualified) {
-                        return Some(idx);
-                    }
-                } else {
-                    // Multiple impls — narrow by type context or receiver name similarity
-                    let matched = impl_types.iter().find(|t| {
-                        source_types.contains(t.as_str()) || call_types.contains(t.as_str())
-                    }).or_else(|| impl_types.iter().find(|t| {
-                        t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
-                        || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
+            // Validate: the method must actually belong to this type.
+            // Prevents `map.collect()` → `ChunkMeta::collect` when `map` was
+            // wrongly inferred as `chunkmeta` via return_type_map["map"].
+            // Check if this type actually owns the method.
+            // Also allow trait types (trait dispatch handles resolution).
+            let recv_is_trait = exact.get(&ty_lower)
+                .and_then(|&idx| kinds.get(idx as usize))
+                .map_or(false, |k| k == "trait");
+            let type_has_method = recv_is_trait
+                || method_owners.get(method)
+                    .map_or(true, |owners| owners.iter().any(|o| {
+                        *o == ty_lower
+                        // Handle trait impl owners: "runnable for task" contains "task"
+                        || o.split(" for ").last().map_or(false, |concrete| concrete == ty_lower)
                     }));
-                    if let Some(t) = matched {
-                        let qualified = format!("{t}::{method}");
+            if type_has_method {
+                // Type exists in project and owns this method → resolve via Type::method
+                let qualified = format!("{ty_lower}::{method}");
+                if let Some(&idx) = exact.get(&qualified) {
+                    return Some(idx);
+                }
+                // Trait dispatch: receiver is a trait → look up concrete impl
+                if let Some(impl_types) = trait_impl_methods.get(method) {
+                    if impl_types.len() == 1 {
+                        let qualified = format!("{}::{}", impl_types[0], method);
+                        if let Some(&idx) = exact.get(&qualified) {
+                            return Some(idx);
+                        }
+                    } else {
+                        let matched = impl_types.iter().find(|t| {
+                            source_types.contains(t.as_str()) || call_types.contains(t.as_str())
+                        }).or_else(|| impl_types.iter().find(|t| {
+                            t.contains(receiver_leaf) || receiver_leaf.contains(t.as_str())
+                            || t.contains(recv_stripped.as_str()) || recv_stripped.contains(t.as_str())
+                        }));
+                        if let Some(t) = matched {
+                            let qualified = format!("{t}::{method}");
+                            if let Some(&idx) = exact.get(&qualified) {
+                                return Some(idx);
+                            }
+                        }
+                    }
+                }
+                // Also check method_owners (non-trait methods)
+                let ty_stripped: String = ty_lower.chars().filter(|&c| c != '_').collect();
+                if let Some(owners) = method_owners.get(method)
+                    && let Some(owner) = owners.iter().find(|o| {
+                        **o == ty_lower || **o == ty_stripped
+                        || o.contains(ty_stripped.as_str()) || ty_stripped.contains(o.as_str())
+                    }) {
+                        let qualified = format!("{owner}::{method}");
+                        if let Some(&idx) = exact.get(&qualified) {
+                            return Some(idx);
+                        }
+                    }
+                // Exact lookup with recv_type as owner — no short_fn fallback.
+                // short_fn would pick an arbitrary chunk, ignoring the known type.
+                if let Some(owners) = method_owners.get(method) {
+                    let matched = owners.iter().find(|o| **o == ty_lower || **o == ty_stripped);
+                    if let Some(owner) = matched {
+                        let qualified = format!("{owner}::{method}");
                         if let Some(&idx) = exact.get(&qualified) {
                             return Some(idx);
                         }
                     }
                 }
             }
-            // Also check method_owners (non-trait methods)
-            // Underscore-stripped: recv type "binexpr" matches owner "binexpr"
-            let ty_stripped: String = ty_lower.chars().filter(|&c| c != '_').collect();
-            if let Some(owners) = method_owners.get(method)
-                && let Some(owner) = owners.iter().find(|o| {
-                    **o == ty_lower || **o == ty_stripped
-                    || o.contains(ty_stripped.as_str()) || ty_stripped.contains(o.as_str())
-                }) {
-                    let qualified = format!("{owner}::{method}");
-                    if let Some(&idx) = exact.get(&qualified) {
-                        return Some(idx);
-                    }
-                }
-            // Type is in project (exact or short map) → allow short fallback
-            if short.contains_key(&ty_lower) || exact.contains_key(&ty_lower) {
-                return short_fn(method);
+            // recv_type is known but doesn't own this method.
+            // If the type is not a project type (no struct/enum/trait chunk)
+            // AND the method exists in extern (std/deps), this is an extern call.
+            // e.g. receiver_types["all_files"] = "vec" → vec is not a project type
+            // → all_files.is_empty() should be extern, not StorageEngine::is_empty.
+            if !exact.contains_key(&ty_lower) && extern_all_methods.contains(method) {
+                return None;
             }
-            // Type is not in project — could be external or macro-generated.
-            // Fall through to 6c/6d for method_owners disambiguation instead of
-            // returning None, which would block resolution of macro-generated types.
+            // Otherwise fall through to 6c/6d for disambiguation.
         }
         // 6c. Unknown receiver → try rustdoc method→owner disambiguation.
         //     Only resolve if the owner type appears in the function's type context
@@ -1320,10 +1525,12 @@ fn resolve_with_imports(
             // Minimum length for name similarity — 1-2 char names like "w", "db"
             // match too many types ("w" ⊂ "widget", "db" ⊂ "database").
             let min_sim_len = 3;
+            // If method also exists on extern types (std/deps), require stronger
+            // evidence — receiver name must match owner. Prevents `.len()`, `.push()`
+            // on Vec/HashMap from resolving to a project type with the same method.
+            let method_is_extern = extern_all_methods.contains(method);
             if rta_filtered.len() == 1 {
                 let owner = &rta_filtered[0];
-                // Only resolve unique owner if receiver name is related to the
-                // owner type. Prevents `parser.parse()` → `RustdocTypes::parse`.
                 let owner_match = recv_stripped.len() >= min_sim_len
                     && (owner.contains(receiver_leaf)
                     || receiver_leaf.contains(owner.as_str())
@@ -1334,6 +1541,11 @@ fn resolve_with_imports(
                     if let Some(&idx) = exact.get(&qualified) {
                         return Some(idx);
                     }
+                }
+                // Unique project owner but no receiver match — if method is also extern,
+                // it's likely a std method call. Skip entirely.
+                if method_is_extern {
+                    return None;
                 }
             } else if owners.len() > 1 {
                 // (2) Receiver name similarity — "engine" matches "storageengine"
@@ -1353,11 +1565,18 @@ fn resolve_with_imports(
                     }
                 }
                 // (3) Self type — method on the same struct we're in
+                // Only resolve if receiver name is related to self_type.
+                // Prevents `chunks.len()` → `CallGraph::len` inside CallGraph methods.
                 if let Some(st) = self_type
                     && owners.contains(&st.to_owned()) {
-                        let qualified = format!("{st}::{method}");
-                        if let Some(&idx) = exact.get(&qualified) {
-                            return Some(idx);
+                        let self_match = recv_stripped.len() >= 3
+                            && (st.contains(receiver_leaf) || receiver_leaf.contains(st)
+                                || st.contains(recv_stripped.as_str()) || recv_stripped.contains(st));
+                        if self_match {
+                            let qualified = format!("{st}::{method}");
+                            if let Some(&idx) = exact.get(&qualified) {
+                                return Some(idx);
+                            }
                         }
                     }
                 // (4) Known receiver type from receiver_types
@@ -1432,7 +1651,7 @@ fn collect_owner_types(chunks: &[ParsedChunk], _meta: &ChunkMeta) -> HashMap<Str
 ///
 /// E.g. struct `MmapStaticModel { tokenizer: Tokenizer, weights: Vec }` →
 /// `{"mmapmstaticmodel": {"tokenizer": "tokenizer", "weights": "vec"}}`.
-fn collect_owner_field_types(chunks: &[ParsedChunk]) -> HashMap<String, HashMap<String, String>> {
+pub fn collect_owner_field_types(chunks: &[ParsedChunk]) -> HashMap<String, HashMap<String, String>> {
     let mut result: HashMap<String, HashMap<String, String>> = HashMap::new();
     for c in chunks {
         if c.kind != "struct" {
@@ -1449,10 +1668,23 @@ fn collect_owner_field_types(chunks: &[ParsedChunk]) -> HashMap<String, HashMap<
     result
 }
 
+/// Collect project type short names (struct, enum, trait, impl) for extern classification.
+pub fn collect_project_type_shorts(chunks: &[ParsedChunk]) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for c in chunks {
+        if matches!(c.kind.as_str(), "struct" | "enum" | "trait" | "impl") {
+            let leaf = c.name.rsplit("::").next().unwrap_or(&c.name).to_lowercase();
+            let clean = leaf.split('<').next().unwrap_or(&leaf);
+            set.insert(clean.to_owned());
+        }
+    }
+    set
+}
+
 /// Build function name → return type map (lowercase → lowercase leaf type).
 ///
 /// Resolves `Self` to the owning type: `Foo::new → Self` becomes `foo::new → foo`.
-fn build_return_type_map(chunks: &[ParsedChunk]) -> HashMap<String, String> {
+pub fn build_return_type_map(chunks: &[ParsedChunk]) -> HashMap<String, String> {
     // Collect all project type names (structs, enums, traits, etc.)
     let project_types: std::collections::HashSet<String> = chunks
         .iter()
@@ -1481,12 +1713,38 @@ fn build_return_type_map(chunks: &[ParsedChunk]) -> HashMap<String, String> {
                 .unwrap_or_else(|| leaf.to_owned())
         };
         let name_lower = c.name.to_lowercase();
-        // Also insert bare method name for chained-call resolution
-        // (e.g. builder pattern: `.m(v).ef_construction(v)` → return_type_map["m"] → "hnswconfigbuilder")
-        if let Some(method) = name_lower.rsplit_once("::").map(|p| p.1) {
-            map.entry(method.to_owned()).or_insert_with(|| resolved.clone());
-        }
+        // Also insert bare method name for chained-call resolution,
+        // but ONLY if the method name is unique across all project functions.
+        // Common names like "collect", "map", "len" would cause false positives
+        // by polluting return_type_map with wrong type associations.
+        // Deferred to a second pass below.
+
         map.insert(name_lower, resolved);
+    }
+    // Second pass: insert bare method names only if they're unique in the project.
+    // Count how many times each bare method name appears across all functions.
+    let mut method_count: HashMap<String, u32> = HashMap::new();
+    for c in chunks {
+        if c.kind != "function" {
+            continue;
+        }
+        if let Some(method) = c.name.rsplit_once("::").map(|p| p.1) {
+            *method_count.entry(method.to_lowercase()).or_default() += 1;
+        }
+    }
+    for c in chunks {
+        if c.kind != "function" || c.return_type.is_none() {
+            continue;
+        }
+        let name_lower = c.name.to_lowercase();
+        if let Some(method) = name_lower.rsplit_once("::").map(|p| p.1) {
+            if method_count.get(method).copied().unwrap_or(0) == 1 {
+                let resolved = map.get(&name_lower).cloned();
+                if let Some(resolved) = resolved {
+                    map.entry(method.to_owned()).or_insert(resolved);
+                }
+            }
+        }
     }
     map
 }
@@ -1495,7 +1753,7 @@ fn build_return_type_map(chunks: &[ParsedChunk]) -> HashMap<String, String> {
 ///
 /// Scans all `Type::method` function chunks and groups by method short name.
 /// Used for resolving `receiver.method()` when receiver type is unknown.
-fn build_method_owner_index(chunks: &[ParsedChunk]) -> HashMap<String, Vec<String>> {
+pub fn build_method_owner_index(chunks: &[ParsedChunk]) -> HashMap<String, Vec<String>> {
     let mut index: HashMap<String, Vec<String>> = HashMap::new();
     for c in chunks {
         if c.kind != "function" {
@@ -1792,7 +2050,7 @@ fn extract_call_types(calls: &[String]) -> Vec<String> {
 /// Strips generic parameters: "Foo<T>::bar" → "foo".
 /// Strip generic params from each `::` segment of a key.
 /// `"foo<t>::bar"` → `"foo::bar"`, `"foo<d, t>::search_ext"` → `"foo::search_ext"`.
-fn strip_generics_from_key(key: &str) -> String {
+pub(crate) fn strip_generics_from_key(key: &str) -> String {
     let mut out = String::with_capacity(key.len());
     let mut depth = 0u32;
     for ch in key.chars() {
@@ -1844,7 +2102,7 @@ pub fn build_receiver_type_map(chunk: &ParsedChunk) -> HashMap<String, String> {
 /// Scans calls for `Foo::new`, `Foo::open`, etc. patterns and uses the return_type_map
 /// to infer that the result variable is of type Foo (or the actual return type).
 /// This enables resolution of `x.method()` when `x = Foo::new()`.
-fn infer_local_types_from_calls(
+pub fn infer_local_types_from_calls(
     calls: &[String],
     let_call_bindings: &[(String, String)],
     return_type_map: &HashMap<String, String>,
@@ -1912,7 +2170,7 @@ fn infer_local_types_from_calls(
 ///    project owner → `x: ThatOwner`.
 /// 3. **Extern voting**: If ALL methods on receiver exist in NO project type
 ///    → receiver is extern, marked as `"<extern>"` to aid extern classification.
-fn infer_receiver_types_by_co_methods(
+pub fn infer_receiver_types_by_co_methods(
     calls: &[String],
     method_owners: &HashMap<String, Vec<String>>,
     receiver_types: &mut HashMap<String, String>,
@@ -1962,16 +2220,40 @@ fn infer_receiver_types_by_co_methods(
             if let Some(ref c) = candidates
                 && c.len() == 1
             {
-                receiver_types.entry(recv.clone()).or_insert_with(|| c[0].clone());
-                continue;
+                // Require receiver-owner name similarity to avoid false inference.
+                // e.g. `entry.push()` + `entry.contains()` → DeltaNeighbors is the
+                // only project type with both, but "entry" ≠ "deltaneighbors".
+                // These are actually Vec methods on a HashMap entry.
+                let owner = &c[0];
+                let recv_stripped: String = recv.chars().filter(|&c| c != '_').collect();
+                let name_match = recv_stripped.len() >= 3
+                    && (owner.contains(recv_stripped.as_str())
+                        || recv_stripped.contains(owner.as_str()));
+                if name_match {
+                    receiver_types.entry(recv.clone()).or_insert_with(|| c[0].clone());
+                    continue;
+                }
             }
         }
 
         // Strategy 2: single project method with unique owner.
-        if project_methods.len() == 1 {
+        // Only infer when there are NO extern methods on the same receiver —
+        // mixed evidence (project + extern) suggests the receiver is an external
+        // type that happens to share a method name with a project function.
+        // e.g. iterator "map" calling .collect() → project_methods=["collect"],
+        // extern_only_count=0 because "map" is the receiver, not a method.
+        // Also require receiver name similarity to the inferred owner.
+        if project_methods.len() == 1 && extern_only_count == 0 {
             if let Some(owners) = method_owners.get(project_methods[0]) {
                 if owners.len() == 1 {
-                    receiver_types.entry(recv.clone()).or_insert_with(|| owners[0].clone());
+                    let owner = &owners[0];
+                    let recv_stripped: String = recv.chars().filter(|&c| c != '_').collect();
+                    let name_match = recv_stripped.len() >= 3
+                        && (owner.contains(recv_stripped.as_str())
+                            || recv_stripped.contains(owner.as_str()));
+                    if name_match {
+                        receiver_types.entry(recv.clone()).or_insert_with(|| owner.clone());
+                    }
                 }
             }
         }

@@ -388,6 +388,9 @@ pub enum Commands {
         /// Show detailed wrong lines, extern calls, and unresolved samples.
         #[arg(short, long)]
         verbose: bool,
+        /// Path to SCIP index file for ground-truth comparison.
+        #[arg(long)]
+        scip: Option<PathBuf>,
     },
     /// Create a new file at a project-relative path.
     #[command(visible_alias = "cf")]

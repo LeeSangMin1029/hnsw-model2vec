@@ -18,7 +18,15 @@ fn main() {
 
     v_hnsw_cli::interrupt::install_handler();
 
-    if let Err(err) = run() {
+    // Run on a thread with 32 MB stack — graph build + SCIP parsing need deep stacks.
+    let result = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn main thread")
+        .join()
+        .expect("main thread panicked");
+
+    if let Err(err) = result {
         let cli_err = CliError::from(err);
         eprintln!("Error: {cli_err}");
         std::process::exit(1);
@@ -75,7 +83,7 @@ fn run() -> anyhow::Result<()> {
         Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
         Commands::Embed { db } => commands::embed::run(db),
-        Commands::Verify { db, verbose } => commands::verify::run(db, verbose),
+        Commands::Verify { db, verbose, scip } => commands::verify::run(db, verbose, scip),
         Commands::Replace { db, symbol, file, body, body_file } => {
             let body = read_body(body, body_file)?;
             commands::edit::replace(db, symbol, file, body)

@@ -69,8 +69,9 @@ impl ExternMethodIndex {
     /// Cache is invalidated when `Cargo.toml` or `rustc --version` changes.
     /// Cache stored in `<db>/cache/extern_types.bin`.
     pub fn build(db_path: &Path) -> Self {
-        let project_root = db_path.parent().unwrap_or(Path::new("."));
-        let fingerprint = compute_fingerprint(project_root);
+        let project_root = crate::helpers::find_project_root(db_path)
+            .unwrap_or_else(|| db_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        let fingerprint = compute_fingerprint(&project_root);
 
         // Try loading from cache first.
         if let Some(cached) = Self::load_cache(db_path, &fingerprint) {
@@ -91,7 +92,7 @@ impl ExternMethodIndex {
         }
         let std_count = all_files.len();
 
-        for dep_dir in discover_cargo_deps(project_root) {
+        for dep_dir in discover_cargo_deps(&project_root) {
             collect_rs_files(&dep_dir, &mut all_files);
         }
         eprintln!("    [extern] collect files: {:.1}s ({} std + {} deps = {} total)",
@@ -191,8 +192,8 @@ impl ExternMethodIndex {
     ///
     /// Returns `None` if no cache exists (does NOT rebuild).
     pub fn try_load_cached(db_path: &Path) -> Option<Self> {
-        let project_root = db_path.parent()?;
-        let fingerprint = compute_fingerprint(project_root);
+        let project_root = crate::helpers::find_project_root(db_path)?;
+        let fingerprint = compute_fingerprint(&project_root);
         Self::load_cache(db_path, &fingerprint)
     }
 

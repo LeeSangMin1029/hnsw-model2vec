@@ -272,12 +272,18 @@ fn prebuild_caches(
     let rustdoc = rustdoc_handle.join().ok().flatten();
     eprintln!("    [cache] rustdoc join: {:.1}ms", t_rd.elapsed().as_secs_f64() * 1000.0);
 
+    // Try compiler-assisted type inference (cached).
+    let t_tp = std::time::Instant::now();
+    let type_map = v_code_intel::type_probes::try_build_type_map(db_path, &chunks);
+    eprintln!("    [cache] type-probe: {:.1}ms", t_tp.elapsed().as_secs_f64() * 1000.0);
+
     // Build graph edges (extern joins inside build_full_deferred).
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_full_deferred(
+    let graph = v_code_intel::graph::CallGraph::build_full_deferred_with_type_map(
         &chunks,
         rustdoc.as_ref(),
         extern_handle,
+        type_map.as_ref(),
     );
     eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
