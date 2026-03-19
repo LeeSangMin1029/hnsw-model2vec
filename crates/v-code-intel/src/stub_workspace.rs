@@ -7,7 +7,7 @@
 //! 4. External crates: one stub per unique crate (shared by all dependents)
 //! 5. Generate workspace Cargo.toml with `[patch.crates-io]` for external stubs
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -56,9 +56,11 @@ pub fn generate(
     // 1. Parse dependency graph
     let meta = parse_cargo_metadata(project_root)?;
 
-    let target = meta
-        .get(target_crate)
-        .context("target crate not found in workspace")?;
+    // Verify target crate exists
+    anyhow::ensure!(
+        meta.contains_key(target_crate),
+        "target crate '{target_crate}' not found in workspace"
+    );
 
     // 2. Collect ALL unique external deps (transitive through workspace crates)
     let mut all_external: HashMap<String, ExternalDep> = HashMap::new();
@@ -100,15 +102,15 @@ pub fn generate(
 
         if crate_name == target_crate {
             // Target crate: copy Cargo.toml, symlink src/
-            generate_target_crate(output_dir, info, &meta, &stubs_dir)?;
+            generate_target_crate(output_dir, info, &meta)?;
         } else {
             // Non-target: extract pub signatures
-            generate_workspace_stub(&crate_dir, info, &meta, &stubs_dir)?;
+            generate_workspace_stub(&crate_dir, info, &meta)?;
         }
     }
 
     // 6. Generate root Cargo.toml
-    generate_workspace_toml(output_dir, target_crate, &workspace_crates, &all_external, &stubs_dir)?;
+    generate_workspace_toml(output_dir, target_crate, &workspace_crates)?;
 
     Ok(StubWorkspace {
         root: output_dir.to_path_buf(),
@@ -231,13 +233,12 @@ fn generate_target_crate(
     output_dir: &Path,
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
-    stubs_dir: &Path,
 ) -> Result<()> {
     let crate_dir = output_dir.join(&info.name);
     std::fs::create_dir_all(&crate_dir)?;
 
     // Generate Cargo.toml pointing to stubs
-    let cargo_toml = build_crate_cargo_toml(info, all_meta, stubs_dir, output_dir, false)?;
+    let cargo_toml = build_crate_cargo_toml(info, all_meta)?;
     std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)?;
 
     // Symlink src/ → real source
@@ -266,7 +267,6 @@ fn generate_workspace_stub(
     crate_dir: &Path,
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
-    stubs_dir: &Path,
 ) -> Result<()> {
     let src_dir = crate_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
@@ -281,10 +281,7 @@ fn generate_workspace_stub(
     extract_pub_signatures(&real_src, &src_dir)?;
 
     // Generate Cargo.toml
-    let output_dir = crate_dir
-        .parent()
-        .context("no parent for crate dir")?;
-    let cargo_toml = build_crate_cargo_toml(info, all_meta, stubs_dir, output_dir, true)?;
+    let cargo_toml = build_crate_cargo_toml(info, all_meta)?;
     std::fs::write(crate_dir.join("Cargo.toml"), cargo_toml)?;
 
     Ok(())
@@ -294,9 +291,6 @@ fn generate_workspace_stub(
 fn build_crate_cargo_toml(
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
-    stubs_dir: &Path,
-    output_dir: &Path,
-    _is_stub: bool,
 ) -> Result<String> {
     let mut toml = format!(
         "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
@@ -344,8 +338,6 @@ fn generate_workspace_toml(
     output_dir: &Path,
     target_crate: &str,
     workspace_crates: &[&str],
-    _all_external: &HashMap<String, ExternalDep>,
-    _stubs_dir: &Path,
 ) -> Result<()> {
     let mut members: Vec<String> = Vec::new();
     for &name in workspace_crates {
@@ -535,30 +527,301 @@ fn skip_brace_block(lines: &[&str], i: &mut usize) {
     }
 }
 
+/// Staleness check result — tells caller what needs regenerating.
+#[derive(Debug)]
+pub enum StubStatus {
+    /// Everything is current.
+    UpToDate,
+    /// Dependency graph changed (Cargo.toml modified) — full regeneration needed.
+    DepsChanged,
+    /// Only workspace crate pub APIs changed — incremental stub update.
+    ApiChanged(Vec<String>),
+    /// No stub workspace exists yet.
+    Missing,
+}
+
 /// Check if a stub workspace exists and is up-to-date.
-pub fn is_up_to_date(output_dir: &Path, project_root: &Path) -> bool {
+///
+/// Checks two layers:
+/// 1. **Cargo.toml timestamps** — any workspace crate's Cargo.toml newer than marker
+///    means deps may have changed → full regen.
+/// 2. **Pub API hashes** — hash of pub signatures per workspace crate, stored in
+///    `.stub-apihash`. If only pub API changed (not deps), only affected stubs
+///    need regeneration.
+pub fn check_status(output_dir: &Path, project_root: &Path) -> StubStatus {
     let marker = output_dir.join(".stub-timestamp");
+    let hash_file = output_dir.join(".stub-apihash");
+
     let Some(marker_time) = std::fs::metadata(&marker)
         .ok()
         .and_then(|m| m.modified().ok())
     else {
-        return false;
+        return StubStatus::Missing;
     };
 
-    // Check if any workspace Cargo.toml is newer
+    // Layer 1: Check ALL Cargo.toml files (root + each crate)
     let root_toml = project_root.join("Cargo.toml");
-    if let Ok(root_time) = std::fs::metadata(&root_toml).and_then(|m| m.modified()) {
-        if root_time > marker_time {
-            return false;
+    if is_newer_than(&root_toml, marker_time) {
+        return StubStatus::DepsChanged;
+    }
+
+    // Find workspace crate directories from root Cargo.toml
+    let crate_dirs = find_workspace_crate_dirs(project_root);
+    for dir in &crate_dirs {
+        let crate_toml = dir.join("Cargo.toml");
+        if is_newer_than(&crate_toml, marker_time) {
+            return StubStatus::DepsChanged;
         }
     }
 
-    true
+    // Layer 2: Check pub API hashes for non-target workspace crates
+    let old_hashes = load_api_hashes(&hash_file);
+    let mut changed_crates = Vec::new();
+
+    for dir in &crate_dirs {
+        let crate_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let src_dir = dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+
+        let current_hash = compute_pub_api_hash(&src_dir);
+        let old_hash = old_hashes.get(crate_name).copied().unwrap_or(0);
+
+        if current_hash != old_hash {
+            changed_crates.push(crate_name.to_owned());
+        }
+    }
+
+    if changed_crates.is_empty() {
+        StubStatus::UpToDate
+    } else {
+        StubStatus::ApiChanged(changed_crates)
+    }
+}
+
+/// Ensure stub workspace is up-to-date. Regenerates as needed.
+///
+/// Returns the stub workspace root path.
+pub fn ensure_up_to_date(
+    project_root: &Path,
+    target_crate: &str,
+    output_dir: &Path,
+) -> Result<StubWorkspace> {
+    match check_status(output_dir, project_root) {
+        StubStatus::UpToDate => {
+            eprintln!("[stub] workspace up-to-date");
+            Ok(StubWorkspace {
+                root: output_dir.to_path_buf(),
+                target_crate: target_crate.to_owned(),
+            })
+        }
+        StubStatus::Missing | StubStatus::DepsChanged => {
+            eprintln!("[stub] full regeneration (deps changed or missing)");
+            // Clean and regenerate everything
+            if output_dir.exists() {
+                // Preserve junction/symlink target by removing contents carefully
+                remove_stub_contents(output_dir)?;
+            }
+            let ws = generate(project_root, target_crate, output_dir)?;
+            save_all_api_hashes(output_dir, project_root)?;
+            mark_up_to_date(output_dir)?;
+            Ok(ws)
+        }
+        StubStatus::ApiChanged(changed) => {
+            eprintln!("[stub] incremental update: {} crates changed", changed.len());
+            let meta = parse_cargo_metadata(project_root)?;
+
+            // Only regenerate stubs for changed crates
+            for crate_name in &changed {
+                if crate_name.as_str() == target_crate {
+                    // Target crate uses junction — source changes are automatic
+                    continue;
+                }
+                if let Some(info) = meta.get(crate_name.as_str()) {
+                    let crate_dir = output_dir.join(format!("{crate_name}-stub"));
+                    let src_dir = crate_dir.join("src");
+
+                    // Remove old stub source and regenerate
+                    if src_dir.is_dir() {
+                        std::fs::remove_dir_all(&src_dir)?;
+                    }
+                    let real_src = info
+                        .manifest_path
+                        .parent()
+                        .context("no parent")?
+                        .join("src");
+                    extract_pub_signatures(&real_src, &src_dir)?;
+                    eprintln!("  [stub] updated {crate_name}");
+                }
+            }
+
+            save_all_api_hashes(output_dir, project_root)?;
+            mark_up_to_date(output_dir)?;
+
+            Ok(StubWorkspace {
+                root: output_dir.to_path_buf(),
+                target_crate: target_crate.to_owned(),
+            })
+        }
+    }
 }
 
 /// Touch the timestamp marker after successful generation.
-pub fn mark_up_to_date(output_dir: &Path) -> Result<()> {
+fn mark_up_to_date(output_dir: &Path) -> Result<()> {
     let marker = output_dir.join(".stub-timestamp");
     std::fs::write(&marker, "")?;
+    Ok(())
+}
+
+/// Check if a file is newer than the given reference time.
+fn is_newer_than(path: &Path, reference: std::time::SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t > reference)
+}
+
+/// Find workspace crate directories from root Cargo.toml.
+fn find_workspace_crate_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let toml_path = project_root.join("Cargo.toml");
+    let Ok(content) = std::fs::read_to_string(&toml_path) else {
+        return Vec::new();
+    };
+
+    // Simple parsing: extract members = ["crates/foo", "crates/bar"]
+    let mut dirs = Vec::new();
+    let mut in_members = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("members") {
+            in_members = true;
+        }
+        if in_members {
+            // Extract quoted paths
+            let mut start = 0;
+            while let Some(q1) = trimmed[start..].find('"') {
+                let after = start + q1 + 1;
+                if let Some(q2) = trimmed[after..].find('"') {
+                    let path = &trimmed[after..after + q2];
+                    dirs.push(project_root.join(path));
+                    start = after + q2 + 1;
+                } else {
+                    break;
+                }
+            }
+            if trimmed.contains(']') {
+                in_members = false;
+            }
+        }
+    }
+    dirs
+}
+
+/// Compute a hash of all pub signatures in a crate's src/ directory.
+///
+/// This captures: pub fn signatures, pub struct/enum/trait definitions.
+/// Body changes are ignored — only API surface matters for stubs.
+fn compute_pub_api_hash(src_dir: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+    let Ok(files) = walkdir(src_dir) else {
+        return 0;
+    };
+
+    // Sort for deterministic hashing
+    let mut files = files;
+    files.sort();
+
+    for file in &files {
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
+
+        // Hash only lines containing pub declarations
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("pub ")
+                || trimmed.starts_with("pub(crate)")
+                || (trimmed.contains("fn ") && !trimmed.starts_with("//"))
+            {
+                trimmed.hash(&mut hasher);
+            }
+        }
+
+        // Also hash use statements (affect type resolution)
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
+                trimmed.hash(&mut hasher);
+            }
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Load saved API hashes from disk.
+fn load_api_hashes(path: &Path) -> HashMap<String, u64> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        if let Some((name, hash_str)) = line.split_once('=') {
+            if let Ok(hash) = hash_str.trim().parse::<u64>() {
+                map.insert(name.trim().to_owned(), hash);
+            }
+        }
+    }
+    map
+}
+
+/// Save current API hashes for all workspace crates.
+fn save_all_api_hashes(output_dir: &Path, project_root: &Path) -> Result<()> {
+    let hash_file = output_dir.join(".stub-apihash");
+    let crate_dirs = find_workspace_crate_dirs(project_root);
+
+    let mut content = String::new();
+    for dir in &crate_dirs {
+        let crate_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let src_dir = dir.join("src");
+        if src_dir.is_dir() {
+            let hash = compute_pub_api_hash(&src_dir);
+            content.push_str(&format!("{crate_name}={hash}\n"));
+        }
+    }
+
+    std::fs::write(&hash_file, content)?;
+    Ok(())
+}
+
+/// Remove stub workspace contents without removing junction targets.
+fn remove_stub_contents(output_dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(output_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Skip hidden files (.stub-timestamp, .stub-apihash)
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
     Ok(())
 }
