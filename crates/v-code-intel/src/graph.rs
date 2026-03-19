@@ -2206,19 +2206,28 @@ pub fn infer_local_types_from_calls(
     // 2) From let_call_bindings: `let var = callee()` → var: return_type_map[callee]
     for (var_name, callee_name) in let_call_bindings {
         let callee_lower = callee_name.to_lowercase();
-        // Try direct lookup first
-        if let Some(ret_type) = return_type_map.get(&callee_lower) {
+        // Try direct lookup first, then leaf name fallback for module-prefixed callees.
+        // e.g. `file_index::load_file_index` → try full, then `load_file_index`.
+        let ret = return_type_map.get(&callee_lower).cloned().or_else(|| {
+            let leaf = callee_lower.rsplit("::").next()?;
+            if leaf != callee_lower {
+                return_type_map.get(leaf).cloned()
+            } else {
+                None
+            }
+        });
+        if let Some(ret_type) = ret {
             receiver_types
                 .entry(var_name.to_lowercase())
-                .or_insert_with(|| ret_type.clone());
+                .or_insert_with(|| ret_type);
             continue;
         }
-        // Fallback: `let x = Type::new(...)` → infer x: type (constructor pattern).
-        // Works even for macro-generated types not in return_type_map.
-        if let Some((prefix, method)) = callee_name.rsplit_once("::") {
-            let method_lower = method.to_lowercase();
-            if matches!(method_lower.as_str(), "new" | "default" | "from" | "create" | "builder" | "open" | "init") {
-                let leaf = prefix.rsplit("::").next().unwrap_or(prefix);
+        // Fallback: `let x = Type::method(...)` — if callee is a qualified
+        // associated function not in return_type_map, assume it returns its
+        // owning type (common for constructors, loaders, parsers, etc.).
+        if let Some((prefix, _method)) = callee_name.rsplit_once("::") {
+            let leaf = prefix.rsplit("::").next().unwrap_or(prefix);
+            if !leaf.is_empty() {
                 receiver_types
                     .entry(var_name.to_lowercase())
                     .or_insert_with(|| leaf.to_lowercase());
