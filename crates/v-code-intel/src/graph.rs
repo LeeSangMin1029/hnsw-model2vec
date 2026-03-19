@@ -1140,6 +1140,15 @@ fn resolve_with_imports(
         }
     }
 
+    // 1c. super::func → strip prefix, resolve via short lookup.
+    //     super:: refers to parent module — the function should be findable by short name.
+    if let Some(rest) = lower.strip_prefix("super::") {
+        let leaf = rest.rsplit_once("::").map_or(rest, |p| p.1);
+        if let Some(idx) = short_fn(leaf) {
+            return Some(idx);
+        }
+    }
+
     // 2. self.method → OwningType::method.
     //    self.field.method → try field name as type hint against source_types.
     if let Some(method) = lower.strip_prefix("self.") {

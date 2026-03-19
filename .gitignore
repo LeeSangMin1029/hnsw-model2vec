@@ -26,6 +26,7 @@ test_*.parquet
 # Cache
 .fastembed_cache/
 .cache/
+cache/
 
 # OMC (oh-my-claudecode) state
 .omc/

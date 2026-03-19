@@ -942,14 +942,24 @@ fn walk_let_call_bindings_inner(
     out: &mut Vec<(String, String)>,
 ) {
     match node.kind() {
-        // `let x = foo()` or `let Some(x) = foo()` (let ... else)
+        // `let x = foo()` or `let Some(x) = foo()` or `let (a, b) = foo()`
         "let_declaration" => {
             if let Some(pat) = node.child_by_field_name("pattern")
                 && let Some(val) = node.child_by_field_name("value")
                 && let Some(callee) = extract_rhs_callee(&val, src)
             {
-                if let Some(var) = extract_binding_from_pattern(&pat, src) {
-                    out.push((var, callee));
+                // For tuple patterns, emit a binding for each element.
+                // All share the same callee — the graph layer uses return_type_map
+                // to infer each variable's type.
+                let bindings = extract_all_bindings_from_pattern(&pat, src);
+                if bindings.is_empty() {
+                    if let Some(var) = extract_binding_from_pattern(&pat, src) {
+                        out.push((var, callee));
+                    }
+                } else {
+                    for var in bindings {
+                        out.push((var, callee.clone()));
+                    }
                 }
             }
         }
@@ -994,9 +1004,10 @@ fn walk_let_call_bindings_inner(
     }
 }
 
-/// Extract a variable name from a pattern, handling:
+/// Extract variable names from a pattern, handling:
 /// - `identifier` → direct name
 /// - `tuple_struct_pattern` (`Some(x)`, `Ok(x)`) → inner identifier
+/// - `tuple_pattern` (`(a, b)`) → first identifier
 /// - `struct_pattern` → skip (too complex)
 fn extract_binding_from_pattern(pat: &tree_sitter::Node, src: &[u8]) -> Option<String> {
     match pat.kind() {
@@ -1016,7 +1027,55 @@ fn extract_binding_from_pattern(pat: &tree_sitter::Node, src: &[u8]) -> Option<S
             }
             None
         }
+        "tuple_pattern" => {
+            // (a, b) — return first non-underscore identifier
+            let mut cursor = pat.walk();
+            for child in pat.children(&mut cursor) {
+                if child.kind() == "identifier" {
+                    let text = child.utf8_text(src).ok()?;
+                    if text != "_" {
+                        return Some(text.to_owned());
+                    }
+                }
+            }
+            None
+        }
         _ => None,
+    }
+}
+
+/// Extract ALL variable names from a pattern for multi-binding.
+/// Used for tuple destructuring: `let (a, b) = callee()` → vec!["a", "b"].
+fn extract_all_bindings_from_pattern(pat: &tree_sitter::Node, src: &[u8]) -> Vec<String> {
+    match pat.kind() {
+        "identifier" => {
+            if let Ok(text) = pat.utf8_text(src) {
+                if text != "_" { return vec![text.to_owned()]; }
+            }
+            Vec::new()
+        }
+        "tuple_pattern" => {
+            let mut names = Vec::new();
+            let mut cursor = pat.walk();
+            for child in pat.children(&mut cursor) {
+                if child.kind() == "identifier" {
+                    if let Ok(text) = child.utf8_text(src) {
+                        if text != "_" {
+                            names.push(text.to_owned());
+                        }
+                    }
+                }
+            }
+            names
+        }
+        "tuple_struct_pattern" => {
+            if let Some(name) = extract_binding_from_pattern(pat, src) {
+                vec![name]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
     }
 }
 

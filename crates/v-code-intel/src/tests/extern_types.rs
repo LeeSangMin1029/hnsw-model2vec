@@ -1,9 +1,16 @@
 use crate::extern_types::ExternMethodIndex;
-use std::path::Path;
+
+fn build_index() -> ExternMethodIndex {
+    let tmp = std::env::temp_dir().join("v-code-test-extern");
+    let _ = std::fs::create_dir_all(&tmp);
+    let index = ExternMethodIndex::build(&tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+    index
+}
 
 #[test]
 fn build_discovers_std_types() {
-    let index = ExternMethodIndex::build(Path::new("."));
+    let index = build_index();
 
     // Must find core std types
     assert!(
@@ -34,7 +41,7 @@ fn build_discovers_std_types() {
 
 #[test]
 fn build_discovers_cargo_deps() {
-    let index = ExternMethodIndex::build(Path::new("."));
+    let index = build_index();
 
     // Should have found some dependency types beyond std
     // Check for any type from a known project dep (rayon, serde, etc.)
@@ -59,7 +66,7 @@ fn build_discovers_cargo_deps() {
 
 #[test]
 fn has_method_returns_false_for_unknown() {
-    let index = ExternMethodIndex::build(Path::new("."));
+    let index = build_index();
     assert!(!index.has_method("nonexistent_type_xyz", "foo"));
     assert!(!index.has_method("vec", "nonexistent_method_xyz"));
 }
