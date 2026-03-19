@@ -21,6 +21,7 @@ pub mod helpers;
 pub mod impact;
 pub mod jump;
 pub mod loader;
+pub mod macro_expand;
 pub mod parse;
 pub mod reason;
 pub mod rustdoc;

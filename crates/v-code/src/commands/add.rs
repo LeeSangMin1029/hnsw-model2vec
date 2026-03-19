@@ -223,7 +223,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     eprintln!("  [rss] before cache: {:.0}MB", v_code_intel::graph::current_rss_mb());
     drop(engine); // Release exclusive lock.
     let t_cache = std::time::Instant::now();
-    prebuild_caches(&db_path, &entries, &current_sources, rustdoc_handle, extern_handle);
+    prebuild_caches(&db_path, &entries, &current_sources, rustdoc_handle, extern_handle, project_root_for_bg.as_deref());
     eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
 
     Ok(())
@@ -239,6 +239,7 @@ fn prebuild_caches(
     current_sources: &std::collections::HashSet<String>,
     rustdoc_handle: std::thread::JoinHandle<Option<v_code_intel::rustdoc::RustdocTypes>>,
     extern_handle: std::thread::JoinHandle<Option<v_code_intel::extern_types::ExternMethodIndex>>,
+    project_root: Option<&std::path::Path>,
 ) {
     use v_code_intel::parse::ParsedChunk;
 
@@ -291,6 +292,25 @@ fn prebuild_caches(
     let t_rd = std::time::Instant::now();
     let rustdoc = rustdoc_handle.join().ok().flatten();
     eprintln!("    [cache] rustdoc join: {:.1}ms", t_rd.elapsed().as_secs_f64() * 1000.0);
+
+    // Macro expansion: add synthetic chunks for macro-generated functions.
+    if let Some(root) = project_root {
+        let t_macro = std::time::Instant::now();
+        let existing: std::collections::HashSet<String> = chunks
+            .iter()
+            .map(|c| c.name.to_lowercase())
+            .collect();
+        let macro_chunks = v_code_intel::macro_expand::expand_macro_chunks_cached(
+            root,
+            db_path,
+            &existing,
+        );
+        if !macro_chunks.is_empty() {
+            eprintln!("    [cache] macro expand: {:.1}ms ({} new chunks)",
+                t_macro.elapsed().as_secs_f64() * 1000.0, macro_chunks.len());
+            chunks.extend(macro_chunks);
+        }
+    }
 
     // Build graph edges (extern joins inside build_full_deferred).
     let t3 = std::time::Instant::now();
