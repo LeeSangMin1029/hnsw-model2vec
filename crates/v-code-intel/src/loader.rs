@@ -297,11 +297,8 @@ pub fn load_or_build_graph_with_chunks(
         }
     }
 
-    // Try compiler-assisted type inference.
-    let type_map = crate::type_probes::try_build_type_map(db, &chunks);
-
-    let g = crate::graph::CallGraph::build_full_with_type_map(
-        &chunks, rustdoc.as_ref(), extern_index.as_ref(), type_map.as_ref(),
+    let g = crate::graph::CallGraph::build_full(
+        &chunks, rustdoc.as_ref(), extern_index.as_ref(),
     );
 
     // Don't persist tree-sitter fallback when daemon is building —

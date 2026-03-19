@@ -275,16 +275,6 @@ impl CallGraph {
         Self::build_full_inner(chunks, rustdoc, || extern_index.cloned())
     }
 
-    /// Build with all type information + compiler-inferred type map.
-    pub fn build_full_with_type_map(
-        chunks: &[ParsedChunk],
-        rustdoc: Option<&RustdocTypes>,
-        extern_index: Option<&crate::extern_types::ExternMethodIndex>,
-        type_map: Option<&crate::type_probes::TypeMap>,
-    ) -> Self {
-        Self::build_full_inner_with_type_map(chunks, rustdoc, || extern_index.cloned(), type_map)
-    }
-
     /// Build the call graph with deferred extern index (runs in parallel).
     ///
     /// Resolves all graph edges first, then joins the extern index thread
@@ -294,17 +284,7 @@ impl CallGraph {
         rustdoc: Option<&RustdocTypes>,
         extern_handle: std::thread::JoinHandle<Option<crate::extern_types::ExternMethodIndex>>,
     ) -> Self {
-        Self::build_full_deferred_with_type_map(chunks, rustdoc, extern_handle, None)
-    }
-
-    /// Build with deferred extern index + compiler-inferred type map.
-    pub fn build_full_deferred_with_type_map(
-        chunks: &[ParsedChunk],
-        rustdoc: Option<&RustdocTypes>,
-        extern_handle: std::thread::JoinHandle<Option<crate::extern_types::ExternMethodIndex>>,
-        type_map: Option<&crate::type_probes::TypeMap>,
-    ) -> Self {
-        Self::build_full_inner_with_type_map(chunks, rustdoc, || extern_handle.join().ok().flatten(), type_map)
+        Self::build_full_inner(chunks, rustdoc, || extern_handle.join().ok().flatten())
     }
 
 
@@ -314,16 +294,6 @@ impl CallGraph {
         chunks: &[ParsedChunk],
         rustdoc: Option<&RustdocTypes>,
         get_extern: impl FnOnce() -> Option<crate::extern_types::ExternMethodIndex>,
-    ) -> Self {
-        Self::build_full_inner_with_type_map(chunks, rustdoc, get_extern, None)
-    }
-
-    /// Core graph build with optional compiler-inferred type map.
-    fn build_full_inner_with_type_map(
-        chunks: &[ParsedChunk],
-        rustdoc: Option<&RustdocTypes>,
-        get_extern: impl FnOnce() -> Option<crate::extern_types::ExternMethodIndex>,
-        type_map: Option<&crate::type_probes::TypeMap>,
     ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
@@ -373,27 +343,6 @@ impl CallGraph {
         let mut ctxs: Vec<ChunkCtx> = chunks.par_iter()
             .map(|c| build_chunk_ctx(c, &owner_types, &owner_field_types, &return_type_map, &method_owners))
             .collect();
-
-        // Inject compiler-inferred types from type probes into receiver_types.
-        if let Some(tmap) = type_map {
-            let mut injected = 0usize;
-            for (src, chunk) in chunks.iter().enumerate() {
-                let func_lower = chunk.name.to_lowercase();
-                for (var, _callee) in &chunk.let_call_bindings {
-                    let key = format!("{func_lower}::{}", var.to_lowercase());
-                    if let Some(ty) = tmap.types.get(&key) {
-                        let var_lower = var.to_lowercase();
-                        if !ctxs[src].receiver_types.contains_key(&var_lower) {
-                            ctxs[src].receiver_types.insert(var_lower, ty.clone());
-                            injected += 1;
-                        }
-                    }
-                }
-            }
-            if injected > 0 {
-                eprintln!("      [graph] type-probe injected: {injected} receiver types");
-            }
-        }
 
         // Pass 1: parallel resolve — each chunk independently collects edges.
         let par_results: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>, Vec<bool>)> = chunks.par_iter()
