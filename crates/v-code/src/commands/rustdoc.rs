@@ -25,17 +25,9 @@ pub fn run(db: PathBuf) -> Result<()> {
     // Cache JSON files into DB for future `add` runs.
     v_code_intel::rustdoc::save_to_cache(&db, &project_root);
 
-    // Rebuild graph.bin with rustdoc overlay.
+    // Rebuild graph.bin.
     let chunks = v_code_intel::loader::load_chunks(&db)?;
-    let extern_handle = {
-        let root = project_root.clone();
-        std::thread::spawn(move || Some(v_code_intel::extern_types::ExternMethodIndex::build(&root)))
-    };
-    let graph = v_code_intel::graph::CallGraph::build_full_deferred(
-        &chunks,
-        Some(&types),
-        extern_handle,
-    );
+    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
     let _ = graph.save(&db);
 
     eprintln!(

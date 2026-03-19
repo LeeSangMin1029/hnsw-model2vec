@@ -39,7 +39,7 @@ pub fn handle_graph_build(
             Some(types)
         });
 
-    let graph = v_code_intel::graph::CallGraph::build_with_rustdoc(&chunks, rustdoc.as_ref());
+    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
     let _ = graph.save(&db);
 
     let has_rustdoc = rustdoc.is_some();

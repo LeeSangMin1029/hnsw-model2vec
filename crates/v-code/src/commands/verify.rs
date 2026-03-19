@@ -21,8 +21,7 @@ enum OwnerVerdict {
 
 use anyhow::Result;
 
-use v_code_intel::extern_types::ExternMethodIndex;
-use v_code_intel::graph::{extract_generic_bounds, owning_type, build_receiver_type_map, collect_owner_field_types, build_return_type_map, collect_project_type_shorts, infer_local_types_from_calls, infer_receiver_types_by_co_methods, build_method_owner_index};
+use v_code_intel::graph::{extract_generic_bounds, owning_type, build_receiver_type_map, collect_owner_field_types, build_return_type_map, build_method_owner_index, collect_project_type_shorts};
 use v_code_intel::parse::ParsedChunk;
 use v_hnsw_cli::commands::db_config::DbConfig;
 
@@ -88,38 +87,8 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                 }
             }
         }
-        infer_local_types_from_calls(&c.calls, &c.let_call_bindings, &return_type_map, &mut recv_types);
-        infer_receiver_types_by_co_methods(&c.calls, &method_owners, &mut recv_types);
         recv_types
     }).collect();
-
-    // Use graph-embedded extern info if available, otherwise build ExternMethodIndex.
-    let has_graph_extern = !graph.extern_calls.is_empty()
-        && graph.extern_calls.iter().any(|v| !v.is_empty());
-
-    let extern_index = if has_graph_extern {
-        None // Graph already has extern classification
-    } else {
-        Some(ExternMethodIndex::build(&db))
-    };
-
-    if let Some(ref ext) = extern_index {
-        // Merge extern return types into return_type_map (fallback path).
-        let before = return_type_map.len();
-        for (key, ret_type) in &ext.return_types {
-            return_type_map.entry(key.clone()).or_insert_with(|| ret_type.clone());
-            if let Some(method) = key.rsplit_once("::").map(|p| p.1) {
-                return_type_map.entry(method.to_owned()).or_insert_with(|| ret_type.clone());
-            }
-        }
-        let extern_ret_count = return_type_map.len() - before;
-        if verbose && extern_ret_count > 0 {
-            println!("  Extern return types merged: {extern_ret_count} (total return_type_map: {})", return_type_map.len());
-        }
-    }
-
-    // Pre-build flat method set for O(1) lookups (only for fallback path).
-    let extern_all_methods = extern_index.as_ref().map(|e| e.all_method_set());
 
     let t_index = start.elapsed();
 
@@ -138,6 +107,59 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
     let mut lang_stats: HashMap<String, (usize, usize, usize, usize, usize)> = HashMap::new();
     let mut wrong_unique: Vec<(String, Vec<String>)> = Vec::new();
     let mut wrong_ambig: Vec<(String, Vec<String>)> = Vec::new();
+
+    // Collect unverified samples for deep inspection.
+    // (caller_idx, callee_idx, call_line, source_line, callee_name)
+    let mut unverified_samples: Vec<(usize, usize, u32, String, String)> = Vec::new();
+
+    // ── Edge coverage analysis ────────────────────────────────────────
+    let total_callees: usize = graph.callees.iter().map(|c| c.len()).sum();
+    let total_call_sites: usize = graph.call_sites.iter().map(|c| c.len()).sum();
+
+    let mut cs_line_zero = 0usize;
+    let mut cs_callee_not_fn = 0usize;
+    let mut cs_caller_not_fn = 0usize;
+    let mut cs_verifiable = 0usize;
+    // Edges in callees but not in call_sites (type_edges).
+    let mut type_only_edges = 0usize;
+    for i in 0..n {
+        let cs_targets: HashSet<u32> = graph.call_sites[i].iter().map(|&(t, _)| t).collect();
+        for &callee in &graph.callees[i] {
+            if !cs_targets.contains(&callee) {
+                type_only_edges += 1;
+            }
+        }
+        if graph.kinds[i] != "function" {
+            cs_caller_not_fn += graph.call_sites[i].len();
+            continue;
+        }
+        for &(callee_idx, call_line) in &graph.call_sites[i] {
+            let ci = callee_idx as usize;
+            if call_line == 0 {
+                cs_line_zero += 1;
+            } else if ci >= n || graph.kinds[ci] != "function" {
+                cs_callee_not_fn += 1;
+            } else {
+                cs_verifiable += 1;
+            }
+        }
+    }
+
+    if verbose {
+        println!("  [Edge coverage]");
+        println!("    total callees (graph):      {total_callees}");
+        println!("    total call_sites:           {total_call_sites}");
+        println!("    type-only edges (no site):  {type_only_edges}");
+        println!("    call_line == 0 (skipped):   {cs_line_zero}");
+        println!("    callee not function:        {cs_callee_not_fn}");
+        println!("    caller not function:        {cs_caller_not_fn}");
+        println!("    verifiable (fn→fn+line):    {cs_verifiable}");
+        let coverage = if total_callees > 0 {
+            cs_verifiable as f64 / total_callees as f64 * 100.0
+        } else { 100.0 };
+        println!("    verification coverage:      {coverage:.1}%");
+        println!();
+    }
 
     for i in 0..n {
         if graph.kinds[i] != "function" {
@@ -314,9 +336,7 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                                     let co = o.split(" for ").last().unwrap_or(o);
                                     co == concrete_owner
                                 });
-                                let is_extern_method = extern_all_methods.as_ref()
-                                    .map_or(false, |m| m.contains(&method_lower));
-                                if owner_has_method && owners.len() == 1 && !is_extern_method {
+                                if owner_has_method && owners.len() == 1 {
                                     matched = true;
                                 }
                             }
@@ -333,17 +353,13 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                                             let other_recv_leaf = other_recv.rsplit_once('.').map_or(other_recv, |p| p.1);
                                             if other_recv_leaf == recv_leaf && other_lower != *expr {
                                                 if let Some(other_method) = other_lower.rsplit_once('.').map(|p| p.1) {
-                                                    let other_is_extern = extern_all_methods.as_ref()
-                                                        .map_or(false, |m| m.contains(other_method));
-                                                    if !other_is_extern {
-                                                        if let Some(owners) = method_owners.get(other_method) {
-                                                            if owners.iter().any(|o| {
-                                                                let co = o.split(" for ").last().unwrap_or(o);
-                                                                co == concrete_owner
-                                                            }) {
-                                                                matched = true;
-                                                                break;
-                                                            }
+                                                    if let Some(owners) = method_owners.get(other_method) {
+                                                        if owners.iter().any(|o| {
+                                                            let co = o.split(" for ").last().unwrap_or(o);
+                                                            co == concrete_owner
+                                                        }) {
+                                                            matched = true;
+                                                            break;
                                                         }
                                                     }
                                                 }
@@ -416,6 +432,14 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                             "    {} \u{2192} L{call_line}: unverified '{truncated}'",
                             callee_name,
                         ));
+                        // Collect for deep sampling.
+                        if unverified_samples.len() < 500 {
+                            unverified_samples.push((
+                                i, ci, call_line,
+                                src.clone(),
+                                callee_name.clone(),
+                            ));
+                        }
                     }
                     OwnerVerdict::Confirmed => {
                         prec_ok += 1;
@@ -485,22 +509,6 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
     let mut unresolved_samples: Vec<String> = Vec::new();
     let mut extern_samples: Vec<String> = Vec::new();
 
-    // Pre-build graph extern call lookup: chunk_idx → set of extern call names (lowercase).
-    let graph_extern_set: Vec<HashSet<String>> = if has_graph_extern {
-        graph.extern_calls.iter().map(|calls| {
-            calls.iter().map(|(name, _)| name.to_lowercase()).collect()
-        }).collect()
-    } else {
-        vec![HashSet::new(); n]
-    };
-    // Also build extern reason lookup for samples.
-    let graph_extern_reasons: Vec<HashMap<String, String>> = if has_graph_extern {
-        graph.extern_calls.iter().map(|calls| {
-            calls.iter().map(|(name, reason)| (name.to_lowercase(), reason.clone())).collect()
-        }).collect()
-    } else {
-        vec![HashMap::new(); n]
-    };
 
     for i in 0..n {
         if graph.kinds[i] != "function" {
@@ -512,12 +520,7 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
         let resolved_shorts = &chunk_callee_shorts[i];
         let self_short = short_name(&graph.names[i]).to_lowercase();
 
-        // Build receiver types only for fallback path.
-        let receiver_types = if !has_graph_extern {
-            build_db_chunk_receiver_types(chunk, &owner_field_types, &return_type_map)
-        } else {
-            HashMap::new()
-        };
+        let _receiver_types = build_db_chunk_receiver_types(chunk, &owner_field_types, &return_type_map);
 
         for call in &chunk.calls {
             let call_lower = call.to_lowercase();
@@ -569,70 +572,13 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
             if resolved_shorts.contains(short) || short == self_short {
                 recall_resolved += 1;
                 { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.3 += 1; }
-            } else if has_graph_extern && graph_extern_set[i].contains(&call_lower) {
-                // Graph already classified this call as extern.
-                recall_extern += 1;
-                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
-                if extern_samples.len() < 2000 {
-                    let reason = graph_extern_reasons[i].get(&call_lower)
-                        .map_or("graph-extern", |r| r.as_str());
-                    extern_samples.push(format!("{call}  [{reason}]"));
-                }
-            } else if !has_graph_extern {
-                // Fallback: use ExternMethodIndex directly.
-                if let Some(ref ext) = extern_index {
-                    if let Some(ref all_methods) = extern_all_methods {
-                        let empty_owners = std::collections::HashMap::new();
-                        if let Some(reason) = v_code_intel::graph::check_extern(
-                            &call_lower, &receiver_types, ext, &project_type_shorts,
-                            &return_type_map, all_methods, &owner_field_types,
-                            None, &empty_owners,
-                        ) {
-                            recall_extern += 1;
-                            { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
-                            if extern_samples.len() < 2000 {
-                                extern_samples.push(format!("{call}  [{reason}]"));
-                            }
-                            continue;
-                        }
-                    }
-                }
+            } else {
                 recall_unresolved += 1;
                 { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
                 let cat = categorize_miss(call);
                 *miss_categories.entry(cat).or_default() += 1;
                 if unresolved_samples.len() < 2000 {
-                    unresolved_samples.push(call.clone());
-                }
-            } else {
-                // Graph has extern data but this call wasn't classified.
-                // Try ExternMethodIndex as fallback before marking unresolved.
-                let mut is_extern = false;
-                if let Some(ref ext) = extern_index {
-                    if let Some(ref all_methods) = extern_all_methods {
-                        let empty_owners = std::collections::HashMap::new();
-                        if let Some(reason) = v_code_intel::graph::check_extern(
-                            &call_lower, &receiver_types, ext, &project_type_shorts,
-                            &return_type_map, all_methods, &owner_field_types,
-                            None, &empty_owners,
-                        ) {
-                            recall_extern += 1;
-                            { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
-                            if extern_samples.len() < 2000 {
-                                extern_samples.push(format!("{call}  [{reason}]"));
-                            }
-                            is_extern = true;
-                        }
-                    }
-                }
-                if !is_extern {
-                    recall_unresolved += 1;
-                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
-                    let cat = categorize_miss(call);
-                    *miss_categories.entry(cat).or_default() += 1;
-                    if unresolved_samples.len() < 2000 {
-                        unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
-                    }
+                    unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
                 }
             }
         }
@@ -685,17 +631,6 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
         println!("  {:30} {:>8}  {:>7.1}%", "  graph resolved", recall_resolved, pct_graph);
         println!("  {:30} {:>8}", "  extern (std/deps)", recall_extern);
         println!("  {:30} {:>8}", "  unresolved", recall_unresolved);
-    }
-    if let Some(ref ext) = extern_index {
-        if ext.type_count() > 0 {
-            println!(
-                "  {:30} {} types, {} methods",
-                "extern index", ext.type_count(), ext.total_methods()
-            );
-        }
-    } else if has_graph_extern {
-        let total_extern: usize = graph.extern_calls.iter().map(|v| v.len()).sum();
-        println!("  {:30} {total_extern}", "extern calls (from graph)");
     }
 
     if !miss_categories.is_empty() {
@@ -779,6 +714,169 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                 println!("    {count:>4}x  {call}");
             }
         }
+
+        // ── Deep sampling of unverified precision edges ──────────────
+        if !unverified_samples.is_empty() {
+            let sample_count = 50.min(unverified_samples.len());
+            // Deterministic spread: pick evenly spaced indices.
+            let step = unverified_samples.len() as f64 / sample_count as f64;
+            let indices: Vec<usize> = (0..sample_count)
+                .map(|i| (i as f64 * step) as usize)
+                .collect();
+
+            let mut deep_correct = 0usize;
+            let mut deep_wrong = 0usize;
+            let mut deep_uncertain = 0usize;
+
+            println!("\n  [Deep sample] {} unverified edges inspected:", sample_count);
+            println!("  {}", "-".repeat(90));
+
+            for &idx in &indices {
+                let (caller_idx, callee_idx, call_line, ref src_line, ref callee_name) =
+                    unverified_samples[idx];
+
+                let caller_name = &graph.names[caller_idx];
+                let caller_file = &graph.files[caller_idx];
+                let src_trimmed: String = src_line.trim().chars().take(80).collect();
+
+                // Extract callee owner and method.
+                let (callee_owner, callee_method) = callee_name
+                    .rsplit_once("::")
+                    .unwrap_or(("", callee_name));
+                let owner_leaf = callee_owner
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(callee_owner);
+                let owner_after_for = owner_leaf
+                    .split(" for ")
+                    .last()
+                    .unwrap_or(owner_leaf);
+                let owner_clean = owner_after_for
+                    .split('<')
+                    .next()
+                    .unwrap_or(owner_after_for)
+                    .to_lowercase();
+                let method_lower = callee_method.to_lowercase();
+
+                // Deep check 1: Read surrounding source lines (±5) for type context.
+                let resolved = resolve_path(caller_file, project_root.as_deref());
+                let lines = file_cache
+                    .entry(resolved.clone())
+                    .or_insert_with(|| load_lines(&resolved));
+                let ln = call_line as usize;
+
+                // Scan backwards from call site for `let receiver: Type` or `let receiver = Type::...`.
+                let mut found_type = None;
+                let src_lower = src_line.to_lowercase();
+
+                // Find receiver name from source: extract word before `.method(`.
+                let dot_method = format!(".{method_lower}(");
+                let receiver_name = if let Some(pos) = src_lower.find(&dot_method) {
+                    let before = &src_lower[..pos];
+                    let recv: String = before
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    if recv.is_empty() { None } else { Some(recv) }
+                } else {
+                    None
+                };
+
+                // Search backwards up to 30 lines for receiver's type declaration.
+                if let Some(ref recv) = receiver_name {
+                    let search_start = ln.saturating_sub(30);
+                    for back_ln in (search_start..ln).rev() {
+                        if back_ln >= lines.len() { continue; }
+                        let back_line = lines[back_ln].to_lowercase();
+                        // `let recv: Type = ...` or `let recv = Type::...`
+                        let let_pat = format!("let {recv}");
+                        let param_pat = format!("{recv}:");
+                        if back_line.contains(&let_pat) || back_line.contains(&param_pat) {
+                            found_type = Some(lines[back_ln].trim().to_owned());
+                            break;
+                        }
+                    }
+                }
+
+                // Deep check 2: Use chunk's receiver_types map.
+                let recv_type_from_map = receiver_name.as_ref().and_then(|r| {
+                    chunk_receiver_types[caller_idx].get(r.as_str()).cloned()
+                });
+
+                // Verdict: does the traced type match the graph's callee owner?
+                let verdict = if let Some(ref rt) = recv_type_from_map {
+                    let rt_clean = rt.split('<').next().unwrap_or(rt);
+                    if rt_clean == owner_clean
+                        || rt_clean.contains(&owner_clean)
+                        || owner_clean.contains(rt_clean)
+                    {
+                        "CORRECT"
+                    } else if rt_clean == "<extern>" {
+                        "UNCERTAIN (extern receiver)"
+                    } else {
+                        "WRONG"
+                    }
+                } else if let Some(ref type_line) = found_type {
+                    let tl = type_line.to_lowercase();
+                    if tl.contains(&owner_clean) {
+                        "CORRECT"
+                    } else {
+                        "UNCERTAIN (type found but no match)"
+                    }
+                } else {
+                    "UNCERTAIN (no type info)"
+                };
+
+                match verdict {
+                    "CORRECT" => deep_correct += 1,
+                    v if v.starts_with("WRONG") => deep_wrong += 1,
+                    _ => deep_uncertain += 1,
+                }
+
+                println!(
+                    "    [{verdict}] {caller_file}:L{call_line}",
+                );
+                println!(
+                    "      edge: {} → {}",
+                    short_name(caller_name), callee_name,
+                );
+                println!("      src:  {src_trimmed}");
+                if let Some(ref recv) = receiver_name {
+                    let type_info = recv_type_from_map
+                        .as_deref()
+                        .or(found_type.as_deref())
+                        .unwrap_or("?");
+                    println!("      recv: {recv} → type: {type_info} (expect: {owner_clean})");
+                }
+                println!();
+            }
+
+            println!("  [Deep sample summary]");
+            println!("    correct:   {deep_correct}/{sample_count}");
+            println!("    wrong:     {deep_wrong}/{sample_count}");
+            println!("    uncertain: {deep_uncertain}/{sample_count}");
+            let est_error_rate = if sample_count > 0 {
+                deep_wrong as f64 / sample_count as f64 * 100.0
+            } else {
+                0.0
+            };
+            println!("    estimated error rate: {est_error_rate:.1}% of unverified edges");
+            if prec_unverified > 0 {
+                let est_wrong = (deep_wrong as f64 / sample_count as f64 * prec_unverified as f64) as usize;
+                let total_verifiable = prec_ok + prec_wrong + est_wrong;
+                let adj_prec = if total_verifiable > 0 {
+                    prec_ok as f64 / total_verifiable as f64 * 100.0
+                } else {
+                    100.0
+                };
+                println!("    adjusted precision (estimated): {adj_prec:.1}% ({prec_ok}/{total_verifiable})");
+            }
+        }
+
     }
 
     Ok(())

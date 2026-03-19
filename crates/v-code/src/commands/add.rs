@@ -112,7 +112,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     }
 
     // === Pass 1: Chunk all files (parallel via rayon) ===
-    // Extern/rustdoc are spawned AFTER chunk to avoid allocator contention.
+    // Extern is spawned AFTER chunk to avoid allocator contention.
     eprintln!("  [rss] start: {:.0}MB", v_code_intel::graph::current_rss_mb());
     let t0 = std::time::Instant::now();
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
@@ -132,7 +132,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     eprintln!("  ingest: {:.1}s  RSS: {:.0}MB",
         t1.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
-    // Spawn extern + rustdoc after chunk+ingest (avoids allocator contention on
+    // Spawn extern after chunk+ingest (avoids allocator contention on
     // Windows that causes 8x slowdown in rayon par_iter phases).
     let project_root_for_bg = if let Ok(canonical) = input_path.canonicalize() {
         Some(canonical)
@@ -140,35 +140,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         None
     };
 
-    let extern_handle = std::thread::spawn({
-        let root = project_root_for_bg.clone();
-        move || root.as_deref().map(v_code_intel::extern_types::ExternMethodIndex::build)
-    });
 
-    let rustdoc_db_for_bg = db_path.clone();
-    let rustdoc_root_for_bg = project_root_for_bg.clone();
-    let rustdoc_handle = std::thread::spawn(move || {
-        // Try cached first; if absent, generate in background but don't block.
-        if let Some(types) = v_code_intel::rustdoc::load_cached(&rustdoc_db_for_bg) {
-            return Some(types);
-        }
-        // No cache — spawn rustdoc generation as a detached process so it doesn't
-        // block the current `add`. Next `add` will pick up the cached result.
-        if let Some(root) = rustdoc_root_for_bg.as_deref() {
-            eprintln!("[rustdoc] No cache found. Run `v-code rustdoc <DB>` to generate.");
-            // Try target/doc/ in case user already ran `cargo doc`
-            let doc_dir = root.join("target").join("doc");
-            if doc_dir.is_dir() {
-                if let Ok(types) = v_code_intel::rustdoc::RustdocTypes::from_dir(&doc_dir) {
-                    if !types.fn_return_types.is_empty() {
-                        v_code_intel::rustdoc::save_to_cache(&rustdoc_db_for_bg, root);
-                        return Some(types);
-                    }
-                }
-            }
-        }
-        None
-    });
+    // Lightweight type inference replaces rustdoc — zero-cost, extracted from chunks.
 
     // === Remove chunks from deleted files ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
@@ -223,7 +196,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     eprintln!("  [rss] before cache: {:.0}MB", v_code_intel::graph::current_rss_mb());
     drop(engine); // Release exclusive lock.
     let t_cache = std::time::Instant::now();
-    prebuild_caches(&db_path, &entries, &current_sources, rustdoc_handle, extern_handle, project_root_for_bg.as_deref());
+    prebuild_caches(&db_path, &entries, &current_sources, project_root_for_bg.as_deref());
     eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
 
     Ok(())
@@ -237,8 +210,6 @@ fn prebuild_caches(
     db_path: &std::path::Path,
     new_entries: &[CodeChunkEntry],
     current_sources: &std::collections::HashSet<String>,
-    rustdoc_handle: std::thread::JoinHandle<Option<v_code_intel::rustdoc::RustdocTypes>>,
-    extern_handle: std::thread::JoinHandle<Option<v_code_intel::extern_types::ExternMethodIndex>>,
     project_root: Option<&std::path::Path>,
 ) {
     use v_code_intel::parse::ParsedChunk;
@@ -288,37 +259,36 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Join rustdoc (was loading in bg since before chunk phase).
-    let t_rd = std::time::Instant::now();
-    let rustdoc = rustdoc_handle.join().ok().flatten();
-    eprintln!("    [cache] rustdoc join: {:.1}ms", t_rd.elapsed().as_secs_f64() * 1000.0);
-
-    // Macro expansion: add synthetic chunks for macro-generated functions.
+    // Lightweight type inference: extract types from chunks (replaces rustdoc).
+    // Macro expansion: load cached chunks (fast), spawn background if stale.
     if let Some(root) = project_root {
         let t_macro = std::time::Instant::now();
-        let existing: std::collections::HashSet<String> = chunks
+        let existing_names: std::collections::HashSet<String> = chunks
             .iter()
             .map(|c| c.name.to_lowercase())
             .collect();
-        let macro_chunks = v_code_intel::macro_expand::expand_macro_chunks_cached(
+        let changed_sources: std::collections::HashSet<String> = new_entries
+            .iter()
+            .map(|e| e.source.clone())
+            .collect();
+        let (macro_chunks, has_stale) = v_code_intel::macro_expand::try_load_macro_cache(
             root,
             db_path,
-            &existing,
+            &existing_names,
+            &changed_sources,
         );
         if !macro_chunks.is_empty() {
-            eprintln!("    [cache] macro expand: {:.1}ms ({} new chunks)",
+            eprintln!("    [cache] macro cache: {:.1}ms ({} chunks)",
                 t_macro.elapsed().as_secs_f64() * 1000.0, macro_chunks.len());
             chunks.extend(macro_chunks);
         }
+        if has_stale {
+            spawn_background_macro_expand(db_path, root);
+        }
     }
 
-    // Build graph edges (extern joins inside build_full_deferred).
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_full_deferred(
-        &chunks,
-        rustdoc.as_ref(),
-        extern_handle,
-    );
+    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
     eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
     let t4 = std::time::Instant::now();
@@ -465,6 +435,64 @@ fn direct_bulk_write(
         start.elapsed().as_secs_f64(), idx_ms, enc_ms, write_ms, fi_ms);
 
     Ok(inserted)
+}
+
+/// Background macro expansion entry point (called by `_macro-expand` subcommand).
+///
+/// Expands all stale crates, saves cache, and rebuilds graph.bin with macro chunks.
+pub fn run_macro_expand_bg(db_path: PathBuf, project_root: PathBuf) -> Result<()> {
+    let chunks = v_code_intel::loader::load_chunks(&db_path)?;
+
+    let mut all_chunks = chunks;
+
+    // Full macro expansion (slow — runs cargo rustc).
+    let existing_names: std::collections::HashSet<String> = all_chunks
+        .iter()
+        .map(|c| c.name.to_lowercase())
+        .collect();
+    let macro_chunks = v_code_intel::macro_expand::expand_macro_chunks_full(
+        &project_root,
+        &db_path,
+        &existing_names,
+    );
+    if !macro_chunks.is_empty() {
+        eprintln!(
+            "    [macro-bg] {} macro-expanded chunks",
+            macro_chunks.len()
+        );
+        all_chunks.extend(macro_chunks);
+    }
+
+    // Rebuild graph with macro chunks included.
+    let graph = v_code_intel::graph::CallGraph::build_full(&all_chunks);
+    let _ = graph.save(&db_path);
+    eprintln!("    [macro-bg] graph rebuilt with macro chunks");
+
+    Ok(())
+}
+
+/// Spawn background process for macro expansion + graph rebuild.
+///
+/// Runs `v-code _macro-expand <db> <project_root>` as a detached process.
+/// This avoids blocking `add` while doing slow `cargo rustc -Zunpretty=expanded`.
+fn spawn_background_macro_expand(db_path: &std::path::Path, project_root: &std::path::Path) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let db = db_path.to_string_lossy().to_string();
+    let root = project_root.to_string_lossy().to_string();
+
+    match std::process::Command::new(exe)
+        .args(["_macro-expand", &db, &root])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(_) => eprintln!("    [macro] background expansion spawned"),
+        Err(e) => eprintln!("    [macro] failed to spawn background: {e}"),
+    }
 }
 
 /// Fast file scan: `git ls-files` (instant from index) with walkdir fallback.

@@ -5,4 +5,3 @@ mod graph;
 mod helpers;
 mod rustdoc;
 mod stats;
-mod extern_types;
