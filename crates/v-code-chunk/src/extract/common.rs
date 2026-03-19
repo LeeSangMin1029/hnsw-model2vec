@@ -1102,9 +1102,18 @@ fn extract_rhs_callee(node: &tree_sitter::Node, src: &[u8]) -> Option<String> {
         "identifier" => func.utf8_text(src).ok().map(|s| s.to_owned()),
         "scoped_identifier" => func.utf8_text(src).ok().map(|s| s.to_owned()),
         "field_expression" => {
-            // receiver.method — extract "receiver.method"
             let obj = func.child_by_field_name("value")?;
             let field = func.child_by_field_name("field")?;
+
+            // If receiver is a call_expression (method chaining), recurse
+            // to find the original callee. This handles any chaining pattern:
+            //   `Foo::open(path).context("msg")?` → callee = `Foo::open`
+            //   `db.load().unwrap()` → callee = `db.load`
+            if obj.kind() == "call_expression" {
+                return extract_rhs_callee(&obj, src);
+            }
+
+            // receiver.method — extract "receiver.method"
             let obj_text = obj.utf8_text(src).ok()?;
             let field_text = field.utf8_text(src).ok()?;
             if obj.kind() == "identifier" || obj.kind() == "self" {

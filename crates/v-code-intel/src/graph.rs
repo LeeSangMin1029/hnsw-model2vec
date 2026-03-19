@@ -2546,6 +2546,15 @@ pub fn check_extern(
         return None;
     }
 
+    // Qualified call: `Type::method` — if Type is not a project type, it's extern.
+    if let Some((prefix, _method)) = call_lower.rsplit_once("::") {
+        let type_leaf = prefix.rsplit_once("::").map_or(prefix, |p| p.1);
+        let type_clean = type_leaf.split('<').next().unwrap_or(type_leaf);
+        if !type_clean.is_empty() && !project_type_shorts.contains(type_clean) {
+            return Some(format!("qualified-extern: {call_lower}"));
+        }
+    }
+
     let (receiver, method) = call_lower.rsplit_once('.')?;
     let receiver_leaf = receiver.rsplit_once('.').map_or(receiver, |p| p.1);
 

@@ -3958,6 +3958,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tree-sitter",
+ "tree-sitter-rust",
  "v-code-chunk",
  "v-hnsw-core",
  "v-hnsw-storage",
