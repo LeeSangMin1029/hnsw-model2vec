@@ -73,96 +73,103 @@ impl ExternMethodIndex {
             .unwrap_or_else(|| db_path.parent().unwrap_or(Path::new(".")).to_path_buf());
         let fingerprint = compute_fingerprint(&project_root);
 
-        // Try loading from cache first.
+        // Try loading from project-local cache first.
         if let Some(cached) = Self::load_cache(db_path, &fingerprint) {
             return cached;
         }
 
-        // Collect all .rs file paths first, then parse in parallel.
+        let global_cache = global_cache_dir();
         let t0 = std::time::Instant::now();
-        let mut all_files: Vec<PathBuf> = Vec::new();
 
-        if let Some(std_src) = discover_std_src() {
-            for dir_name in STD_DIRS {
-                let sub = std_src.join(dir_name);
-                if sub.is_dir() {
-                    collect_rs_files(&sub, &mut all_files);
-                }
-            }
-        }
-        let std_count = all_files.len();
-
-        for dep_dir in discover_cargo_deps(&project_root) {
-            collect_rs_files(&dep_dir, &mut all_files);
-        }
-        eprintln!("    [extern] collect files: {:.1}s ({} std + {} deps = {} total)",
-            t0.elapsed().as_secs_f64(), std_count, all_files.len() - std_count, all_files.len());
-
-        // Parallel parse: read + quick impl check + tree-sitter parse.
-        // Use a dedicated thread pool (4 threads) to avoid competing with
-        // the main chunk phase's rayon global pool.
-        let t1 = std::time::Instant::now();
-        use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering::Relaxed};
-        let parsed_count = AtomicUsize::new(0);
-        let skipped_count = AtomicUsize::new(0);
-        let total_bytes = AtomicUsize::new(0);
-        // Cumulative nanoseconds (sum across all threads).
-        let ns_read = AtomicU64::new(0);
-        let ns_parse = AtomicU64::new(0);
-        let ns_walk = AtomicU64::new(0);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .thread_name(|i| format!("extern-{i}"))
-            .build();
-        let per_file_results: Vec<Vec<(String, String, Option<String>)>> = match pool {
-            Ok(ref pool) => pool.install(|| {
-                all_files
-                    .par_iter()
-                    .filter_map(|path| {
-                        let tr = std::time::Instant::now();
-                        let src = std::fs::read(path).ok()?;
-                        ns_read.fetch_add(tr.elapsed().as_nanos() as u64, Relaxed);
-                        if !has_impl_keyword(&src) {
-                            skipped_count.fetch_add(1, Relaxed);
-                            return None;
-                        }
-                        total_bytes.fetch_add(src.len(), Relaxed);
-                        parsed_count.fetch_add(1, Relaxed);
-                        let methods = v_code_chunk::extern_impl::extract_impl_methods_timed(
-                            &src, &ns_parse, &ns_walk,
-                        );
-                        if methods.is_empty() { None } else { Some(methods) }
-                    })
-                    .collect()
-            }),
-            Err(_) => Vec::new(),
-        };
-        let cores = pool.as_ref().map_or(0, |p| p.current_num_threads());
-        eprintln!("    [extern] parse: {:.1}s (parsed={}, skipped={}, {:.1}MB)",
-            t1.elapsed().as_secs_f64(),
-            parsed_count.load(Relaxed), skipped_count.load(Relaxed),
-            total_bytes.load(Relaxed) as f64 / 1_048_576.0);
-        eprintln!("      thread-sum: read={:.1}s  ts-parse={:.1}s  walk={:.1}s  (/{cores} cores)",
-            ns_read.load(Relaxed) as f64 / 1e9,
-            ns_parse.load(Relaxed) as f64 / 1e9,
-            ns_walk.load(Relaxed) as f64 / 1e9);
-
-        // Merge results.
-        let t2 = std::time::Instant::now();
         let mut types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut return_types: BTreeMap<String, String> = BTreeMap::new();
-        for methods in per_file_results {
-            for (type_name, method_name, ret_type) in methods {
-                types.entry(type_name.clone()).or_default().insert(method_name.clone());
-                if let Some(ret) = ret_type {
-                    let key = format!("{type_name}::{method_name}");
-                    return_types.entry(key).or_insert(ret);
+        let mut cache_hits = 0u32;
+        let mut parsed_groups = 0u32;
+
+        // ── std library ──
+        if let Some(std_src) = discover_std_src() {
+            let rustc_hash = rustc_version_hash();
+            let cache_key = format!("std-{rustc_hash}");
+
+            if let Some(cached) = load_global_unit(&global_cache, &cache_key) {
+                merge_methods(&cached, &mut types, &mut return_types);
+                cache_hits += 1;
+            } else {
+                let mut std_files = Vec::new();
+                for dir_name in STD_DIRS {
+                    let sub = std_src.join(dir_name);
+                    if sub.is_dir() {
+                        collect_rs_files(&sub, &mut std_files);
+                    }
                 }
+                let results = parse_files_parallel(&std_files);
+                save_global_unit(&global_cache, &cache_key, &results);
+                merge_methods(&results, &mut types, &mut return_types);
+                parsed_groups += 1;
             }
         }
 
-        eprintln!("    [extern] merge: {:.1}s ({} types, {} methods)",
-            t2.elapsed().as_secs_f64(), types.len(), types.values().map(|m| m.len()).sum::<usize>());
+        // ── cargo deps (per crate-version) ──
+        let lock_path = project_root.join("Cargo.lock");
+        let dep_dirs = discover_cargo_deps(&project_root);
+        let dep_versions = if lock_path.exists() {
+            std::fs::read_to_string(&lock_path).ok()
+                .map(|c| parse_cargo_lock_deps(&c))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Build a name→version lookup from Cargo.lock.
+        let _version_map: std::collections::HashMap<String, String> = dep_versions
+            .into_iter()
+            .collect();
+
+        // Group dep_dirs by crate name-version for global caching.
+        let mut uncached_files: Vec<PathBuf> = Vec::new();
+        for dep_dir in &dep_dirs {
+            // dep_dir is like ~/.cargo/registry/src/.../serde-1.0.210
+            let dir_name = dep_dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // Extract crate name and version from directory name.
+            let cache_key = if let Some((name, ver)) = split_crate_dir_name(dir_name) {
+                format!("{name}-{ver}")
+            } else {
+                String::new()
+            };
+
+            if !cache_key.is_empty() {
+                if let Some(cached) = load_global_unit(&global_cache, &cache_key) {
+                    merge_methods(&cached, &mut types, &mut return_types);
+                    cache_hits += 1;
+                    continue;
+                }
+            }
+
+            // Parse this crate's files and cache individually.
+            let mut crate_files = Vec::new();
+            collect_rs_files(dep_dir, &mut crate_files);
+            if !cache_key.is_empty() && !crate_files.is_empty() {
+                let results = parse_files_parallel(&crate_files);
+                save_global_unit(&global_cache, &cache_key, &results);
+                merge_methods(&results, &mut types, &mut return_types);
+                parsed_groups += 1;
+            } else {
+                uncached_files.extend(crate_files);
+            }
+        }
+
+        // Parse any remaining files that couldn't be cached individually.
+        if !uncached_files.is_empty() {
+            let results = parse_files_parallel(&uncached_files);
+            merge_methods(&results, &mut types, &mut return_types);
+            parsed_groups += 1;
+        }
+
+        eprintln!("    [extern] {:.1}s — {} global cache hits, {} groups parsed, {} types, {} methods",
+            t0.elapsed().as_secs_f64(), cache_hits, parsed_groups,
+            types.len(), types.values().map(|m| m.len()).sum::<usize>());
 
         let index = Self {
             version: EXTERN_CACHE_VERSION,
@@ -381,4 +388,132 @@ fn dirs_fallback() -> Option<PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .map(PathBuf::from)
+}
+
+// ── Global per-crate cache ──────────────────────────────────────────
+
+/// Per-crate parsed methods: Vec<(type_name, method_name, Option<return_type>)>.
+type CrateMethodVec = Vec<(String, String, Option<String>)>;
+
+/// Global cache directory: `~/.cache/v-code/extern/`.
+fn global_cache_dir() -> Option<PathBuf> {
+    let home = dirs_fallback()?;
+    let dir = home.join(".cache").join("v-code").join("extern");
+    Some(dir)
+}
+
+/// Cache version for per-crate global cache files.
+const GLOBAL_UNIT_VERSION: u8 = 1;
+
+/// Load a per-crate unit from the global cache.
+fn load_global_unit(cache_dir: &Option<PathBuf>, key: &str) -> Option<CrateMethodVec> {
+    let dir = cache_dir.as_ref()?;
+    let path = dir.join(format!("{key}.bin"));
+    let data = std::fs::read(&path).ok()?;
+    if data.first() != Some(&GLOBAL_UNIT_VERSION) {
+        return None;
+    }
+    let config = bincode::config::standard();
+    let (methods, _): (CrateMethodVec, _) = bincode::decode_from_slice(&data[1..], config).ok()?;
+    Some(methods)
+}
+
+/// Save a per-crate unit to the global cache.
+fn save_global_unit(cache_dir: &Option<PathBuf>, key: &str, methods: &CrateMethodVec) {
+    let Some(dir) = cache_dir.as_ref() else { return };
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join(format!("{key}.bin"));
+    let config = bincode::config::standard();
+    if let Ok(data) = bincode::encode_to_vec(methods, config) {
+        let mut bytes = vec![GLOBAL_UNIT_VERSION];
+        bytes.extend_from_slice(&data);
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
+/// Merge per-crate method results into the index tables.
+fn merge_methods(
+    methods: &CrateMethodVec,
+    types: &mut BTreeMap<String, BTreeSet<String>>,
+    return_types: &mut BTreeMap<String, String>,
+) {
+    for (type_name, method_name, ret_type) in methods {
+        types.entry(type_name.clone()).or_default().insert(method_name.clone());
+        if let Some(ret) = ret_type {
+            let key = format!("{type_name}::{method_name}");
+            return_types.entry(key).or_insert_with(|| ret.clone());
+        }
+    }
+}
+
+/// Parse a list of .rs files in parallel, returning flat method tuples.
+fn parse_files_parallel(files: &[PathBuf]) -> CrateMethodVec {
+    use std::sync::atomic::AtomicU64;
+    let ns_parse = AtomicU64::new(0);
+    let ns_walk = AtomicU64::new(0);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .thread_name(|i| format!("extern-{i}"))
+        .build();
+
+    let per_file: Vec<CrateMethodVec> = match pool {
+        Ok(ref pool) => pool.install(|| {
+            files
+                .par_iter()
+                .filter_map(|path| {
+                    let src = std::fs::read(path).ok()?;
+                    if !has_impl_keyword(&src) {
+                        return None;
+                    }
+                    let methods = v_code_chunk::extern_impl::extract_impl_methods_timed(
+                        &src, &ns_parse, &ns_walk,
+                    );
+                    if methods.is_empty() { None } else { Some(methods) }
+                })
+                .collect()
+        }),
+        Err(_) => Vec::new(),
+    };
+
+    per_file.into_iter().flatten().collect()
+}
+
+/// Compute a short hash of the rustc version string.
+fn rustc_version_hash() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    if let Ok(output) = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+    {
+        output.stdout.hash(&mut hasher);
+    }
+    format!("{:08x}", hasher.finish() as u32)
+}
+
+/// Split a cargo registry directory name into (crate_name, version).
+///
+/// E.g. `"serde-1.0.210"` → `Some(("serde", "1.0.210"))`,
+///      `"proc-macro2-1.0.86"` → `Some(("proc-macro2", "1.0.86"))`.
+fn split_crate_dir_name(dir_name: &str) -> Option<(&str, &str)> {
+    // Version starts at the last `-` followed by a digit.
+    let mut last_dash = None;
+    for (i, b) in dir_name.bytes().enumerate() {
+        if b == b'-' {
+            // Check if next char is a digit.
+            if dir_name.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit) {
+                last_dash = Some(i);
+            }
+        }
+    }
+    let pos = last_dash?;
+    let name = &dir_name[..pos];
+    let version = &dir_name[pos + 1..];
+    if name.is_empty() || version.is_empty() {
+        None
+    } else {
+        Some((name, version))
+    }
 }
