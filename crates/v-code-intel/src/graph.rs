@@ -263,7 +263,7 @@ impl CallGraph {
     pub fn build_full(
         chunks: &[ParsedChunk],
     ) -> Self {
-        Self::build_with_lsp(chunks, &HashMap::new())
+        Self::build_with_lsp(chunks, &crate::lsp_client::LspTypes::default())
     }
 
     /// Build the call graph with additional LSP-resolved return types.
@@ -273,7 +273,7 @@ impl CallGraph {
     /// These supplement tree-sitter's type extraction with LSP hover results.
     pub fn build_with_lsp(
         chunks: &[ParsedChunk],
-        lsp_return_types: &HashMap<String, String>,
+        lsp_types: &crate::lsp_client::LspTypes,
     ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
@@ -308,17 +308,44 @@ impl CallGraph {
         let (method_owners, (instantiated, trait_impl_methods)) = right;
 
         // Merge LSP-resolved return types (overlay on tree-sitter heuristics).
+        // LSP provides short_name → type, but return_type_map uses full chunk names.
+        // Build a short→full mapping to apply LSP types to correct keys.
+        let lsp_return_types = &lsp_types.return_types;
         if !lsp_return_types.is_empty() {
+            let mut short_to_full: HashMap<String, Vec<String>> = HashMap::new();
+            for key in return_type_map.keys() {
+                let short = key.rsplit("::").next().unwrap_or(key);
+                short_to_full.entry(short.to_owned()).or_default().push(key.clone());
+            }
+            // Also include chunk names not yet in return_type_map.
+            for c in chunks {
+                if c.kind != "function" { continue; }
+                let name_lower = c.name.to_lowercase();
+                let short = name_lower.rsplit("::").next().unwrap_or(&name_lower);
+                short_to_full.entry(short.to_owned()).or_default().push(name_lower);
+            }
+            // Deduplicate full names.
+            for names in short_to_full.values_mut() {
+                names.sort();
+                names.dedup();
+            }
+
             let mut lsp_added = 0usize;
             for (fn_name, ret_type) in lsp_return_types {
                 use std::collections::hash_map::Entry;
-                match return_type_map.entry(fn_name.clone()) {
-                    Entry::Vacant(e) => { e.insert(ret_type.clone()); lsp_added += 1; }
-                    Entry::Occupied(mut e) => {
-                        let current = e.get();
-                        if current.len() <= 1 || current == "self" {
-                            e.insert(ret_type.clone());
-                            lsp_added += 1;
+                // Find all full names matching this short name.
+                let full_names: Vec<String> = short_to_full.get(fn_name.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| vec![fn_name.clone()]);
+                for full_name in &full_names {
+                    match return_type_map.entry(full_name.clone()) {
+                        Entry::Vacant(e) => { e.insert(ret_type.clone()); lsp_added += 1; }
+                        Entry::Occupied(mut e) => {
+                            let current = e.get();
+                            if current.len() <= 1 || current == "self" {
+                                e.insert(ret_type.clone());
+                                lsp_added += 1;
+                            }
                         }
                     }
                 }
@@ -338,6 +365,33 @@ impl CallGraph {
         let mut ctxs: Vec<ChunkCtx> = chunks.par_iter()
             .map(|c| build_chunk_ctx(c, &owner_types, &owner_field_types, &return_type_map, &method_owners))
             .collect();
+
+        // Inject LSP-resolved receiver types directly into chunk contexts.
+        if !lsp_types.receiver_types.is_empty() {
+            let mut lsp_injected = 0usize;
+            let mut project_types = 0usize;
+            let mut extern_types = 0usize;
+            for (&chunk_idx, types) in &lsp_types.receiver_types {
+                if chunk_idx < ctxs.len() {
+                    for (var, ty) in types {
+                        ctxs[chunk_idx].receiver_types.entry(var.clone()).or_insert_with(|| {
+                            lsp_injected += 1;
+                            // Check if this type exists in the project.
+                            if meta.exact.contains_key(ty.as_str())
+                                || meta.short.contains_key(ty.as_str()) {
+                                project_types += 1;
+                            } else {
+                                extern_types += 1;
+                            }
+                            ty.clone()
+                        });
+                    }
+                }
+            }
+            if lsp_injected > 0 {
+                eprintln!("      [graph] LSP receiver injection: +{lsp_injected} var types ({project_types} project, {extern_types} extern)");
+            }
+        }
 
         // Pass 1: parallel resolve — each chunk independently collects edges.
         let par_results: Vec<(Vec<(u32, u32)>, Vec<(u32, u32)>, HashMap<String, String>, Vec<bool>)> = chunks.par_iter()

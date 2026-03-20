@@ -520,7 +520,7 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
         let resolved_shorts = &chunk_callee_shorts[i];
         let self_short = short_name(&graph.names[i]).to_lowercase();
 
-        let _receiver_types = build_db_chunk_receiver_types(chunk, &owner_field_types, &return_type_map);
+        let receiver_types = build_db_chunk_receiver_types(chunk, &owner_field_types, &return_type_map);
 
         for call in &chunk.calls {
             let call_lower = call.to_lowercase();
@@ -573,12 +573,25 @@ pub fn run(db: PathBuf, verbose: bool) -> Result<()> {
                 recall_resolved += 1;
                 { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.3 += 1; }
             } else {
-                recall_unresolved += 1;
-                { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
-                let cat = categorize_miss(call);
-                *miss_categories.entry(cat).or_default() += 1;
-                if unresolved_samples.len() < 2000 {
-                    unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
+                // For receiver.method calls, check if the receiver type is known
+                // and non-project (extern). If so, classify as extern, not unresolved.
+                let is_recv_extern = call_lower.contains('.') && {
+                    let recv = call_lower.rsplit_once('.').map_or("", |p| p.0);
+                    let recv_leaf = recv.rsplit_once('.').map_or(recv, |p| p.1);
+                    receiver_types.get(recv_leaf)
+                        .map_or(false, |ty| !project_type_shorts.contains(ty.as_str()))
+                };
+                if is_recv_extern {
+                    recall_extern += 1;
+                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; ls.4 += 1; }
+                } else {
+                    recall_unresolved += 1;
+                    { let ls = lang_stats.entry(lang.to_owned()).or_default(); ls.2 += 1; }
+                    let cat = categorize_miss(call);
+                    *miss_categories.entry(cat).or_default() += 1;
+                    if unresolved_samples.len() < 2000 {
+                        unresolved_samples.push(format!("{call}  [in {}]", graph.names[i]));
+                    }
                 }
             }
         }

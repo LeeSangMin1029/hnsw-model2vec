@@ -261,7 +261,7 @@ fn prebuild_caches(
     let lsp_types = if let Some(root) = project_root {
         collect_lsp_types(root, &chunks)
     } else {
-        std::collections::HashMap::new()
+        v_code_intel::lsp_client::LspTypes::default()
     };
 
     let t3 = std::time::Instant::now();
@@ -422,12 +422,14 @@ fn direct_bulk_write(
 fn collect_lsp_types(
     project_root: &std::path::Path,
     chunks: &[v_code_intel::parse::ParsedChunk],
-) -> std::collections::HashMap<String, String> {
+) -> v_code_intel::lsp_client::LspTypes {
     use v_code_intel::lsp_client;
 
     if !lsp_client::is_lspmux_available() {
-        return std::collections::HashMap::new();
+        eprintln!("    [lsp] lspmux not available, skipping");
+        return lsp_client::LspTypes::default();
     }
+    eprintln!("    [lsp] lspmux detected, starting type collection...");
 
     let t_lsp = std::time::Instant::now();
 
@@ -438,13 +440,13 @@ fn collect_lsp_types(
     // Ensure stub workspace is up-to-date.
     match v_code_intel::stub_workspace::ensure_up_to_date(project_root, &target_crate, &stub_dir) {
         Ok(ws) => {
-            let types = lsp_client::collect_return_types(chunks, &ws.root);
+            let types = lsp_client::collect_lsp_types(chunks, &ws.root);
             eprintln!("    [lsp] type collection: {:.1}ms", t_lsp.elapsed().as_secs_f64() * 1000.0);
             types
         }
         Err(e) => {
             eprintln!("    [lsp] stub workspace failed: {e}");
-            std::collections::HashMap::new()
+            lsp_client::LspTypes::default()
         }
     }
 }

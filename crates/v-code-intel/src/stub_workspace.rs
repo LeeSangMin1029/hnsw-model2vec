@@ -327,24 +327,49 @@ fn generate_target_crate(
     Ok(())
 }
 
-/// Generate workspace crate stub with pub signatures extracted via tree-sitter.
+/// Generate workspace crate stub with junction to real source.
+/// Uses the same junction approach as target crate so RA can resolve types everywhere.
 fn generate_workspace_stub(
     crate_dir: &Path,
     info: &CrateMeta,
     all_meta: &HashMap<String, CrateMeta>,
     target_crate: &str,
 ) -> Result<()> {
-    let src_dir = crate_dir.join("src");
-    std::fs::create_dir_all(&src_dir)?;
+    std::fs::create_dir_all(crate_dir)?;
 
-    // Extract pub signatures from real source
+    // Junction src/ → real source (same as target crate)
     let real_src = info
         .manifest_path
         .parent()
         .context("no parent")?
         .join("src");
+    let link_path = crate_dir.join("src");
 
-    extract_pub_signatures(&real_src, &src_dir)?;
+    if link_path.exists() {
+        std::fs::remove_dir_all(&link_path).ok();
+        std::fs::remove_file(&link_path).ok();
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_src, &link_path)?;
+    #[cfg(windows)]
+    {
+        let link_str = link_path.to_string_lossy().replace('/', "\\");
+        let target_str = real_src.to_string_lossy().replace('/', "\\");
+        let output = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&*link_str)
+            .arg(&*target_str)
+            .output()
+            .context("failed to run mklink /J")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "mklink /J failed for {link_str}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     // Generate Cargo.toml
     let cargo_toml = build_crate_cargo_toml(info, all_meta, target_crate)?;
