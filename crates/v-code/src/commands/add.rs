@@ -132,14 +132,6 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     eprintln!("  ingest: {:.1}s  RSS: {:.0}MB",
         t1.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
-    // Spawn extern after chunk+ingest (avoids allocator contention on
-    // Windows that causes 8x slowdown in rayon par_iter phases).
-    let project_root_for_bg = if let Ok(canonical) = input_path.canonicalize() {
-        Some(canonical)
-    } else {
-        None
-    };
-
 
     // === Remove chunks from deleted files ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
@@ -170,8 +162,10 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         return Ok(());
     }
 
-    if inserted == 0 {
-        println!("No symbols to index.");
+    let has_changes = inserted > 0 || !deleted.is_empty();
+
+    if !has_changes {
+        println!("No changes. Database is up to date.");
     } else {
         // Notify daemon to reload if running (non-blocking).
         if v_hnsw_storage::daemon_client::is_running() {
@@ -187,15 +181,13 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         println!();
         println!("Done! Code DB ready: {}", db_path.display());
         println!("Use: v-code context/blast/jump/symbols/dupes {}", db_path.display());
-    }
 
-    // Pre-build chunks.bin + graph.bin caches directly from in-memory entries.
-    // This ensures verify/context/blast start instantly without rebuilding.
-    eprintln!("  [rss] before cache: {:.0}MB", v_code_intel::graph::current_rss_mb());
-    drop(engine); // Release exclusive lock.
-    let t_cache = std::time::Instant::now();
-    prebuild_caches(&db_path, &entries, &current_sources, project_root_for_bg.as_deref());
-    eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
+        // Pre-build chunks.bin + graph.bin caches directly from in-memory entries.
+            drop(engine); // Release exclusive lock.
+        let t_cache = std::time::Instant::now();
+        prebuild_caches(&db_path, &entries, &current_sources);
+        eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
+    }
 
     Ok(())
 }
@@ -208,7 +200,6 @@ fn prebuild_caches(
     db_path: &std::path::Path,
     new_entries: &[CodeChunkEntry],
     current_sources: &std::collections::HashSet<String>,
-    project_root: Option<&std::path::Path>,
 ) {
     use v_code_intel::parse::ParsedChunk;
 
@@ -235,16 +226,45 @@ fn prebuild_caches(
 
     // For incremental adds: merge with existing cache (keep chunks from unchanged files).
     // Only attempt if a cache file already exists (skip on full rebuild).
+    //
+    // chunk.file is a relative path (e.g. "crates/v-code/src/lib.rs") while
+    // new_sources uses file_path_str and current_sources uses normalize_source
+    // (absolute path). Build a suffix set from current_sources for matching.
+    let current_suffixes: std::collections::HashSet<&str> = current_sources
+        .iter()
+        .filter_map(|abs| {
+            // Match suffix: the chunk.file relative path is a suffix of the absolute path.
+            abs.find("crates/").map(|pos| &abs[pos..])
+                .or_else(|| abs.find("src/").map(|pos| &abs[pos..]))
+        })
+        .collect();
+    let new_suffixes: std::collections::HashSet<&str> = new_sources
+        .iter()
+        .filter_map(|abs| {
+            abs.find("crates/").map(|pos| &abs[pos..])
+                .or_else(|| abs.find("src/").map(|pos| &abs[pos..]))
+        })
+        .collect();
+
     if cache.exists() {
         if let Ok(existing) = v_code_intel::loader::load_chunks(db_path) {
+            let existing_len = existing.len();
+            let mut kept = 0usize;
+            let mut skipped_new = 0usize;
+            let mut skipped_deleted = 0usize;
             for c in existing {
-                // Keep chunk if its file wasn't re-chunked AND still exists.
-                if !new_sources.contains(c.file.as_str())
-                    && current_sources.contains(&c.file)
-                {
+                let in_new = new_suffixes.contains(c.file.as_str());
+                let in_current = current_suffixes.contains(c.file.as_str());
+                if !in_new && in_current {
                     chunks.push(c);
+                    kept += 1;
+                } else if in_new {
+                    skipped_new += 1;
+                } else {
+                    skipped_deleted += 1;
                 }
             }
+            eprintln!("    [merge] existing={existing_len}, kept={kept}, skipped(new={skipped_new}, del={skipped_deleted})");
         }
     }
     eprintln!("    [cache] chunks convert: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
@@ -257,15 +277,34 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // LSP type inference via stub workspace + lspmux (optional).
-    let lsp_types = if let Some(root) = project_root {
-        collect_lsp_types(root, &chunks)
+    // Spawn single RaInstance for both hover type inference + call hierarchy.
+    let workspace_root = std::env::current_dir().ok();
+    let ra = workspace_root.as_ref().and_then(|root| {
+        eprintln!("    [ra] spawning RA instance...");
+        match v_lsp::instance::RaInstance::spawn(root) {
+            Ok(r) => {
+                eprintln!("    [ra] RA ready");
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("    [ra] spawn failed: {e}");
+                None
+            }
+        }
+    });
+
+    // Hover type inference via RaInstance (replaces lspmux + stub workspace).
+    let lsp_types = if let Some(ref ra) = ra {
+        let t_hover = std::time::Instant::now();
+        let types = v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra);
+        eprintln!("    [ra-hover] type collection: {:.1}s", t_hover.elapsed().as_secs_f64());
+        types
     } else {
         v_code_intel::lsp_client::LspTypes::default()
     };
 
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_with_lsp(&chunks, &lsp_types);
+    let graph = v_code_intel::graph::CallGraph::build_with_lsp(&chunks, &lsp_types, ra.as_ref());
     eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
     let t4 = std::time::Instant::now();
@@ -414,58 +453,6 @@ fn direct_bulk_write(
     Ok(inserted)
 }
 
-/// Collect LSP return types via stub workspace + lspmux.
-///
-/// Creates/updates a minimal stub workspace, connects to lspmux,
-/// and queries hover for let-call bindings to resolve return types
-/// that tree-sitter cannot determine.
-fn collect_lsp_types(
-    project_root: &std::path::Path,
-    chunks: &[v_code_intel::parse::ParsedChunk],
-) -> v_code_intel::lsp_client::LspTypes {
-    use v_code_intel::lsp_client;
-
-    if !lsp_client::is_lspmux_available() {
-        eprintln!("    [lsp] lspmux not available, skipping");
-        return lsp_client::LspTypes::default();
-    }
-    eprintln!("    [lsp] lspmux detected, starting type collection...");
-
-    let t_lsp = std::time::Instant::now();
-
-    // Determine target crate (the one with most chunks).
-    let target_crate = detect_target_crate(chunks);
-    let stub_dir = project_root.join("target").join("v-code-cache").join("stub-workspace");
-
-    // Ensure stub workspace is up-to-date.
-    match v_code_intel::stub_workspace::ensure_up_to_date(project_root, &target_crate, &stub_dir) {
-        Ok(ws) => {
-            let types = lsp_client::collect_lsp_types(chunks, &ws.root);
-            eprintln!("    [lsp] type collection: {:.1}ms", t_lsp.elapsed().as_secs_f64() * 1000.0);
-            types
-        }
-        Err(e) => {
-            eprintln!("    [lsp] stub workspace failed: {e}");
-            lsp_client::LspTypes::default()
-        }
-    }
-}
-
-/// Detect the target crate from chunks (the one with the most files).
-fn detect_target_crate(chunks: &[v_code_intel::parse::ParsedChunk]) -> String {
-    let mut crate_counts: HashMap<String, usize> = HashMap::new();
-    for chunk in chunks {
-        // Extract crate name from file path: "crates/<name>/src/..."
-        if let Some(name) = chunk.file.split('/').nth(1) {
-            *crate_counts.entry(name.to_owned()).or_default() += 1;
-        }
-    }
-    crate_counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(name, _)| name)
-        .unwrap_or_else(|| "v-code-intel".to_owned())
-}
 
 /// Fast file scan: `git ls-files` (instant from index) with walkdir fallback.
 fn scan_files_fast(input_path: &std::path::Path, exclude: &[String]) -> Vec<PathBuf> {

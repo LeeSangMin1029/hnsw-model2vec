@@ -5399,6 +5399,7 @@ dependencies = [
  "v-hnsw-rerank",
  "v-hnsw-search",
  "v-hnsw-storage",
+ "v-lsp",
 ]
 
 [[package]]
@@ -5454,6 +5455,7 @@ dependencies = [
  "v-hnsw-graph",
  "v-hnsw-search",
  "v-hnsw-storage",
+ "v-lsp",
  "windows-sys 0.59.0",
 ]
 

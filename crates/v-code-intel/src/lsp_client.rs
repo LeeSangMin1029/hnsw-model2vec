@@ -615,3 +615,131 @@ fn resolve_chunk_file(chunk_file: &str, stub_root: &Path) -> std::path::PathBuf 
     // Fallback: return as-is.
     direct
 }
+
+// ── RaInstance-based type collection (replaces lspmux) ─────────────────
+
+/// Collect LSP type information using an in-process `RaInstance`.
+///
+/// Replaces `collect_lsp_types` (which needed lspmux + stub workspace).
+/// Uses `RaInstance::hover` directly on real source files.
+pub fn collect_types_via_ra(
+    chunks: &[crate::parse::ParsedChunk],
+    ra: &v_lsp::instance::RaInstance,
+) -> LspTypes {
+    let queries = build_hover_queries_direct(chunks);
+    if queries.is_empty() {
+        return LspTypes::default();
+    }
+    eprintln!("    [ra-hover] querying {} hover positions...", queries.len());
+
+    // Map var_name → callee_name for return type extraction.
+    let var_to_callee: HashMap<(usize, String), Vec<String>> = {
+        let mut m: HashMap<(usize, String), Vec<String>> = HashMap::new();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            for (var_name, callee_name) in &chunk.let_call_bindings {
+                m.entry((idx, var_name.to_lowercase()))
+                    .or_default()
+                    .push(callee_name.to_lowercase());
+            }
+        }
+        m
+    };
+
+    let mut lsp_types = LspTypes::default();
+    let mut null_count = 0usize;
+    let mut hover_ok = 0usize;
+    let mut hover_err = 0usize;
+
+    for q in &queries {
+        match ra.hover(&q.file, q.line, q.col) {
+            Ok(Some(type_str)) => {
+                hover_ok += 1;
+                let leaf = extract_leaf_type_from_rust(&type_str);
+                if !leaf.is_empty() && leaf != "unknown" {
+                    let var_lower = q.var_name.to_lowercase();
+
+                    lsp_types.receiver_types
+                        .entry(q.chunk_idx)
+                        .or_default()
+                        .entry(var_lower.clone())
+                        .or_insert_with(|| leaf.clone());
+
+                    let key = (q.chunk_idx, var_lower);
+                    if let Some(callees) = var_to_callee.get(&key) {
+                        for callee in callees {
+                            lsp_types.return_types.entry(callee.clone())
+                                .or_insert_with(|| leaf.clone());
+                        }
+                    }
+                }
+            }
+            Ok(None) => null_count += 1,
+            Err(_) => hover_err += 1,
+        }
+    }
+
+    let receiver_count: usize = lsp_types.receiver_types.values().map(|m| m.len()).sum();
+    eprintln!(
+        "    [ra-hover] {} ok, {} null, {} err | receivers: {}, return_types: {}",
+        hover_ok, null_count, hover_err, receiver_count, lsp_types.return_types.len(),
+    );
+    lsp_types
+}
+
+/// Build hover queries using real source file paths (no stub workspace).
+fn build_hover_queries_direct(
+    chunks: &[crate::parse::ParsedChunk],
+) -> Vec<HoverQuery> {
+    let mut queries = Vec::new();
+    let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        if chunk.let_call_bindings.is_empty() {
+            continue;
+        }
+        let Some((start_line, _end_line)) = chunk.lines else {
+            continue;
+        };
+
+        let file_path = std::path::PathBuf::from(&chunk.file);
+        if !file_path.exists() {
+            continue;
+        }
+
+        let lines = file_cache.entry(chunk.file.clone()).or_insert_with(|| {
+            std::fs::read_to_string(&file_path)
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        });
+
+        for (var_name, _callee) in &chunk.let_call_bindings {
+            let search_start = start_line.saturating_sub(1); // 1-based → 0-based
+            let search_end = lines.len().min(start_line + 500);
+
+            for line_idx in search_start..search_end {
+                let line = &lines[line_idx];
+                if let Some(col) = find_let_var_column(line, var_name) {
+                    queries.push(HoverQuery {
+                        file: chunk.file.clone(),
+                        line: line_idx as u32,
+                        col,
+                        var_name: var_name.clone(),
+                        chunk_idx,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    queries.sort_by(|a, b| {
+        a.file.cmp(&b.file)
+            .then(a.line.cmp(&b.line))
+            .then(a.col.cmp(&b.col))
+    });
+    queries.dedup_by(|a, b| a.file == b.file && a.line == b.line && a.col == b.col);
+
+    queries
+}

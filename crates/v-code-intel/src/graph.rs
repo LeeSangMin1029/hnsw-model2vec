@@ -264,7 +264,7 @@ impl CallGraph {
     pub fn build_full(
         chunks: &[ParsedChunk],
     ) -> Self {
-        Self::build_with_lsp(chunks, &crate::lsp_client::LspTypes::default())
+        Self::build_with_lsp(chunks, &crate::lsp_client::LspTypes::default(), None)
     }
 
     /// Build the call graph with additional LSP-resolved return types.
@@ -275,6 +275,7 @@ impl CallGraph {
     pub fn build_with_lsp(
         chunks: &[ParsedChunk],
         lsp_types: &crate::lsp_client::LspTypes,
+        ra: Option<&v_lsp::instance::RaInstance>,
     ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
@@ -528,8 +529,9 @@ impl CallGraph {
         eprintln!("      [graph] pass 2+ iterative: {:.1}ms ({iter_passes} passes)  RSS: {:.1}MB (+{:.1})", t_iter.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
 
         // RA outgoing+incoming calls: add edges that tree-sitter missed.
+        // resolve_via_ra returns empty when ra=None (tests, fallback).
         let t_ra = std::time::Instant::now();
-        let ra_result = crate::ra_direct::resolve_via_ra(chunks);
+        let ra_result = crate::ra_direct::resolve_via_ra(chunks, ra);
         if !ra_result.edges.is_empty() {
             let mut ra_added = 0usize;
             for &(src, tgt, line) in &ra_result.edges {

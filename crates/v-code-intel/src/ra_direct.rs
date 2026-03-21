@@ -16,25 +16,13 @@ pub struct RaEdges {
 }
 
 /// Build call graph edges using RA's call hierarchy API (both directions).
-pub fn resolve_via_ra(chunks: &[ParsedChunk]) -> RaEdges {
-    let t0 = Instant::now();
-
-    let workspace_root =
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-    let ra = match v_lsp::instance::RaInstance::spawn(&workspace_root) {
-        Ok(ra) => {
-            eprintln!(
-                "    [ra] in-process instance loaded ({:.1}s)",
-                t0.elapsed().as_secs_f64()
-            );
-            ra
-        }
-        Err(e) => {
-            eprintln!("    [ra] in-process spawn failed: {e}");
-            return RaEdges { edges: Vec::new() };
-        }
+/// Build call graph edges using a pre-spawned RA instance.
+/// Returns empty if `ra` is `None`.
+pub fn resolve_via_ra(chunks: &[ParsedChunk], ra: Option<&v_lsp::instance::RaInstance>) -> RaEdges {
+    let Some(ra) = ra else {
+        return RaEdges { edges: Vec::new() };
     };
+    let t0 = Instant::now();
 
     let file_line_to_chunk = build_file_line_map(chunks);
     let mut edge_set: HashSet<(usize, usize, u32)> = HashSet::new();

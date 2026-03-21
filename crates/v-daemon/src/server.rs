@@ -57,6 +57,16 @@ pub fn run(
         .context("Database not found")?;
     let mut state = DaemonState::new(initial.as_deref())?;
 
+    // Spawn RA instance in background (reused across graph/build requests).
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match v_lsp::instance::RaInstance::spawn(&workspace_root) {
+        Ok(ra) => {
+            eprintln!("[daemon] RA instance loaded");
+            state.ra = Some(ra);
+        }
+        Err(e) => eprintln!("[daemon] RA spawn failed (graph/build will retry): {e}"),
+    }
+
     let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
         Ok(l) => l,
         Err(_) if crate::client::is_running() => {

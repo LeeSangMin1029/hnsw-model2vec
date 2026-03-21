@@ -1,6 +1,6 @@
 //! Code intelligence (v-code) daemon handler: graph/build.
 //!
-//! Builds call graphs using tree-sitter type analysis.
+//! Builds call graphs using tree-sitter + RA call hierarchy.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -10,6 +10,7 @@ static GRAPH_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn handle_graph_build(
     params: serde_json::Value,
+    ra: Option<&v_lsp::instance::RaInstance>,
 ) -> anyhow::Result<serde_json::Value> {
     let _guard = GRAPH_LOCK
         .lock()
@@ -29,7 +30,11 @@ pub fn handle_graph_build(
 
     let chunks = v_code_intel::loader::load_chunks(&db)?;
 
-    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
+    let graph = v_code_intel::graph::CallGraph::build_with_lsp(
+        &chunks,
+        &v_code_intel::lsp_client::LspTypes::default(),
+        ra,
+    );
     let _ = graph.save(&db);
 
     eprintln!(

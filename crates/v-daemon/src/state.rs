@@ -150,6 +150,8 @@ pub struct DaemonState {
     last_embed_at: Instant,
     databases: HashMap<PathBuf, DbIndexes>,
     query_cache: QueryCache,
+    /// In-process rust-analyzer instance (spawned once, reused across requests).
+    pub ra: Option<v_lsp::instance::RaInstance>,
 }
 
 impl DaemonState {
@@ -161,6 +163,7 @@ impl DaemonState {
             last_embed_at: Instant::now(),
             databases: HashMap::new(),
             query_cache: QueryCache::global(),
+            ra: None,
         };
 
         // Store the initial DB path but don't load it yet.
