@@ -21,7 +21,6 @@ v-hnsw-storage.workspace = true
 v-hnsw-embed.workspace = true
 v-code-chunk.workspace = true
 v-code-intel.workspace = true
-v-lsp.workspace = true
 v-hnsw-rerank.workspace = true
 v-hnsw-graph.workspace = true
 v-hnsw-search.workspace = true

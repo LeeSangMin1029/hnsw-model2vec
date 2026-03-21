@@ -277,44 +277,25 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Auto-spawn daemon if not running, then try daemon graph/build.
-    // Fallback to local RA spawn if daemon is unavailable.
-    if !v_hnsw_storage::daemon_client::is_running() {
-        eprintln!("    [daemon] not running, spawning...");
-        v_hnsw_storage::daemon_client::spawn_daemon_and_wait(db_path);
-    }
-    if try_daemon_graph_build(&db_path.to_string_lossy()) {
-        eprintln!("    [cache] graph built via daemon");
-        eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
-        return;
-    }
-
-    // Try daemon's resident RA for type collection (avoids spawning a second RA).
-    let (lsp_types, ra) = if v_hnsw_storage::daemon_client::is_running() {
-        match try_daemon_collect_types(&db_path.to_string_lossy()) {
-            Some(types) => {
-                eprintln!("    [daemon] LSP types collected via daemon RA");
-                (types, None)
-            }
-            None => {
-                eprintln!("    [daemon] ra/collect-types failed, falling back to local RA");
-                spawn_local_ra_and_collect(db_path, &chunks, &new_suffixes)
-            }
+    // All RA usage goes through daemon. Never spawn RA locally.
+    if v_hnsw_storage::daemon_client::is_running() {
+        if try_daemon_graph_build(&db_path.to_string_lossy()) {
+            eprintln!("    [cache] graph built via daemon");
+            eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
+            return;
         }
+        eprintln!("    [daemon] graph/build failed, building locally (tree-sitter only)");
     } else {
-        spawn_local_ra_and_collect(db_path, &chunks, &new_suffixes)
-    };
+        eprintln!("    [daemon] not running, building graph locally (tree-sitter only)");
+    }
 
-    // Build set of unchanged files to skip RA call hierarchy queries.
-    let ra_unchanged: std::collections::HashSet<&str> = chunks.iter()
-        .map(|c| c.file.as_str())
-        .filter(|f| !new_suffixes.contains(f))
-        .collect();
-    let ra_skip = if ra_unchanged.is_empty() { None } else { Some(&ra_unchanged) };
+    // Fallback: tree-sitter only graph (no RA).
+    let lsp_types = v_code_intel::loader::load_lsp_types_cache(db_path)
+        .unwrap_or_default();
 
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_with_lsp_filtered(&chunks, &lsp_types, ra.as_ref(), ra_skip);
-    eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
+    let graph = v_code_intel::graph::CallGraph::build_with_lsp(&chunks, &lsp_types, None);
+    eprintln!("    [cache] graph build: {:.1}ms (tree-sitter only)", t3.elapsed().as_secs_f64() * 1000.0);
 
     let t4 = std::time::Instant::now();
     let _ = graph.save(db_path);
@@ -504,70 +485,3 @@ fn try_daemon_graph_build(db_path: &str) -> bool {
     .is_ok()
 }
 
-/// Ask daemon's resident RA to collect LSP types (avoids spawning a second RA).
-fn try_daemon_collect_types(db_path: &str) -> Option<v_code_intel::lsp_client::LspTypes> {
-    let result = v_hnsw_storage::daemon_client::daemon_rpc(
-        "ra/collect-types",
-        serde_json::json!({ "db": db_path }),
-        120,
-    )
-    .ok()?;
-    serde_json::from_value(result).ok()
-}
-
-/// Spawn a local RA instance and collect LSP types (fallback when daemon is unavailable).
-fn spawn_local_ra_and_collect<'a>(
-    db_path: &std::path::Path,
-    chunks: &[v_code_intel::parse::ParsedChunk],
-    new_suffixes: &std::collections::HashSet<&'a str>,
-) -> (v_code_intel::lsp_client::LspTypes, Option<v_lsp::instance::RaInstance>) {
-    let workspace_root = std::env::current_dir().ok();
-    let ra = workspace_root.as_ref().and_then(|root| {
-        eprintln!("    [ra] spawning RA instance...");
-        match v_lsp::instance::RaInstance::spawn(root) {
-            Ok(r) => {
-                eprintln!("    [ra] RA ready");
-                Some(r)
-            }
-            Err(e) => {
-                eprintln!("    [ra] spawn failed: {e}");
-                None
-            }
-        }
-    });
-
-    let lsp_types = if let Some(ref ra) = ra {
-        let t_hover = std::time::Instant::now();
-
-        let cached = v_code_intel::loader::load_lsp_types_cache(db_path);
-        let types = if let Some(mut cached_types) = cached {
-            let unchanged: std::collections::HashSet<&str> = chunks.iter()
-                .map(|c| c.file.as_str())
-                .filter(|f| !new_suffixes.contains(f))
-                .collect();
-            if unchanged.len() == chunks.iter().map(|c| c.file.as_str()).collect::<std::collections::HashSet<_>>().len() {
-                eprintln!("    [ra-hover] no changed chunks, using cache");
-            } else {
-                eprintln!("    [ra-hover] skipping {} unchanged files, querying changed chunks",
-                    unchanged.len());
-                let delta = v_code_intel::lsp_client::collect_types_via_ra_filtered(
-                    chunks, ra, Some(&unchanged),
-                );
-                cached_types.return_types.extend(delta.return_types);
-                cached_types.receiver_types.extend(delta.receiver_types);
-            }
-            cached_types
-        } else {
-            v_code_intel::lsp_client::collect_types_via_ra(chunks, ra)
-        };
-
-        eprintln!("    [ra-hover] type collection: {:.1}s", t_hover.elapsed().as_secs_f64());
-        v_code_intel::loader::save_lsp_types_cache(db_path, &types);
-        types
-    } else {
-        v_code_intel::loader::load_lsp_types_cache(db_path)
-            .unwrap_or_default()
-    };
-
-    (lsp_types, ra)
-}

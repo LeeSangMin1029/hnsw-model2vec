@@ -5399,7 +5399,6 @@ dependencies = [
  "v-hnsw-rerank",
  "v-hnsw-search",
  "v-hnsw-storage",
- "v-lsp",
 ]
 
 [[package]]
