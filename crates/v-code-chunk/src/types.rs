@@ -149,6 +149,9 @@ pub struct CodeChunk {
     /// Enum variant names (for enum chunks only).
     /// Used to distinguish `Type::Variant(args)` from `Type::method(args)`.
     pub enum_variants: Vec<String>,
+    /// Whether this function has a test attribute (`#[test]`, `@Test`, etc.).
+    /// Detected from tree-sitter AST — language-specific.
+    pub is_test: bool,
 }
 
 impl CodeChunk {

@@ -51,6 +51,9 @@ pub struct ParsedChunk {
     /// Used to distinguish `Type::Variant(args)` from `Type::method(args)`.
     #[serde(default)]
     pub enum_variants: Vec<String>,
+    /// Whether this function has a test attribute (`#[test]`, `@Test`, etc.).
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 impl ParsedChunk {
@@ -84,6 +87,7 @@ impl ParsedChunk {
             return_type: chunk.return_type.clone(),
             field_accesses: chunk.field_accesses.clone(),
             enum_variants: chunk.enum_variants.clone(),
+            is_test: chunk.is_test,
         }
     }
 }
@@ -284,6 +288,7 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
         field_accesses,
         return_type,
         enum_variants,
+        is_test: false, // text parsing doesn't have attribute info; rely on path/name fallback
     })
 }
 

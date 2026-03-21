@@ -117,6 +117,7 @@ fn lines_str_with_lines() {
         field_accesses: vec![],
         return_type: None,
         enum_variants: vec![],
+        is_test: false,
     };
     assert_eq!(lines_str(&c), "10-20");
 }
@@ -142,6 +143,7 @@ fn lines_str_no_lines() {
         field_accesses: vec![],
         return_type: None,
         enum_variants: vec![],
+        is_test: false,
     };
     assert_eq!(lines_str(&c), "");
 }

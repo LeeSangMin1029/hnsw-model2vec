@@ -426,7 +426,7 @@ pub fn is_test_path(path: &str) -> bool {
 }
 
 pub fn is_test_chunk(c: &ParsedChunk) -> bool {
-    is_test_path(&c.file) || c.name.starts_with("test_")
+    c.is_test || is_test_path(&c.file) || c.name.starts_with("test_")
 }
 
 // ── Import map ──────────────────────────────────────────────────────

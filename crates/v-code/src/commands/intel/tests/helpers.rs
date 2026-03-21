@@ -20,6 +20,7 @@ pub fn chunk(name: &str, file: &str, calls: &[&str]) -> ParsedChunk {
         field_accesses: vec![],
         return_type: None,
         enum_variants: vec![],
+        is_test: false,
     }
 }
 
@@ -43,5 +44,6 @@ pub fn test_chunk(name: &str, file: &str, calls: &[&str]) -> ParsedChunk {
         field_accesses: vec![],
         return_type: None,
         enum_variants: vec![],
+        is_test: false,
     }
 }

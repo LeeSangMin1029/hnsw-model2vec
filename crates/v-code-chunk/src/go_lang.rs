@@ -114,7 +114,7 @@ impl GoCodeChunker {
                 let_call_bindings: Vec::new(),
                 field_accesses: Vec::new(),
                 enum_variants: Vec::new(),
-                return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: Vec::new(), string_args: Vec::new(), param_flows: Vec::new(),
+                return_type: None, ast_hash: 0, body_hash: 0, sub_blocks: Vec::new(), string_args: Vec::new(), param_flows: Vec::new(), is_test: false,
             });
         }
     }

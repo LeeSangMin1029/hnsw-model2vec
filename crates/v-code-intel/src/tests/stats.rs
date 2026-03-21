@@ -23,6 +23,7 @@ fn make_chunk(kind: &str, name: &str, file: &str) -> ParsedChunk {
         field_accesses: vec![],
         return_type: None,
         enum_variants: vec![],
+        is_test: false,
     }
 }
 

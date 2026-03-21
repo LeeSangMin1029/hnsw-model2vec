@@ -84,6 +84,7 @@ pub fn simple_type_chunk(
         let_call_bindings: Vec::new(),
         field_accesses: Vec::new(),
         enum_variants: Vec::new(),
+        is_test: false,
     })
 }
 
@@ -205,6 +206,8 @@ pub fn build_chunk(
         Vec::new()
     };
 
+    let is_test = is_func && has_test_attribute_with_src(node, src);
+
     Some(CodeChunk {
         text,
         kind,
@@ -233,6 +236,7 @@ pub fn build_chunk(
         let_call_bindings,
         field_accesses,
         enum_variants,
+        is_test,
     })
 }
 
@@ -320,6 +324,7 @@ pub fn extract_methods(
         let local_types = walk_for_let_types(&actual_child, src);
         let let_call_bindings = walk_for_let_call_bindings(&actual_child, src);
         let field_accesses = walk_for_field_accesses(&actual_child, src);
+        let is_test = has_test_attribute_with_src(&actual_child, src);
 
         chunks.push(CodeChunk {
             text,
@@ -349,6 +354,7 @@ pub fn extract_methods(
             let_call_bindings,
             field_accesses,
             enum_variants: Vec::new(),
+            is_test,
         });
     }
 }
@@ -435,4 +441,43 @@ pub(crate) fn unwrap_wrapper<'a>(
         }
     }
     (*child, "")
+}
+
+/// Check if a function node has a test attribute (`#[test]`, `#[tokio::test]`, etc.).
+///
+/// Checks prev siblings for attribute/decorator/annotation nodes.
+/// Works for Rust (`attribute_item`), Python (`decorator`), Java (`annotation`).
+pub(crate) fn has_test_attribute_with_src(node: &tree_sitter::Node, src: &[u8]) -> bool {
+    let mut sibling = node.prev_named_sibling();
+    while let Some(s) = sibling {
+        match s.kind() {
+            "attribute_item" | "attribute" => {
+                if let Ok(text) = s.utf8_text(src) {
+                    let lower = text.to_lowercase();
+                    if lower.contains("test") {
+                        return true;
+                    }
+                }
+            }
+            "decorator" | "decorator_list" => {
+                if let Ok(text) = s.utf8_text(src) {
+                    let lower = text.to_lowercase();
+                    if lower.contains("test") || lower.contains("pytest") {
+                        return true;
+                    }
+                }
+            }
+            "annotation" | "modifiers" => {
+                if let Ok(text) = s.utf8_text(src) {
+                    let lower = text.to_lowercase();
+                    if lower.contains("test") {
+                        return true;
+                    }
+                }
+            }
+            _ => break,
+        }
+        sibling = s.prev_named_sibling();
+    }
+    false
 }
