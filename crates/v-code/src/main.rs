@@ -45,23 +45,24 @@ fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Symbols { db, name, kind, format, include_tests, limit, compact } => {
-            intel::run_symbols(db, name, kind, format, include_tests, limit, compact || env_compact())
+        Commands::Aliases { db } => intel::run_aliases(db),
+        Commands::Symbols { db, name, kind, include_tests, limit, compact } => {
+            intel::run_symbols(db, name, kind, include_tests, limit, compact || env_compact())
         }
-        Commands::Context { db, symbol, depth, format, source, include_tests } => {
-            intel::run_context(db, symbol, depth, format, source, include_tests)
+        Commands::Context { db, symbol, depth, source, include_tests } => {
+            intel::run_context(db, symbol, depth, source, include_tests)
         }
-        Commands::Deps { db, file, format, depth } => {
-            intel::deps::run_deps(db, file, format, depth)
+        Commands::Deps { db, file, depth } => {
+            intel::deps::run_deps(db, file, depth)
         }
-        Commands::Blast { db, symbol, depth, format, include_tests } => {
-            intel::run_blast(db, symbol, depth, format, include_tests)
+        Commands::Blast { db, symbol, depth, include_tests } => {
+            intel::run_blast(db, symbol, depth, include_tests)
         }
-        Commands::Jump { db, symbol, depth, format } => {
-            intel::run_jump(db, symbol, depth, format)
+        Commands::Jump { db, symbol, depth } => {
+            intel::run_jump(db, symbol, depth)
         }
-        Commands::Trace { db, from, to, format } => {
-            intel::run_trace(db, from, to, format)
+        Commands::Trace { db, from, to } => {
+            intel::run_trace(db, from, to)
         }
         Commands::Detail {
             db, symbol, add, decision, why, constraint, rejected,
@@ -77,8 +78,8 @@ fn run() -> anyhow::Result<()> {
                 db, threshold, exclude_tests, k, json, ast_mode: ast, all_mode: all, min_lines, min_sub_lines, analyze,
             })
         }
-        Commands::Stats { db, format } => intel::run_stats(db, format),
-        Commands::Coverage { db, depth, file, format } => intel::run_coverage(db, depth, file, format),
+        Commands::Stats { db } => intel::run_stats(db),
+        Commands::Coverage { db, depth, file } => intel::run_coverage(db, depth, file),
         Commands::Strings { db, query, callee } => intel::run_strings(db, query, callee),
         Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),

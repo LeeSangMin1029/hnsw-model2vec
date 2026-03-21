@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::intel::OutputFormat;
-
 /// v-code: Code intelligence CLI.
 #[derive(Parser)]
 #[command(name = "v-code")]
@@ -18,6 +16,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 #[expect(clippy::large_enum_variant, reason = "clap derive enums are parsed once, size is irrelevant")]
 pub enum Commands {
+    /// Print global path alias mapping (stable across all commands).
+    Aliases {
+        /// Path to the database directory.
+        db: PathBuf,
+    },
     /// List symbols in the database (functions, structs, enums, impls).
     Symbols {
         /// Path to the database directory.
@@ -28,9 +31,6 @@ pub enum Commands {
         /// Filter by kind (function, struct, enum, impl, trait, etc.).
         #[arg(short, long)]
         kind: Option<String>,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
         /// Include test symbols in results (excluded by default).
         #[arg(long)]
         include_tests: bool,
@@ -51,9 +51,6 @@ pub enum Commands {
         /// Max BFS depth (default: 1).
         #[arg(long, default_value = "1")]
         depth: u32,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
         /// Include source code inline for each entry.
         #[arg(long, short = 's')]
         source: bool,
@@ -67,9 +64,6 @@ pub enum Commands {
         db: PathBuf,
         /// Show dependencies for a specific file only (suffix match).
         file: Option<String>,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
         /// Transitive dependency depth (default: 1 = direct only).
         #[arg(long, default_value = "1")]
         depth: usize,
@@ -84,9 +78,6 @@ pub enum Commands {
         /// Max BFS depth (default: 2).
         #[arg(long, default_value = "2")]
         depth: u32,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
         /// Include test symbols in results (hidden by default).
         #[arg(long)]
         include_tests: bool,
@@ -100,9 +91,6 @@ pub enum Commands {
         from: String,
         /// Target symbol name.
         to: String,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
     },
     /// View or manage reasoning (design decisions, history) for a symbol.
     #[command(visible_alias = "dt")]
@@ -173,9 +161,6 @@ pub enum Commands {
         /// Max DFS depth (default: 2).
         #[arg(long, default_value = "2")]
         depth: u32,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
     },
     /// Find duplicate code (token Jaccard default, --ast structural).
     #[command(visible_alias = "dup")]
@@ -214,9 +199,6 @@ pub enum Commands {
     Stats {
         /// Path to the database directory.
         db: PathBuf,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
     },
     /// Per-crate test coverage with per-function test counts.
     #[command(visible_alias = "cov")]
@@ -229,9 +211,6 @@ pub enum Commands {
         /// Filter by file path suffix (e.g. "add.rs" or "commands/intel").
         #[arg(long)]
         file: Option<String>,
-        /// Output format (text or json).
-        #[arg(long, default_value = "text")]
-        format: OutputFormat,
     },
     /// Search string literal arguments across all chunks.
     #[command(visible_alias = "str")]

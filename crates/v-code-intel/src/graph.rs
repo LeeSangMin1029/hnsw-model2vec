@@ -745,6 +745,15 @@ impl CallGraph {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
+
+    /// Build a global alias map from all files in the graph.
+    ///
+    /// Returns a stable (alphabetically sorted) mapping that is consistent
+    /// across all commands using the same graph.
+    pub fn global_aliases(&self) -> (std::collections::BTreeMap<String, String>, Vec<(String, String)>) {
+        let all: Vec<&str> = self.files.iter().map(|f| crate::helpers::relative_path(f)).collect();
+        crate::helpers::build_path_aliases(&all)
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

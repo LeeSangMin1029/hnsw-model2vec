@@ -1,30 +1,33 @@
 //! CLI command handlers for code-intel subcommands.
 //!
 //! Each `run_*` function corresponds to a CLI subcommand (stats, symbols,
-//! def, refs, impact, trace). These handle text/JSON output and
-//! caching; pure analysis logic lives in `v-code-intel`.
+//! context, blast, jump, trace, etc.). Pure analysis logic lives in `v-code-intel`.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 
+use super::print_grouped;
 use super::{
-    OutputFormat, cached_json, print_grouped,
-};
-use super::{
-    build_bfs_json,
-    build_stats, stats_to_json, load_chunks, load_or_build_graph,
-    format_lines_opt, grouped_json,
+    build_stats, load_chunks, load_or_build_graph,
+    format_lines_opt,
     graph, impact, trace, ParsedChunk,
 };
 
 // ── Commands ─────────────────────────────────────────────────────────────
 
-/// `v-hnsw stats` — per-crate summary of code symbols.
-pub fn run_stats(db: PathBuf, format: OutputFormat) -> Result<()> {
-    if matches!(format, OutputFormat::Json) {
-        return cached_json(&db, "stats", || compute_stats_json(&db));
+/// `v-code aliases` — print global path alias mapping.
+pub fn run_aliases(db: PathBuf) -> Result<()> {
+    let graph = load_or_build_graph(&db)?;
+    let (_alias_map, legend) = graph.global_aliases();
+    for (alias, dir) in &legend {
+        println!("{alias} = {dir}");
     }
+    Ok(())
+}
+
+/// `v-hnsw stats` — per-crate summary of code symbols.
+pub fn run_stats(db: PathBuf) -> Result<()> {
     let chunks = load_chunks(&db)?;
     let stats = build_stats(&chunks);
     println!(
@@ -50,33 +53,18 @@ pub fn run_stats(db: PathBuf, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn compute_stats_json(db: &std::path::Path) -> Result<String> {
-    let chunks = load_chunks(db)?;
-    let stats = build_stats(&chunks);
-    Ok(serde_json::to_string(&stats_to_json(&stats))?)
-}
-
 /// `v-hnsw symbols` — list symbols matching filters.
 pub fn run_symbols(
     db: PathBuf,
     name: Option<String>,
     kind: Option<String>,
-    format: OutputFormat,
     include_tests: bool,
     limit: Option<usize>,
     compact: bool,
 ) -> Result<()> {
     let is_file_query = name.as_deref().is_some_and(looks_like_file_path);
 
-    let key = format!(
-        "symbols:{}:{}:{}:{}:{}",
-        name.as_deref().unwrap_or(""),
-        kind.as_deref().unwrap_or(""),
-        if include_tests { "t" } else { "" },
-        limit.map_or(String::new(), |l| l.to_string()),
-        if is_file_query { "f" } else { "" },
-    );
-    run_chunk_query(&db, format, &key,
+    run_chunk_query(&db,
         |c| {
             if let Some(ref n) = name {
                 if is_file_query {
@@ -107,7 +95,7 @@ pub fn run_symbols(
     )?;
 
     // Show trait implementations if any trait was in the results (name mode only).
-    if !is_file_query && !matches!(format, OutputFormat::Json) {
+    if !is_file_query {
         print_trait_impls_if_relevant(&db, name.as_deref())?;
     }
     Ok(())
@@ -163,7 +151,6 @@ pub fn run_context(
     db: PathBuf,
     symbol: String,
     depth: u32,
-    format: OutputFormat,
     source: bool,
     include_tests: bool,
 ) -> Result<()> {
@@ -175,12 +162,6 @@ pub fn run_context(
 
     if result.seeds.is_empty() {
         println!("No symbol found matching \"{symbol}\".");
-        return Ok(());
-    }
-
-    if matches!(format, OutputFormat::Json) {
-        let json = build_context_json(&graph, &result);
-        println!("{}", serde_json::to_string(&json)?);
         return Ok(());
     }
 
@@ -210,40 +191,17 @@ pub fn run_context(
     }
 
     // Header with counts
-    let ext_count = result.unresolved_calls.len();
     let counts = format!(
-        "{} caller, {} callee, {} type, {} test{}",
+        "{} caller, {} callee, {} type, {} test",
         result.callers.len(), result.callees.len(),
         result.types.len(), result.tests.len(),
-        if ext_count > 0 { format!(", {} extern", ext_count) } else { String::new() },
     );
+    let (alias_map, _) = graph.global_aliases();
     println!("=== context: {symbol} ({counts}) ===\n");
-    print_file_grouped(&graph, &entries, source);
+    print_file_grouped(&graph, &entries, source, &alias_map);
 
     if !include_tests && !result.tests.is_empty() {
         println!("  {} tests (use --include-tests to show)\n", result.tests.len());
-    }
-
-    // Show unresolved/external calls if any.
-    if !result.unresolved_calls.is_empty() {
-        println!("@ [extern]");
-        for call in &result.unresolved_calls {
-            println!("  {call}");
-        }
-        println!();
-    }
-
-    // Show string args from seed chunks.
-    let all_string_args: Vec<_> = result.seeds.iter()
-        .flat_map(|&s| graph.string_args.get(s as usize).into_iter().flatten())
-        .collect();
-    if !all_string_args.is_empty() {
-        println!("@ [strings]");
-        for (callee, value, line, pos) in &all_string_args {
-            let line_display = if *line > 0 { format!(":{line}") } else { String::new() };
-            println!("  {callee}(\"{value}\"){line_display}  arg[{pos}]");
-        }
-        println!();
     }
 
     // Show field access summary for struct seeds.
@@ -271,75 +229,17 @@ pub fn run_context(
     Ok(())
 }
 
-/// Build a JSON object for a graph node, optionally including depth/signature.
-fn node_json(graph: &graph::CallGraph, idx: u32, depth: Option<u32>, sig: bool) -> serde_json::Value {
-    let i = idx as usize;
-    let mut obj = serde_json::json!({
-        "f": super::relative_path(&graph.files[i]),
-        "l": super::format_lines_str_opt(graph.lines[i]),
-        "k": &graph.kinds[i],
-        "n": &graph.names[i],
-        "t": graph.is_test[i],
-    });
-    if let Some(d) = depth {
-        obj["d"] = serde_json::json!(d);
-    }
-    if sig {
-        obj["sig"] = serde_json::json!(graph.signatures[i].as_deref().unwrap_or(""));
-    }
-    obj
-}
-
-fn build_context_json(
-    graph: &graph::CallGraph,
-    result: &v_code_intel::context_cmd::ContextResult,
-) -> serde_json::Value {
-    let string_args: Vec<_> = result.seeds.iter()
-        .flat_map(|&s| graph.string_args.get(s as usize).into_iter().flatten())
-        .map(|(callee, value, line, pos)| serde_json::json!({
-            "callee": callee, "value": value, "line": line, "pos": pos,
-        }))
-        .collect();
-    serde_json::json!({
-        "definition": result.seeds.iter().map(|&idx| node_json(graph, idx, None, true)).collect::<Vec<_>>(),
-        "callers": result.callers.iter().map(|e| node_json(graph, e.idx, Some(e.depth), false)).collect::<Vec<_>>(),
-        "callees": result.callees.iter().map(|e| node_json(graph, e.idx, Some(e.depth), false)).collect::<Vec<_>>(),
-        "types": result.types.iter().map(|&idx| node_json(graph, idx, None, false)).collect::<Vec<_>>(),
-        "tests": result.tests.iter().map(|&idx| node_json(graph, idx, None, false)).collect::<Vec<_>>(),
-        "string_args": string_args,
-    })
-}
-
 /// `v-code blast <db> <symbol> --depth N [--include-tests]`
 pub fn run_blast(
     db: PathBuf,
     symbol: String,
     depth: u32,
-    format: OutputFormat,
     include_tests: bool,
 ) -> Result<()> {
     use v_code_intel::blast;
 
-    if matches!(format, OutputFormat::Json) {
-        let key = format!("blast:{symbol}:{depth}:{include_tests}");
-        return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db)?;
-            let seeds = graph.resolve(&symbol);
-            let all_entries = impact::bfs_reverse(&graph, &seeds, depth);
-            let summary = blast::summarize_blast(&graph, &all_entries);
-            let entries = filter_test_entries(all_entries, include_tests);
-            let mut json = build_bfs_json(&graph, &entries);
-            if let serde_json::Value::Object(ref mut map) = json {
-                map.insert("total_affected".to_owned(), serde_json::json!(summary.total_affected));
-                map.insert("affected_files".to_owned(), serde_json::json!(summary.affected_files));
-                map.insert("prod_count".to_owned(), serde_json::json!(summary.prod_count));
-                map.insert("test_count".to_owned(), serde_json::json!(summary.test_count));
-            }
-            Ok(serde_json::to_string(&json)?)
-        });
-    }
-
     let graph = load_or_build_graph(&db)?;
+    let (alias_map, _) = graph.global_aliases();
 
     // Field-level blast: "Type.field" notation
     if let Some(dot) = symbol.find('.') {
@@ -371,7 +271,7 @@ pub fn run_blast(
         }
         println!("=== blast: {symbol} ({} field accessors, {} affected, {} prod, {} test) ===\n",
             field_chunks.len(), summary.total_affected, summary.prod_count, summary.test_count);
-        print_file_grouped(&graph, &tagged, false);
+        print_file_grouped(&graph, &tagged, false, &alias_map);
         return Ok(());
     }
 
@@ -395,7 +295,7 @@ pub fn run_blast(
 
     println!("=== blast: {symbol} ({} affected, {} prod, {} test) ===\n",
         summary.total_affected, summary.prod_count, summary.test_count);
-    print_file_grouped(&graph, &tagged, false);
+    print_file_grouped(&graph, &tagged, false, &alias_map);
 
     Ok(())
 }
@@ -405,27 +305,16 @@ pub fn run_jump(
     db: PathBuf,
     symbol: String,
     depth: u32,
-    format: OutputFormat,
 ) -> Result<()> {
     use v_code_intel::jump;
 
-    if matches!(format, OutputFormat::Json) {
-        let key = format!("jump:{symbol}:{depth}");
-        return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db)?;
-            let seeds = graph.resolve(&symbol);
-            let tree = jump::build_flow_tree(&graph, &seeds, depth);
-            let json = jump::tree_to_json(&graph, &tree);
-            Ok(serde_json::to_string(&json)?)
-        });
-    }
-
     let graph = load_or_build_graph(&db)?;
     let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
+    let (alias_map, _legend) = graph.global_aliases();
 
     println!("=== Execution Flow: {symbol} ===\n");
     let tree = jump::build_flow_tree(&graph, &seeds, depth);
-    print!("{}", jump::render_tree(&graph, &tree));
+    print!("{}", jump::render_tree(&graph, &tree, &alias_map));
 
     Ok(())
 }
@@ -455,30 +344,16 @@ pub fn run_trace(
     db: PathBuf,
     from: String,
     to: String,
-    format: OutputFormat,
 ) -> Result<()> {
-    if matches!(format, OutputFormat::Json) {
-        let key = format!("trace:{from}:{to}");
-        return cached_json(&db, &key, || {
-            let graph = load_or_build_graph(&db)?;
-            let sources = graph.resolve(&from);
-            let targets = graph.resolve(&to);
-            let json = match trace::bfs_shortest_path(&graph, &sources, &targets) {
-                Some(path) => trace::build_json(&graph, &path),
-                None => serde_json::json!({ "path": null, "hops": null }),
-            };
-            Ok(serde_json::to_string(&json)?)
-        });
-    }
-
     let graph = load_or_build_graph(&db)?;
+    let (alias_map, _) = graph.global_aliases();
     let Some(sources) = resolve_symbol(&graph, &from) else { return Ok(()) };
     let Some(targets) = resolve_symbol(&graph, &to) else { return Ok(()) };
 
     match trace::bfs_shortest_path(&graph, &sources, &targets) {
         Some(path) => {
             println!("Call path from \"{from}\" to \"{to}\" ({} hops):\n", path.len() - 1);
-            print_trace_path(&graph, &path);
+            print_trace_path(&graph, &path, &alias_map);
         }
         None => {
             println!("No call path found from \"{from}\" to \"{to}\".");
@@ -495,9 +370,10 @@ pub fn run_strings(
     callee_filter: Option<String>,
 ) -> Result<()> {
     use std::collections::BTreeMap;
-    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+    use v_code_intel::helpers::apply_alias;
 
     let graph = load_or_build_graph(&db)?;
+    let (alias_map, _) = graph.global_aliases();
     let lower = query.to_lowercase();
     let callee_lower = callee_filter.as_ref().map(|f| f.to_lowercase());
 
@@ -527,7 +403,6 @@ pub fn run_strings(
         .iter()
         .map(|(idx, ..)| super::relative_path(&graph.files[*idx as usize]))
         .collect();
-    let (alias_map, legend) = build_path_aliases(&files);
 
     type MatchRef<'a> = &'a (u32, &'a str, &'a str, u32, u8);
     let mut groups: BTreeMap<&str, Vec<MatchRef<'_>>> = BTreeMap::new();
@@ -546,12 +421,6 @@ pub fn run_strings(
         }
         println!();
     }
-
-    if !legend.is_empty() {
-        for (alias, dir) in &legend {
-            println!("{alias} = {dir}");
-        }
-    }
     Ok(())
 }
 
@@ -563,22 +432,16 @@ pub fn run_flow(
 ) -> Result<()> {
     use std::collections::BTreeMap;
     use v_code_intel::flow_cmd;
-    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+    use v_code_intel::helpers::apply_alias;
 
     let graph = load_or_build_graph(&db)?;
+    let (alias_map, _) = graph.global_aliases();
     let paths = flow_cmd::trace_string_flow(&graph, &query, depth);
 
     if paths.is_empty() {
         println!("No string flow matching \"{query}\" found.");
         return Ok(());
     }
-
-    // Collect all files across all paths for alias building
-    let all_files: Vec<&str> = paths
-        .iter()
-        .flat_map(|p| p.iter().map(|e| super::relative_path(&graph.files[e.chunk_idx as usize])))
-        .collect();
-    let (alias_map, legend) = build_path_aliases(&all_files);
 
     // Group flows by their origin file (first step's file)
     let mut groups: BTreeMap<&str, Vec<(usize, &Vec<flow_cmd::FlowStep>)>> = BTreeMap::new();
@@ -617,38 +480,25 @@ pub fn run_flow(
         }
         println!();
     }
-
-    if !legend.is_empty() {
-        for (alias, dir) in &legend {
-            println!("{alias} = {dir}");
-        }
-    }
     Ok(())
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────
 
-/// Shared runner for chunk-filter commands (symbols, def).
-#[expect(clippy::too_many_arguments)]
+/// Shared runner for chunk-filter commands (symbols).
 fn run_chunk_query(
     db: &std::path::Path,
-    format: OutputFormat,
-    cache_key: &str,
     filter: impl Fn(&ParsedChunk) -> bool,
     empty_msg: &str,
     header: impl FnOnce(usize) -> String,
     limit: Option<usize>,
     compact: bool,
 ) -> Result<()> {
-    if matches!(format, OutputFormat::Json) {
-        return cached_json(db, cache_key, || {
-            let chunks = load_chunks(db)?;
-            let mut filtered: Vec<&ParsedChunk> = chunks.iter().filter(|c| filter(c)).collect();
-            if let Some(n) = limit { filtered.truncate(n); }
-            Ok(serde_json::to_string(&grouped_json(&filtered))?)
-        });
-    }
     let chunks = load_chunks(db)?;
+    // Compute aliases from ALL chunks (not just filtered) for global consistency.
+    let all_files: Vec<&str> = chunks.iter().map(|c| v_code_intel::helpers::relative_path(&c.file)).collect();
+    let (alias_map, _legend) = v_code_intel::helpers::build_path_aliases(&all_files);
+
     let filtered: Vec<&ParsedChunk> = chunks.iter().filter(|c| filter(c)).collect();
     let total = filtered.len();
     let display: Vec<&ParsedChunk> = if let Some(n) = limit {
@@ -661,7 +511,7 @@ fn run_chunk_query(
     } else {
         let suffix = if let Some(n) = limit { format!(" (showing {}/{})", display.len().min(n), total) } else { String::new() };
         println!("{}{suffix}", header(total));
-        print_grouped(&display, compact);
+        print_grouped(&display, compact, &alias_map);
     }
     Ok(())
 }
@@ -690,31 +540,55 @@ struct TaggedEntry {
 /// [A] = crates/v-hnsw-search/src/bm25/
 /// [B] = crates/v-hnsw-search/src/bm25/
 /// ```
-fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry], show_source: bool) {
+fn print_file_grouped(
+    graph: &graph::CallGraph,
+    entries: &[TaggedEntry],
+    show_source: bool,
+    alias_map: &std::collections::BTreeMap<String, String>,
+) {
     use std::collections::BTreeMap;
-    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+    use v_code_intel::helpers::apply_alias;
 
     if entries.is_empty() {
         return;
     }
 
-    // Collect all file paths
-    let files: Vec<&str> = entries
+    // Deduplicate: if same idx appears in multiple roles, keep highest priority.
+    // Priority: def > caller > callee > type > test
+    let role_priority = |tag: &str| -> u8 {
+        match tag {
+            "def" => 0, "target" | "field" => 0,
+            "caller" | "d1" | "d2" | "d3+" => 1,
+            "callee" => 2,
+            "type" => 3,
+            "test" => 4,
+            _ => 5,
+        }
+    };
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut deduped: Vec<&TaggedEntry> = Vec::new();
+    // Sort by priority first, then deduplicate
+    let mut all_entries: Vec<&TaggedEntry> = entries.iter().collect();
+    all_entries.sort_by_key(|e| role_priority(e.tag));
+    for e in &all_entries {
+        if seen.insert(e.idx) {
+            deduped.push(e);
+        }
+    }
+
+    // Re-collect files and re-group after dedup
+    let files: Vec<&str> = deduped
         .iter()
         .map(|e| super::relative_path(&graph.files[e.idx as usize]))
         .collect();
-
-    let (alias_map, legend) = build_path_aliases(&files);
-
-    // Group entries by file, preserving insertion order per file
     let mut groups: BTreeMap<&str, Vec<&TaggedEntry>> = BTreeMap::new();
-    for (entry, file) in entries.iter().zip(files.iter()) {
+    for (entry, file) in deduped.iter().zip(files.iter()) {
         groups.entry(file).or_default().push(entry);
     }
 
     // Print each file group
     for (file, items) in &groups {
-        let short = apply_alias(file, &alias_map);
+        let short = apply_alias(file, alias_map);
         println!("@ {short}");
         for e in items {
             let i = e.idx as usize;
@@ -723,11 +597,12 @@ fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry], show_so
             let name = &graph.names[i];
             let test_marker = if graph.is_test[i] { " [test]" } else { "" };
             let call_site = if e.call_line > 0 {
-                format!("  → :{}", e.call_line)
+                format!(" → :{}", e.call_line)
             } else {
                 String::new()
             };
-            println!("  [{}] {lines} {kind} {name}{test_marker}{call_site}", e.tag);
+            let kind_tag = if *kind == "function" { String::new() } else { format!("[{kind}] ") };
+            println!("  [{}] {lines} {kind_tag}{name}{test_marker}{call_site}", e.tag);
             if e.sig
                 && let Some(s) = &graph.signatures[i] {
                     println!("    {s}");
@@ -738,12 +613,6 @@ fn print_file_grouped(graph: &graph::CallGraph, entries: &[TaggedEntry], show_so
                 }
         }
         println!();
-    }
-
-    if !legend.is_empty() {
-        for (alias, dir) in &legend {
-            println!("{alias} = {dir}");
-        }
     }
 }
 
@@ -765,17 +634,17 @@ fn print_source_lines(file_path: &str, start: usize, end: usize) {
     println!("    ```");
 }
 
-fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
-    use v_code_intel::helpers::{apply_alias, build_path_aliases};
-    let files: Vec<&str> = path.iter()
-        .map(|&idx| super::relative_path(&graph.files[idx as usize]))
-        .collect();
-    let (alias_map, legend) = build_path_aliases(&files);
+fn print_trace_path(
+    graph: &graph::CallGraph,
+    path: &[u32],
+    alias_map: &std::collections::BTreeMap<String, String>,
+) {
+    use v_code_intel::helpers::apply_alias;
 
     for (step, &idx) in path.iter().enumerate() {
         let i = idx as usize;
         let file = super::relative_path(&graph.files[i]);
-        let short_file = apply_alias(file, &alias_map);
+        let short_file = apply_alias(file, alias_map);
         let name = &graph.names[i];
         let lines = format_lines_opt(graph.lines[i]);
 
@@ -784,12 +653,6 @@ fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
         println!("  {indent}{arrow}{short_file}{lines}  {name}");
     }
     println!();
-    if !legend.is_empty() {
-        for (alias, dir) in &legend {
-            println!("{alias} = {dir}");
-        }
-        println!();
-    }
 }
 
 
@@ -798,7 +661,6 @@ pub fn run_coverage(
     db: PathBuf,
     depth: u32,
     file_filter: Option<String>,
-    format: OutputFormat,
 ) -> Result<()> {
     use std::collections::{BTreeMap, VecDeque};
     use v_code_intel::helpers::extract_crate_name;
@@ -868,34 +730,6 @@ pub fn run_coverage(
         });
     }
 
-    if matches!(format, OutputFormat::Json) {
-        let mut crates_json = serde_json::Map::new();
-        for (name, stats) in &crate_data {
-            let fns: Vec<serde_json::Value> = stats.functions.iter().map(|f| {
-                serde_json::json!({
-                    "name": f.name,
-                    "file": super::relative_path(&f.file),
-                    "lines": format_lines_opt(f.lines),
-                    "tests": f.test_count,
-                })
-            }).collect();
-            crates_json.insert(name.clone(), serde_json::json!({
-                "prod_fn": stats.prod_fn,
-                "test_fn": stats.test_fn,
-                "tested": stats.tested,
-                "untested": stats.untested,
-                "coverage": if stats.prod_fn > 0 {
-                    format!("{:.1}%", stats.tested as f64 / stats.prod_fn as f64 * 100.0)
-                } else {
-                    "N/A".to_owned()
-                },
-                "functions": fns,
-            }));
-        }
-        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(crates_json))?);
-        return Ok(());
-    }
-
     // Text output: per-crate summary table.
     println!("=== coverage (BFS depth {depth}) ===\n");
     println!(
@@ -931,9 +765,10 @@ pub fn run_coverage(
         "total", total.prod_fn, total.test_fn, total.tested, total.untested, total_pct
     );
 
-    // Detail: untested functions grouped by crate.
+    // Detail: untested functions grouped by crate, using global aliases.
     let any_untested = crate_data.values().any(|s| s.untested > 0);
     if any_untested {
+        let (alias_map, _) = graph.global_aliases();
         println!("\n--- untested functions ---\n");
         for (crate_name, stats) in &crate_data {
             let untested: Vec<&FnCoverage> = stats.functions.iter()
@@ -946,7 +781,8 @@ pub fn run_coverage(
             for f in &untested {
                 let loc = format_lines_opt(f.lines);
                 let rel = super::relative_path(&f.file);
-                println!("  {} ({}:{})", f.name, rel, loc);
+                let short = v_code_intel::helpers::apply_alias(rel, &alias_map);
+                println!("  {short}{loc}  {}", f.name);
             }
             println!();
         }

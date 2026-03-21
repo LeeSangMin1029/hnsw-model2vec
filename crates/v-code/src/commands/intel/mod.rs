@@ -14,23 +14,17 @@ pub mod detail;
 mod tests;
 
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::fs;
-
-use anyhow::Result;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow, run_coverage};
+pub use commands::{run_aliases, run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow, run_coverage};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 
-pub use v_code_intel::bfs::build_bfs_json;
 #[cfg(test)]
 pub use v_code_intel::context;
 pub use v_code_intel::graph;
-pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path, grouped_json};
+pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path};
 pub use v_code_intel::impact;
 pub use v_code_intel::loader::load_chunks;
 use v_code_intel::loader::{DaemonBuildResult, DaemonHooks};
@@ -94,56 +88,20 @@ pub use v_code_intel::parse::ParsedChunk;
 pub use v_code_intel::parse;
 #[cfg(test)]
 pub use v_code_intel::reason;
-pub use v_code_intel::stats::{build_stats, stats_to_json};
+pub use v_code_intel::stats::build_stats;
 pub use v_code_intel::trace;
-
-// ── Output format ────────────────────────────────────────────────────────
-
-/// Output format for code-intel commands.
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-pub enum OutputFormat {
-    Text,
-    Json,
-}
 
 // ── Shared utilities (used by commands.rs) ────────────────────────────────
 
-fn query_cache_dir(db: &Path) -> PathBuf {
-    db.join("cache")
-}
-
-/// Print cached JSON if DB unchanged, otherwise compute and cache.
-pub(super) fn cached_json(db: &Path, cache_key: &str, compute: impl FnOnce() -> Result<String>) -> Result<()> {
-    let cache_dir = query_cache_dir(db);
-    let mut hasher = std::hash::DefaultHasher::new();
-    cache_key.hash(&mut hasher);
-    let hash = hasher.finish();
-    let cache_file = cache_dir.join(format!("{hash:x}.json"));
-
-    let db_mtime = fs::metadata(db).and_then(|m| m.modified()).ok();
-    if let Some(db_t) = db_mtime
-        && let Ok(meta) = fs::metadata(&cache_file)
-        && let Ok(cache_t) = meta.modified()
-        && cache_t >= db_t
-        && let Ok(content) = fs::read_to_string(&cache_file)
-    {
-        println!("{content}");
-        return Ok(());
-    }
-
-    let output = compute()?;
-    let _ = fs::create_dir_all(&cache_dir);
-    let _ = fs::write(&cache_file, &output);
-    println!("{output}");
-    Ok(())
-}
-
 /// Print chunks grouped by file with path aliases.
-pub(crate) fn print_grouped(chunks: &[&ParsedChunk], compact: bool) {
-    use v_code_intel::helpers::{apply_alias, build_path_aliases};
+pub(crate) fn print_grouped(
+    chunks: &[&ParsedChunk],
+    compact: bool,
+    alias_map: &std::collections::BTreeMap<String, String>,
+) {
+    use v_code_intel::helpers::apply_alias;
 
     let files: Vec<&str> = chunks.iter().map(|c| relative_path(&c.file)).collect();
-    let (alias_map, legend) = build_path_aliases(&files);
 
     let mut groups: BTreeMap<&str, Vec<&ParsedChunk>> = BTreeMap::new();
     for (c, file) in chunks.iter().zip(files.iter()) {
@@ -151,13 +109,13 @@ pub(crate) fn print_grouped(chunks: &[&ParsedChunk], compact: bool) {
     }
 
     for (file, items) in &groups {
-        let short = apply_alias(file, &alias_map);
+        let short = apply_alias(file, alias_map);
         println!("@ {short}");
         for c in items {
             let lines = format_lines_opt(c.lines);
             let test_marker = if v_code_intel::graph::is_test_chunk(c) { " [test]" } else { "" };
-            println!("  {lines} {kind} {name}{test_marker}",
-                kind = c.kind, name = c.name);
+            let kind_tag = if c.kind == "function" { String::new() } else { format!("[{}] ", c.kind) };
+            println!("  {lines} {kind_tag}{name}{test_marker}", name = c.name);
             if !compact {
                 let sig = c.signature.as_deref().unwrap_or("");
                 if !sig.is_empty() {
@@ -166,12 +124,6 @@ pub(crate) fn print_grouped(chunks: &[&ParsedChunk], compact: bool) {
             }
         }
         if !compact { println!(); }
-    }
-
-    if !legend.is_empty() {
-        for (alias, dir) in &legend {
-            println!("{alias} = {dir}");
-        }
     }
 }
 

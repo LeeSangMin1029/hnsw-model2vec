@@ -3,7 +3,6 @@
 //! Format utilities, path normalization, JSON grouping helpers,
 //! and project root detection used across multiple modules.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::parse::ParsedChunk;
@@ -66,47 +65,89 @@ pub fn relative_path(path: &str) -> &str {
     }
 }
 
-/// Build a multi-base alias map from a set of paths.
+/// Build hierarchical crate-based alias map from a set of paths.
 ///
-/// Groups paths by their directory prefix, assigns short aliases (`[A]`, `[B]`, …)
-/// to directories containing 2+ files, and returns (alias_map, legend).
+/// Each crate gets a letter (`[A]`, `[B]`, …), subdirectories within a crate
+/// get numbered suffixes (`[A1]`, `[A2]`, …). The crate root `src/` directory
+/// uses the bare letter.
 ///
 /// ```text
-/// [A] = crates/v-hnsw-cli/src/commands/
-/// [B] = crates/v-hnsw-storage/src/
+/// [A] = crates/v-code/src/
+///   [A1] = commands/
+///   [A2] = commands/intel/
+/// [B] = crates/v-code-intel/src/
 /// ```
 pub fn build_path_aliases(paths: &[&str]) -> (std::collections::BTreeMap<String, String>, Vec<(String, String)>) {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    // Count files per directory.
-    let mut dir_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    // Collect unique directories.
+    let mut dirs: BTreeSet<&str> = BTreeSet::new();
     for p in paths {
         let dir = match p.rfind('/') {
             Some(i) => &p[..=i],
             None => "",
         };
-        *dir_counts.entry(dir).or_default() += 1;
+        if !dir.is_empty() {
+            dirs.insert(dir);
+        }
     }
 
-    // Assign aliases to directories with 1+ files (all dirs get aliases for consistency).
+    // Group directories by crate root (crates/<name>/src/).
+    // Key: crate root prefix (e.g. "crates/v-code/src/"), Value: subdirectory suffixes
+    let mut crate_dirs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for &dir in &dirs {
+        if let Some(root) = extract_crate_src_root(dir) {
+            let suffix = &dir[root.len()..];
+            crate_dirs.entry(root.to_owned()).or_default().insert(suffix.to_owned());
+        }
+        // Non-crate directories (no src/) are skipped — not code paths.
+    }
+
     let mut alias_map: BTreeMap<String, String> = BTreeMap::new();
     let mut legend: Vec<(String, String)> = Vec::new();
     let mut label = b'A';
 
-    for (&dir, &_count) in &dir_counts {
-        if dir.is_empty() {
-            continue;
+    // Assign crate aliases.
+    for (root, subdirs) in &crate_dirs {
+        if label > b'Z' { break; }
+        let letter = label as char;
+
+        // Bare letter = crate root (src/)
+        let root_alias = format!("[{letter}]");
+        alias_map.insert(root.clone(), root_alias.clone());
+        legend.push((root_alias, root.clone()));
+
+        // Numbered suffixes for subdirectories
+        let mut sub_num = 1u32;
+        for subdir in subdirs {
+            if subdir.is_empty() { continue; } // src/ itself, already handled
+            let full_dir = format!("{root}{subdir}");
+            let sub_alias = format!("[{letter}{sub_num}]");
+            alias_map.insert(full_dir, sub_alias.clone());
+            legend.push((sub_alias, format!("  {subdir}")));
+            sub_num += 1;
         }
-        let alias = format!("[{}]", label as char);
-        alias_map.insert(dir.to_owned(), alias.clone());
-        legend.push((alias, dir.to_owned()));
+
         label += 1;
-        if label > b'Z' {
-            break;
-        }
     }
 
     (alias_map, legend)
+}
+
+/// Extract the `crates/<name>/src/` root from a directory path.
+fn extract_crate_src_root(dir: &str) -> Option<&str> {
+    let crate_start = dir.find("crates/")?;
+    let after_crates = &dir[crate_start + 7..];
+    let name_end = after_crates.find('/')?;
+    let after_name = &after_crates[name_end + 1..];
+    // Expect "src/" after crate name
+    if after_name.starts_with("src/") {
+        let root_end = crate_start + 7 + name_end + 1 + 4; // "src/"
+        Some(&dir[..root_end])
+    } else {
+        None
+    }
 }
 
 /// Shorten a path using the alias map: replace the directory with its alias.
@@ -144,42 +185,12 @@ pub fn extract_crate_name(path: &str) -> String {
     "(root)".to_owned()
 }
 
-/// Schema descriptor included in every JSON output.
-const SCHEMA: &str = "f=file,l=lines,k=kind,n=name,v=via";
-
-/// Build file-grouped JSON from chunks, applying `extra_fields` to each entry.
-///
-/// The closure receives a chunk and returns additional key-value pairs to merge.
-fn build_grouped_json_with<'a, F>(chunks: impl Iterator<Item = &'a ParsedChunk>, extra_fields: F) -> serde_json::Value
-where
-    F: Fn(&ParsedChunk) -> Vec<(&'static str, serde_json::Value)>,
-{
-    let mut map = serde_json::Map::new();
-    map.insert("_s".to_owned(), serde_json::Value::String(SCHEMA.to_owned()));
-
-    let mut groups: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
-    for c in chunks {
-        let path = relative_path(&c.file);
-        let mut obj = serde_json::json!({
-            "l": lines_str(c),
-            "k": &c.kind,
-            "n": &c.name,
-        });
-        for (key, val) in extra_fields(c) {
-            obj[key] = val;
+/// Print the path alias legend.
+pub fn print_legend(legend: &[(String, String)]) {
+    if !legend.is_empty() {
+        for (alias, dir) in legend {
+            println!("{alias} = {dir}");
         }
-        groups.entry(path).or_default().push(obj);
     }
-    for (path, items) in groups {
-        map.insert(path.to_owned(), serde_json::Value::Array(items));
-    }
-    serde_json::Value::Object(map)
-}
-
-/// Build file-grouped JSON with `_s` schema header.
-///
-/// Output: `{"_s":"...","crates/foo/src/bar.rs":[{"l":"1-10","k":"fn","n":"run"}]}`
-pub fn grouped_json(chunks: &[&ParsedChunk]) -> serde_json::Value {
-    build_grouped_json_with(chunks.iter().copied(), |_| Vec::new())
 }
 

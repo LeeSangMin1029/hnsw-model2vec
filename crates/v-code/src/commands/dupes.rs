@@ -270,16 +270,8 @@ fn label(pstore: &impl PayloadStore, id: u64) -> String {
 
 // ── Path alias helpers ───────────────────────────────────────────────────
 
-use v_code_intel::helpers::{apply_alias, build_path_aliases};
+use v_code_intel::helpers::{apply_alias, build_path_aliases, print_legend};
 use v_code_intel::parse::normalize_path;
-
-fn print_legend(legend: &[(String, String)]) {
-    if !legend.is_empty() {
-        for (alias, dir) in legend {
-            println!("{alias} = {dir}");
-        }
-    }
-}
 
 // ── File grouping ────────────────────────────────────────────────────────
 
