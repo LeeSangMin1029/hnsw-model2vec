@@ -106,7 +106,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         config.code = true;
         config.embedded = false;
         if let Ok(canonical) = input_path.canonicalize() {
-            config.input_path = Some(canonical.to_string_lossy().into_owned());
+            let path_str = canonical.to_string_lossy();
+            config.input_path = Some(v_hnsw_core::strip_unc_prefix(&path_str).to_owned());
         }
         let _ = config.save(&db_path);
     }

@@ -5,18 +5,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+// Re-export core UNC utilities for backward compatibility.
+pub use v_hnsw_core::{strip_unc_prefix, strip_unc_prefix_path};
+
 /// Normalize a file path to a canonical forward-slash form.
 ///
-/// Windows produces mixed separators (`C:/foo\bar\baz.md`) depending on
-/// how the path was constructed. This normalizes to forward slashes so
-/// that the same file always gets the same source string and ID.
+/// Resolves symlinks, strips Windows `\\?\` prefix, normalizes separators.
 pub fn normalize_source(path: &Path) -> String {
-    // canonicalize resolves symlinks and produces \\?\ prefix on Windows
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let s = abs.to_string_lossy();
-    // Strip Windows \\?\ prefix, normalize separators
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-    s.replace('\\', "/")
+    v_hnsw_core::strip_unc_prefix(&s).replace('\\', "/")
 }
 
 /// Generate a stable ID from source path and chunk index.

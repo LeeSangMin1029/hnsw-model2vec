@@ -59,6 +59,21 @@ pub fn storage_err(msg: &str) -> VhnswError {
     VhnswError::Storage(std::io::Error::other(msg))
 }
 
+/// Strip Windows extended-length prefix (`\\?\` or `//?/`).
+///
+/// `canonicalize()` on Windows adds this prefix, which breaks `git ls-files`,
+/// shell commands, and path comparison.
+pub fn strip_unc_prefix(path: &str) -> &str {
+    path.strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+        .unwrap_or(path)
+}
+
+/// Like [`strip_unc_prefix`] but returns a `PathBuf`.
+pub fn strip_unc_prefix_path(path: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(strip_unc_prefix(&path.to_string_lossy()))
+}
+
 /// Read a little-endian `u64` from a byte slice at the given offset.
 pub fn read_le_u64(data: &[u8], offset: usize) -> Option<u64> {
     let bytes: [u8; 8] = data.get(offset..offset + 8)?.try_into().ok()?;

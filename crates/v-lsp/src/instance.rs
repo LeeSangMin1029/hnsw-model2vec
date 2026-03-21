@@ -795,10 +795,7 @@ fn normalize_vfs_path(vfs_path: &str, project_root: &Path) -> String {
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let mut root_str = canon_root.to_string_lossy().replace('\\', "/");
-    // Strip Windows extended-length prefix (\\?\).
-    if let Some(stripped) = root_str.strip_prefix("//?/") {
-        root_str = stripped.to_owned();
-    }
+    root_str = v_hnsw_core::strip_unc_prefix(&root_str).to_owned();
     // Ensure no trailing slash.
     if root_str.ends_with('/') {
         root_str.pop();

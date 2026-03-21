@@ -14,6 +14,9 @@ serde_json = "1"
 # Error handling
 thiserror.workspace = true
 
+# Core utilities (strip_unc_prefix, etc.)
+v-hnsw-core.workspace = true
+
 # Shared memory
 memmap2.workspace = true
 

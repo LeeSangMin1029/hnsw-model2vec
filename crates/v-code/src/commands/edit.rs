@@ -84,12 +84,12 @@ fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<Sym
         .canonicalize()
         .unwrap_or_else(|_| db_parent.to_path_buf());
     // Strip Windows UNC prefix (\\?\) that canonicalize() adds.
-    let project_root = strip_unc_prefix(&project_root);
+    let project_root = v_hnsw_core::strip_unc_prefix_path(&project_root);
 
     // chunk.file may be absolute (with UNC prefix) or relative.
     let chunk_path = PathBuf::from(&chunk.file);
     let abs_path = if chunk_path.is_absolute() {
-        strip_unc_prefix(&chunk_path)
+        v_hnsw_core::strip_unc_prefix_path(&chunk_path)
     } else {
         project_root.join(&chunk.file)
     };
@@ -103,7 +103,7 @@ fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<Sym
     // Compute relative path for display.
     let norm_root = project_root.to_string_lossy().replace('\\', "/");
     let norm_file = chunk.file.replace('\\', "/");
-    let norm_file = norm_file.strip_prefix("//?/").unwrap_or(&norm_file);
+    let norm_file = v_hnsw_core::strip_unc_prefix(&norm_file);
     let rel_display = norm_file
         .strip_prefix(norm_root.as_str())
         .and_then(|s| s.strip_prefix('/'))
@@ -517,13 +517,3 @@ pub fn create_file(db: PathBuf, file: String, body: String) -> Result<()> {
     Ok(())
 }
 
-fn strip_unc_prefix(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix(r"\\?\")
-        .or_else(|| s.strip_prefix("//?/"))
-    {
-        PathBuf::from(stripped)
-    } else {
-        path.to_path_buf()
-    }
-}
