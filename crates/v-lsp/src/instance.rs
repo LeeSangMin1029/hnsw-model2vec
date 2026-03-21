@@ -97,6 +97,7 @@ pub struct ResolveCallStats {
 
 /// A live rust-analyzer instance holding the project database in memory.
 pub struct RaInstance {
+    host: AnalysisHost,
     analysis: Analysis,
     file_map: HashMap<String, FileInfo>,
     reverse_file_map: HashMap<FileId, String>,
@@ -190,11 +191,8 @@ impl RaInstance {
         let (file_map, reverse_file_map) = build_file_map(&analysis, &vfs, workspace_root);
         eprintln!("    [ra] file map: {} files", file_map.len());
 
-        // Keep host alive by leaking it — the Analysis handle borrows its DB.
-        // This is intentional: the instance lives for the daemon's lifetime.
-        std::mem::forget(host);
-
         Ok(Self {
+            host,
             analysis,
             file_map,
             reverse_file_map,
@@ -240,6 +238,85 @@ impl RaInstance {
             Ok(None) => Ok(None),
             Err(e) => Err(LspError::Protocol(format!("hover error: {e}"))),
         }
+    }
+
+    /// Parallel batch hover: creates N Analysis snapshots and distributes queries across threads.
+    ///
+    /// Each query is (file_uri, line, col). Returns Vec<Option<String>> in same order.
+    /// Falls back to sequential if thread spawn fails.
+    pub fn hover_batch_parallel(
+        &self,
+        queries: &[(String, u32, u32)],
+    ) -> Vec<Option<String>> {
+        if queries.is_empty() {
+            return Vec::new();
+        }
+
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(8))
+            .unwrap_or(4);
+
+        // Pre-resolve file lookups on the main thread (file_map is not Send).
+        struct ResolvedQuery {
+            idx: usize,
+            file_id: FileId,
+            offset: ra_ap_ide::TextSize,
+        }
+
+        let mut resolved: Vec<ResolvedQuery> = Vec::with_capacity(queries.len());
+        let mut results: Vec<Option<String>> = vec![None; queries.len()];
+
+        for (idx, (file_uri, line, col)) in queries.iter().enumerate() {
+            let file_key = uri_to_relative(file_uri, &self.workspace_root);
+            let Some(fi) = self.file_map.get(&file_key) else { continue };
+            let line_col = LineCol { line: *line, col: *col };
+            let Some(offset) = fi.line_index.offset(line_col) else { continue };
+            resolved.push(ResolvedQuery { idx, file_id: fi.file_id, offset });
+        }
+
+        if resolved.is_empty() {
+            return results;
+        }
+
+        // Split into chunks and process in parallel with separate Analysis snapshots.
+        let chunk_size = (resolved.len() + num_threads - 1) / num_threads;
+        let chunks: Vec<&[ResolvedQuery]> = resolved.chunks(chunk_size).collect();
+
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(chunks.len());
+
+            for chunk in &chunks {
+                let analysis = self.host.analysis();
+                let chunk = *chunk;
+                handles.push(s.spawn(move || {
+                    let config = hover_config();
+                    let mut partial: Vec<(usize, Option<String>)> = Vec::with_capacity(chunk.len());
+                    for q in chunk {
+                        let range = ra_ap_ide::TextRange::new(
+                            q.offset,
+                            q.offset + ra_ap_ide::TextSize::from(1u32),
+                        );
+                        let file_range = FileRange { file_id: q.file_id, range };
+                        let result = match analysis.hover(&config, file_range) {
+                            Ok(Some(hover)) => Some(hover.info.markup.as_str().to_owned()),
+                            _ => None,
+                        };
+                        partial.push((q.idx, result));
+                    }
+                    partial
+                }));
+            }
+
+            for handle in handles {
+                if let Ok(partial) = handle.join() {
+                    for (idx, result) in partial {
+                        results[idx] = result;
+                    }
+                }
+            }
+        });
+
+        results
     }
 
     /// Hover on a variable name within a function to get its type.

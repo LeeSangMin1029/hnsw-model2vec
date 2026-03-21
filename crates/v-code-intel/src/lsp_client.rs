@@ -36,7 +36,7 @@ pub fn collect_types_via_ra(
     if queries.is_empty() {
         return LspTypes::default();
     }
-    eprintln!("    [ra-hover] querying {} hover positions...", queries.len());
+    eprintln!("    [ra-hover] querying {} hover positions (parallel)...", queries.len());
 
     // Map var_name → callee_name for return type extraction.
     let var_to_callee: HashMap<(usize, String), Vec<String>> = {
@@ -51,43 +51,47 @@ pub fn collect_types_via_ra(
         m
     };
 
+    // Batch hover in parallel using multiple Analysis snapshots.
+    let batch: Vec<(String, u32, u32)> = queries
+        .iter()
+        .map(|q| (q.file.clone(), q.line, q.col))
+        .collect();
+    let hover_results = ra.hover_batch_parallel(&batch);
+
     let mut lsp_types = LspTypes::default();
     let mut null_count = 0usize;
     let mut hover_ok = 0usize;
-    let mut hover_err = 0usize;
 
-    for q in &queries {
-        match ra.hover(&q.file, q.line, q.col) {
-            Ok(Some(type_str)) => {
-                hover_ok += 1;
-                let leaf = extract_leaf_type_from_rust(&type_str);
-                if !leaf.is_empty() && leaf != "unknown" {
-                    let var_lower = q.var_name.to_lowercase();
+    for (q, type_str) in queries.iter().zip(hover_results.iter()) {
+        if let Some(type_str) = type_str {
+            hover_ok += 1;
+            let leaf = extract_leaf_type_from_rust(type_str);
+            if !leaf.is_empty() && leaf != "unknown" {
+                let var_lower = q.var_name.to_lowercase();
 
-                    lsp_types.receiver_types
-                        .entry(q.chunk_idx)
-                        .or_default()
-                        .entry(var_lower.clone())
-                        .or_insert_with(|| leaf.clone());
+                lsp_types.receiver_types
+                    .entry(q.chunk_idx)
+                    .or_default()
+                    .entry(var_lower.clone())
+                    .or_insert_with(|| leaf.clone());
 
-                    let key = (q.chunk_idx, var_lower);
-                    if let Some(callees) = var_to_callee.get(&key) {
-                        for callee in callees {
-                            lsp_types.return_types.entry(callee.clone())
-                                .or_insert_with(|| leaf.clone());
-                        }
+                let key = (q.chunk_idx, var_lower);
+                if let Some(callees) = var_to_callee.get(&key) {
+                    for callee in callees {
+                        lsp_types.return_types.entry(callee.clone())
+                            .or_insert_with(|| leaf.clone());
                     }
                 }
             }
-            Ok(None) => null_count += 1,
-            Err(_) => hover_err += 1,
+        } else {
+            null_count += 1;
         }
     }
 
     let receiver_count: usize = lsp_types.receiver_types.values().map(|m| m.len()).sum();
     eprintln!(
-        "    [ra-hover] {} ok, {} null, {} err | receivers: {}, return_types: {}",
-        hover_ok, null_count, hover_err, receiver_count, lsp_types.return_types.len(),
+        "    [ra-hover] {} ok, {} null | receivers: {}, return_types: {}",
+        hover_ok, null_count, receiver_count, lsp_types.return_types.len(),
     );
     lsp_types
 }
