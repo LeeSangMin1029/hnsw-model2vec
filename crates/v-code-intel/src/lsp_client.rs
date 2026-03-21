@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 /// LSP-resolved type information for the call graph.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
 pub struct LspTypes {
     /// fn_short_name → leaf_type (for return_type_map overlay).
     pub return_types: HashMap<String, String>,
@@ -28,11 +28,23 @@ pub struct HoverQuery {
 ///
 /// For each `let x = foo()` binding in chunks, hovers on `x` to get its type.
 /// Returns both return_types (fn→type) and receiver_types (chunk→{var→type}).
+///
+/// If `skip_files` is provided, chunks whose file is in the set are skipped
+/// (their cached types should be merged by the caller).
 pub fn collect_types_via_ra(
     chunks: &[crate::parse::ParsedChunk],
     ra: &v_lsp::instance::RaInstance,
 ) -> LspTypes {
-    let queries = build_hover_queries_direct(chunks);
+    collect_types_via_ra_filtered(chunks, ra, None)
+}
+
+/// Like [`collect_types_via_ra`] but skips chunks from `skip_files`.
+pub fn collect_types_via_ra_filtered(
+    chunks: &[crate::parse::ParsedChunk],
+    ra: &v_lsp::instance::RaInstance,
+    skip_files: Option<&std::collections::HashSet<&str>>,
+) -> LspTypes {
+    let queries = build_hover_queries_direct_filtered(chunks, skip_files);
     if queries.is_empty() {
         return LspTypes::default();
     }
@@ -104,9 +116,9 @@ fn extract_leaf_type_from_rust(full_type: &str) -> String {
     leaf.trim().to_lowercase()
 }
 
-/// Build hover queries using real source file paths (no stub workspace).
-fn build_hover_queries_direct(
+fn build_hover_queries_direct_filtered(
     chunks: &[crate::parse::ParsedChunk],
+    skip_files: Option<&std::collections::HashSet<&str>>,
 ) -> Vec<HoverQuery> {
     let mut queries = Vec::new();
     let mut file_cache: HashMap<String, Vec<String>> = HashMap::new();
@@ -114,6 +126,11 @@ fn build_hover_queries_direct(
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         if chunk.let_call_bindings.is_empty() {
             continue;
+        }
+        if let Some(skip) = skip_files {
+            if skip.contains(chunk.file.as_str()) {
+                continue;
+            }
         }
         let Some((start_line, _end_line)) = chunk.lines else {
             continue;

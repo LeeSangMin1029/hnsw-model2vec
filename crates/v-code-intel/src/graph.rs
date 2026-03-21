@@ -277,6 +277,16 @@ impl CallGraph {
         lsp_types: &crate::lsp_client::LspTypes,
         ra: Option<&v_lsp::instance::RaInstance>,
     ) -> Self {
+        Self::build_with_lsp_filtered(chunks, lsp_types, ra, None)
+    }
+
+    /// Build with optional skip_files for RA call hierarchy (unchanged files).
+    pub fn build_with_lsp_filtered(
+        chunks: &[ParsedChunk],
+        lsp_types: &crate::lsp_client::LspTypes,
+        ra: Option<&v_lsp::instance::RaInstance>,
+        ra_skip_files: Option<&std::collections::HashSet<&str>>,
+    ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
 
@@ -531,7 +541,7 @@ impl CallGraph {
         // RA outgoing+incoming calls: add edges that tree-sitter missed.
         // resolve_via_ra returns empty when ra=None (tests, fallback).
         let t_ra = std::time::Instant::now();
-        let ra_result = crate::ra_direct::resolve_via_ra(chunks, ra);
+        let ra_result = crate::ra_direct::resolve_via_ra_filtered(chunks, ra, ra_skip_files);
         if !ra_result.edges.is_empty() {
             let mut ra_added = 0usize;
             for &(src, tgt, line) in &ra_result.edges {

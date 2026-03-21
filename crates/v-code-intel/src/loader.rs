@@ -90,6 +90,41 @@ pub fn cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("chunks.bin")
 }
 
+/// Path to the lsp_types.bin cache file for a given database.
+pub fn lsp_types_cache_path(db: &Path) -> PathBuf {
+    db.join("cache").join("lsp_types.bin")
+}
+
+/// Cache format version for `lsp_types.bin`.
+const LSP_TYPES_CACHE_VERSION: u8 = 1;
+
+/// Load cached LSP types from `lsp_types.bin`.
+pub fn load_lsp_types_cache(db: &Path) -> Option<crate::lsp_client::LspTypes> {
+    let path = lsp_types_cache_path(db);
+    let bytes = fs::read(&path).ok()?;
+    if bytes.first() != Some(&LSP_TYPES_CACHE_VERSION) {
+        return None;
+    }
+    let config = bincode::config::standard();
+    bincode::decode_from_slice::<crate::lsp_client::LspTypes, _>(&bytes[1..], config)
+        .ok()
+        .map(|(types, _)| types)
+}
+
+/// Save LSP types to `lsp_types.bin` cache.
+pub fn save_lsp_types_cache(db: &Path, types: &crate::lsp_client::LspTypes) {
+    let path = lsp_types_cache_path(db);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let config = bincode::config::standard();
+    let mut bytes = vec![LSP_TYPES_CACHE_VERSION];
+    if let Ok(encoded) = bincode::encode_to_vec(types, config) {
+        bytes.extend_from_slice(&encoded);
+        let _ = fs::write(&path, bytes);
+    }
+}
+
 /// Result of a daemon graph build attempt.
 pub enum DaemonBuildResult {
     /// Daemon returned a completed graph.

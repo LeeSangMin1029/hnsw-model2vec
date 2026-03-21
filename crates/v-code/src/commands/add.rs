@@ -277,8 +277,12 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Try daemon graph/build (hover + call hierarchy + graph — no local RA spawn).
+    // Auto-spawn daemon if not running, then try daemon graph/build.
     // Fallback to local RA spawn if daemon is unavailable.
+    if !v_hnsw_storage::daemon_client::is_running() {
+        eprintln!("    [daemon] not running, spawning...");
+        v_hnsw_storage::daemon_client::spawn_daemon_and_wait(db_path);
+    }
     if try_daemon_graph_build(&db_path.to_string_lossy()) {
         eprintln!("    [cache] graph built via daemon");
         eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
@@ -303,15 +307,50 @@ fn prebuild_caches(
 
     let lsp_types = if let Some(ref ra) = ra {
         let t_hover = std::time::Instant::now();
-        let types = v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra);
+
+        // Load cached LSP types — skip hover for unchanged files.
+        let cached = v_code_intel::loader::load_lsp_types_cache(db_path);
+        let types = if let Some(mut cached_types) = cached {
+            // Build set of unchanged file suffixes to skip.
+            let unchanged: std::collections::HashSet<&str> = chunks.iter()
+                .map(|c| c.file.as_str())
+                .filter(|f| !new_suffixes.contains(f))
+                .collect();
+            if unchanged.len() == chunks.iter().map(|c| c.file.as_str()).collect::<std::collections::HashSet<_>>().len() {
+                eprintln!("    [ra-hover] no changed chunks, using cache");
+            } else {
+                eprintln!("    [ra-hover] skipping {} unchanged files, querying changed chunks",
+                    unchanged.len());
+                let delta = v_code_intel::lsp_client::collect_types_via_ra_filtered(
+                    &chunks, ra, Some(&unchanged),
+                );
+                // Merge delta into cached types.
+                cached_types.return_types.extend(delta.return_types);
+                cached_types.receiver_types.extend(delta.receiver_types);
+            }
+            cached_types
+        } else {
+            v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra)
+        };
+
         eprintln!("    [ra-hover] type collection: {:.1}s", t_hover.elapsed().as_secs_f64());
+        v_code_intel::loader::save_lsp_types_cache(db_path, &types);
         types
     } else {
-        v_code_intel::lsp_client::LspTypes::default()
+        // No RA available — try loading cache anyway.
+        v_code_intel::loader::load_lsp_types_cache(db_path)
+            .unwrap_or_default()
     };
 
+    // Build set of unchanged files to skip RA call hierarchy queries.
+    let ra_unchanged: std::collections::HashSet<&str> = chunks.iter()
+        .map(|c| c.file.as_str())
+        .filter(|f| !new_suffixes.contains(f))
+        .collect();
+    let ra_skip = if ra_unchanged.is_empty() { None } else { Some(&ra_unchanged) };
+
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_with_lsp(&chunks, &lsp_types, ra.as_ref());
+    let graph = v_code_intel::graph::CallGraph::build_with_lsp_filtered(&chunks, &lsp_types, ra.as_ref(), ra_skip);
     eprintln!("    [cache] graph build: {:.1}ms", t3.elapsed().as_secs_f64() * 1000.0);
 
     let t4 = std::time::Instant::now();
@@ -494,37 +533,10 @@ fn scan_files_fast(input_path: &std::path::Path, exclude: &[String]) -> Vec<Path
 ///
 /// Returns true if daemon handled the request successfully.
 fn try_daemon_graph_build(db_path: &str) -> bool {
-    use std::io::{BufRead, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    let Ok(addr) = "127.0.0.1:19530".parse() else { return false };
-    let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-
-    let request = serde_json::json!({
-        "id": 1,
-        "method": "graph/build",
-        "params": { "db": db_path }
-    });
-
-    let mut writer = std::io::BufWriter::new(&stream);
-    let Ok(json) = serde_json::to_string(&request) else { return false };
-    if writeln!(writer, "{json}").is_err() || writer.flush().is_err() {
-        return false;
-    }
-
-    let mut reader = std::io::BufReader::new(&stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return false;
-    }
-
-    let Ok(response) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-        return false;
-    };
-    response.get("result").is_some()
+    v_hnsw_storage::daemon_client::daemon_rpc(
+        "graph/build",
+        serde_json::json!({ "db": db_path }),
+        300,
+    )
+    .is_ok()
 }

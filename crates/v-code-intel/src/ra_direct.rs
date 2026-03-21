@@ -16,9 +16,18 @@ pub struct RaEdges {
 }
 
 /// Build call graph edges using RA's call hierarchy API (both directions).
-/// Build call graph edges using a pre-spawned RA instance.
 /// Returns empty if `ra` is `None`.
 pub fn resolve_via_ra(chunks: &[ParsedChunk], ra: Option<&v_lsp::instance::RaInstance>) -> RaEdges {
+    resolve_via_ra_filtered(chunks, ra, None)
+}
+
+/// Like [`resolve_via_ra`] but skips chunks whose file is in `skip_files`.
+/// Cached edges for skipped files should be merged by the caller.
+pub fn resolve_via_ra_filtered(
+    chunks: &[ParsedChunk],
+    ra: Option<&v_lsp::instance::RaInstance>,
+    skip_files: Option<&HashSet<&str>>,
+) -> RaEdges {
     let Some(ra) = ra else {
         return RaEdges { edges: Vec::new() };
     };
@@ -38,6 +47,11 @@ pub fn resolve_via_ra(chunks: &[ParsedChunk], ra: Option<&v_lsp::instance::RaIns
     for (src, chunk) in chunks.iter().enumerate() {
         if chunk.kind != "function" {
             continue;
+        }
+        if let Some(skip) = skip_files {
+            if skip.contains(chunk.file.as_str()) {
+                continue;
+            }
         }
         let Some((start_line, _)) = chunk.lines else {
             continue;
@@ -91,6 +105,11 @@ pub fn resolve_via_ra(chunks: &[ParsedChunk], ra: Option<&v_lsp::instance::RaIns
     for (tgt, chunk) in chunks.iter().enumerate() {
         if chunk.kind != "function" {
             continue;
+        }
+        if let Some(skip) = skip_files {
+            if skip.contains(chunk.file.as_str()) {
+                continue;
+            }
         }
         let Some((start_line, _)) = chunk.lines else {
             continue;
