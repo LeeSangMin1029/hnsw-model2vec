@@ -226,6 +226,9 @@ pub enum Commands {
         /// BFS depth from test functions (default: 2).
         #[arg(long, default_value = "2")]
         depth: u32,
+        /// Filter by file path suffix (e.g. "add.rs" or "commands/intel").
+        #[arg(long)]
+        file: Option<String>,
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,

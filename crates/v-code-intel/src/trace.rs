@@ -1,7 +1,7 @@
 //! Shortest call path between two symbols.
 //!
-//! Uses BFS on the call graph (callees direction) to find the shortest
-//! path from symbol A to symbol B.
+//! Uses bidirectional BFS on the call graph (callees + callers) to find
+//! the shortest path from symbol A to symbol B.
 
 use std::collections::VecDeque;
 
@@ -10,6 +10,8 @@ use crate::helpers::{format_lines_str_opt, relative_path};
 
 /// BFS to find shortest path from any source index to any target index.
 ///
+/// Traverses both callees and callers (bidirectional edges) so paths through
+/// common ancestors (e.g. A ← parent → B) can be found.
 /// Returns the path as a list of chunk indices (source first, target last),
 /// or `None` if no path exists.
 pub fn bfs_shortest_path(graph: &CallGraph, sources: &[u32], targets: &[u32]) -> Option<Vec<u32>> {
@@ -34,7 +36,7 @@ pub fn bfs_shortest_path(graph: &CallGraph, sources: &[u32], targets: &[u32]) ->
         }
     }
 
-    // BFS through callees.
+    // BFS through callees + callers (undirected traversal).
     while let Some(idx) = queue.pop_front() {
         if is_target[idx as usize] {
             // Reconstruct path.
@@ -48,11 +50,13 @@ pub fn bfs_shortest_path(graph: &CallGraph, sources: &[u32], targets: &[u32]) ->
             return Some(path);
         }
 
-        for &callee in &graph.callees[idx as usize] {
-            if !visited[callee as usize] {
-                visited[callee as usize] = true;
-                parent[callee as usize] = Some(idx);
-                queue.push_back(callee);
+        let i = idx as usize;
+        let neighbors = graph.callees[i].iter().chain(graph.callers[i].iter());
+        for &next in neighbors {
+            if !visited[next as usize] {
+                visited[next as usize] = true;
+                parent[next as usize] = Some(idx);
+                queue.push_back(next);
             }
         }
     }

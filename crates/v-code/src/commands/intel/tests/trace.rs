@@ -86,6 +86,7 @@ fn shortest_path_among_alternatives() {
 #[test]
 fn cycle_does_not_hang() {
     // A -> B -> C -> A (cycle), find path A -> C
+    // Bidirectional BFS: A's callers include C, so shortest is A -> C (1 hop via caller edge).
     let chunks = vec![
         chunk("A", "src/a.rs", &["B"]),
         chunk("B", "src/b.rs", &["C"]),
@@ -94,18 +95,32 @@ fn cycle_does_not_hang() {
     let graph = CallGraph::build(&chunks);
     let path = bfs_shortest_path(&graph, &[0], &[2]).unwrap();
 
-    assert_eq!(path, vec![0, 1, 2]);
+    assert_eq!(path.len(), 2, "bidirectional: 1 hop via caller edge");
+    assert_eq!(path[0], 0);
+    assert_eq!(*path.last().unwrap(), 2);
 }
 
 #[test]
-fn reverse_direction_no_path() {
-    // A -> B, but no path from B to A (callees direction only)
+fn reverse_direction_finds_path() {
+    // A -> B.  Bidirectional BFS from B finds A via caller edge.
     let chunks = vec![
         chunk("A", "src/a.rs", &["B"]),
         chunk("B", "src/b.rs", &[]),
     ];
     let graph = CallGraph::build(&chunks);
-    let result = bfs_shortest_path(&graph, &[1], &[0]);
+    let path = bfs_shortest_path(&graph, &[1], &[0]).unwrap();
+    assert_eq!(path, vec![1, 0]);
+}
+
+#[test]
+fn truly_disconnected_no_path() {
+    // A and B have no edges at all — even bidirectional BFS finds nothing.
+    let chunks = vec![
+        chunk("A", "src/a.rs", &[]),
+        chunk("B", "src/b.rs", &[]),
+    ];
+    let graph = CallGraph::build(&chunks);
+    let result = bfs_shortest_path(&graph, &[0], &[1]);
     assert!(result.is_none());
 }
 

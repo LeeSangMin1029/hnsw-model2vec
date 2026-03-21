@@ -797,6 +797,7 @@ fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
 pub fn run_coverage(
     db: PathBuf,
     depth: u32,
+    file_filter: Option<String>,
     format: OutputFormat,
 ) -> Result<()> {
     use std::collections::{BTreeMap, VecDeque};
@@ -837,6 +838,11 @@ pub fn run_coverage(
     let mut crate_data: BTreeMap<String, CrateStats> = BTreeMap::new();
 
     for i in 0..n {
+        if let Some(ref filter) = file_filter {
+            if !graph.files[i].contains(filter.as_str()) {
+                continue;
+            }
+        }
         let crate_name = extract_crate_name(&graph.files[i]);
         let entry = crate_data.entry(crate_name).or_default();
 
