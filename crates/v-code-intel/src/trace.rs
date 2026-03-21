@@ -6,7 +6,6 @@
 use std::collections::VecDeque;
 
 use crate::graph::CallGraph;
-use crate::helpers::{format_lines_str_opt, relative_path};
 
 /// BFS to find shortest path from any source index to any target index.
 ///
@@ -62,31 +61,4 @@ pub fn bfs_shortest_path(graph: &CallGraph, sources: &[u32], targets: &[u32]) ->
     }
 
     None
-}
-
-/// Build JSON representation of a trace path.
-pub fn build_json(graph: &CallGraph, path: &[u32]) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "_s".to_owned(),
-        serde_json::Value::String("f=file,l=lines,k=kind,n=name,t=test".to_owned()),
-    );
-    map.insert("hops".to_owned(), serde_json::json!(path.len() - 1));
-
-    let items: Vec<serde_json::Value> = path
-        .iter()
-        .map(|&idx| {
-            let i = idx as usize;
-            serde_json::json!({
-                "f": relative_path(&graph.files[i]),
-                "l": format_lines_str_opt(graph.lines[i]),
-                "k": &graph.kinds[i],
-                "n": &graph.names[i],
-                "t": graph.is_test[i],
-            })
-        })
-        .collect();
-
-    map.insert("path".to_owned(), serde_json::Value::Array(items));
-    serde_json::Value::Object(map)
 }

@@ -1,7 +1,7 @@
 //! Unit tests for `stats` module — per-crate statistics.
 
 use crate::parse::ParsedChunk;
-use crate::stats::{build_stats, stats_to_json};
+use crate::stats::build_stats;
 
 fn make_chunk(kind: &str, name: &str, file: &str) -> ParsedChunk {
     ParsedChunk {
@@ -58,14 +58,3 @@ fn stats_empty_chunks() {
     assert!(stats.is_empty());
 }
 
-#[test]
-fn stats_to_json_has_schema() {
-    let chunks = vec![
-        make_chunk("function", "foo", "crates/core/src/lib.rs"),
-    ];
-    let stats = build_stats(&chunks);
-    let json = stats_to_json(&stats);
-    let obj = json.as_object().expect("should be object");
-    assert!(obj.contains_key("_s"), "should have schema key");
-    assert!(obj.contains_key("core"), "should have crate key");
-}
