@@ -1363,7 +1363,7 @@ fn check_tags(p: Payload) {
 // owning_type, is_test_path, is_test_chunk
 // ══════════════════════════════════════════════════════════════════════
 
-use crate::graph::{extract_leaf_type, extract_generic_bounds, owning_type, is_test_path};
+use crate::index_tables::{extract_leaf_type, extract_generic_bounds, owning_type, is_test_path};
 
 // ── extract_leaf_type ────────────────────────────────────────────────
 

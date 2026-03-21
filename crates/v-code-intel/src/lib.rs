@@ -16,6 +16,8 @@ pub mod dupe_analyze;
 pub mod flow_cmd;
 pub mod graph;
 pub mod helpers;
+pub mod index_tables;
+pub mod resolve;
 pub mod impact;
 pub mod jump;
 pub mod loader;
