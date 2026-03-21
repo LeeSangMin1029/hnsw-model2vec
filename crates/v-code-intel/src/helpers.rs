@@ -183,18 +183,3 @@ pub fn grouped_json(chunks: &[&ParsedChunk]) -> serde_json::Value {
     build_grouped_json_with(chunks.iter().copied(), |_| Vec::new())
 }
 
-/// Build file-grouped JSON for refs (includes `v` field).
-pub fn grouped_json_refs(refs: &[(&ParsedChunk, Vec<&str>)]) -> serde_json::Value {
-    // Build a lookup map from chunk pointer to via list.
-    let via_map: std::collections::HashMap<*const ParsedChunk, &Vec<&str>> = refs
-        .iter()
-        .map(|(c, v)| (*c as *const ParsedChunk, v))
-        .collect();
-    build_grouped_json_with(refs.iter().map(|(c, _)| *c), |c| {
-        if let Some(via) = via_map.get(&(c as *const ParsedChunk)) {
-            vec![("v", serde_json::json!(via))]
-        } else {
-            Vec::new()
-        }
-    })
-}

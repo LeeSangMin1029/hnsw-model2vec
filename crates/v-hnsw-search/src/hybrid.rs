@@ -43,9 +43,7 @@ where
     pub fn config(&self) -> &HybridSearchConfig { &self.config }
     pub fn config_mut(&mut self) -> &mut HybridSearchConfig { &mut self.config }
     pub fn dense_index(&self) -> &HnswGraph<D> { &self.dense_index }
-    pub fn dense_index_mut(&mut self) -> &mut HnswGraph<D> { &mut self.dense_index }
     pub fn sparse_index(&self) -> &Bm25Index<T> { &self.sparse_index }
-    pub fn sparse_index_mut(&mut self) -> &mut Bm25Index<T> { &mut self.sparse_index }
 
     /// Add a document to both indexes.
     pub fn add_document(&mut self, id: PointId, vector: &[f32], text: &str) -> v_hnsw_core::Result<()> {

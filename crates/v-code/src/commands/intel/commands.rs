@@ -1,7 +1,7 @@
 //! CLI command handlers for code-intel subcommands.
 //!
 //! Each `run_*` function corresponds to a CLI subcommand (stats, symbols,
-//! def, refs, gather, impact, trace). These handle text/JSON output and
+//! def, refs, impact, trace). These handle text/JSON output and
 //! caching; pure analysis logic lives in `v-code-intel`.
 
 use std::path::PathBuf;
@@ -793,108 +793,174 @@ fn print_trace_path(graph: &graph::CallGraph, path: &[u32]) {
 }
 
 
-/// `v-code untested <db> [--depth N] [--file <suffix>]`
-///
-/// Find functions not covered by any test (directly or transitively).
-#[expect(clippy::needless_range_loop, reason = "multiple parallel arrays indexed together")]
-pub fn run_untested(
+/// `v-code coverage` — per-crate test coverage with per-function test counts.
+pub fn run_coverage(
     db: PathBuf,
     depth: u32,
     format: OutputFormat,
-    file_filter: Option<String>,
 ) -> Result<()> {
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
+    use v_code_intel::helpers::extract_crate_name;
 
     let graph = load_or_build_graph(&db)?;
     let n = graph.names.len();
 
-    // BFS from all test nodes, following callees up to `depth` levels.
-    let mut tested = vec![false; n];
-    let mut queue: VecDeque<(u32, u32)> = VecDeque::new(); // (idx, current_depth)
+    // For each function, count how many distinct test functions reach it via BFS callees.
+    let mut test_counts = vec![0u32; n];
 
-    for i in 0..n {
-        if graph.is_test[i] {
-            tested[i] = true;
-            queue.push_back((i as u32, 0));
-        }
-    }
-
-    while let Some((idx, d)) = queue.pop_front() {
-        if d >= depth {
+    for test_idx in 0..n {
+        if !graph.is_test[test_idx] {
             continue;
         }
-        for &callee in &graph.callees[idx as usize] {
-            if !tested[callee as usize] {
-                tested[callee as usize] = true;
-                queue.push_back((callee, d + 1));
+        // BFS from this test, following callees.
+        let mut visited = vec![false; n];
+        visited[test_idx] = true;
+        let mut queue: VecDeque<(usize, u32)> = VecDeque::new();
+        queue.push_back((test_idx, 0));
+
+        while let Some((idx, d)) = queue.pop_front() {
+            if d >= depth {
+                continue;
+            }
+            for &callee in &graph.callees[idx] {
+                let c = callee as usize;
+                if !visited[c] {
+                    visited[c] = true;
+                    test_counts[c] += 1;
+                    queue.push_back((c, d + 1));
+                }
             }
         }
     }
 
-    // Collect untested functions (skip tests, non-functions, and filtered files).
-    let mut untested: Vec<u32> = Vec::new();
+    // Group by crate.
+    let mut crate_data: BTreeMap<String, CrateStats> = BTreeMap::new();
+
     for i in 0..n {
-        if tested[i] || graph.is_test[i] {
+        let crate_name = extract_crate_name(&graph.files[i]);
+        let entry = crate_data.entry(crate_name).or_default();
+
+        if graph.is_test[i] && graph.kinds[i] == "function" {
+            entry.test_fn += 1;
             continue;
         }
         if graph.kinds[i] != "function" {
             continue;
         }
-        if let Some(ref suffix) = file_filter
-            && !graph.files[i].ends_with(suffix.as_str()) {
-                continue;
-            }
-        untested.push(i as u32);
+
+        entry.prod_fn += 1;
+        if test_counts[i] > 0 {
+            entry.tested += 1;
+        } else {
+            entry.untested += 1;
+        }
+        entry.functions.push(FnCoverage {
+            name: graph.names[i].clone(),
+            file: graph.files[i].clone(),
+            lines: graph.lines[i],
+            test_count: test_counts[i],
+        });
     }
 
     if matches!(format, OutputFormat::Json) {
-        let items: Vec<serde_json::Value> = untested
-            .iter()
-            .map(|&i| {
-                let i = i as usize;
+        let mut crates_json = serde_json::Map::new();
+        for (name, stats) in &crate_data {
+            let fns: Vec<serde_json::Value> = stats.functions.iter().map(|f| {
                 serde_json::json!({
-                    "name": graph.names[i],
-                    "file": super::relative_path(&graph.files[i]),
-                    "lines": format_lines_opt(graph.lines[i]),
-                    "kind": graph.kinds[i],
+                    "name": f.name,
+                    "file": super::relative_path(&f.file),
+                    "lines": format_lines_opt(f.lines),
+                    "tests": f.test_count,
                 })
-            })
-            .collect();
-        println!("{}", serde_json::to_string(&serde_json::json!({
-            "untested_count": untested.len(),
-            "total_functions": (0..n).filter(|&i| graph.kinds[i] == "function" && !graph.is_test[i]).count(),
-            "functions": items,
-        }))?);
+            }).collect();
+            crates_json.insert(name.clone(), serde_json::json!({
+                "prod_fn": stats.prod_fn,
+                "test_fn": stats.test_fn,
+                "tested": stats.tested,
+                "untested": stats.untested,
+                "coverage": if stats.prod_fn > 0 {
+                    format!("{:.1}%", stats.tested as f64 / stats.prod_fn as f64 * 100.0)
+                } else {
+                    "N/A".to_owned()
+                },
+                "functions": fns,
+            }));
+        }
+        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(crates_json))?);
         return Ok(());
     }
 
-    let total_fns = (0..n)
-        .filter(|&i| graph.kinds[i] == "function" && !graph.is_test[i])
-        .count();
-
+    // Text output: per-crate summary table.
+    println!("=== coverage (BFS depth {depth}) ===\n");
     println!(
-        "=== untested: {}/{} functions (BFS depth {}) ===\n",
-        untested.len(),
-        total_fns,
-        depth
+        "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "crate", "prod_fn", "test_fn", "tested", "untested", "coverage"
+    );
+    println!("{}", "-".repeat(73));
+
+    let mut total = CrateStats::default();
+    for (name, stats) in &crate_data {
+        let pct = if stats.prod_fn > 0 {
+            format!("{:.1}%", stats.tested as f64 / stats.prod_fn as f64 * 100.0)
+        } else {
+            "N/A".to_owned()
+        };
+        println!(
+            "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
+            name, stats.prod_fn, stats.test_fn, stats.tested, stats.untested, pct
+        );
+        total.prod_fn += stats.prod_fn;
+        total.test_fn += stats.test_fn;
+        total.tested += stats.tested;
+        total.untested += stats.untested;
+    }
+    println!("{}", "-".repeat(73));
+    let total_pct = if total.prod_fn > 0 {
+        format!("{:.1}%", total.tested as f64 / total.prod_fn as f64 * 100.0)
+    } else {
+        "N/A".to_owned()
+    };
+    println!(
+        "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "total", total.prod_fn, total.test_fn, total.tested, total.untested, total_pct
     );
 
-    if untested.is_empty() {
-        println!("All functions are covered by tests!");
-        return Ok(());
+    // Detail: untested functions grouped by crate.
+    let any_untested = crate_data.values().any(|s| s.untested > 0);
+    if any_untested {
+        println!("\n--- untested functions ---\n");
+        for (crate_name, stats) in &crate_data {
+            let untested: Vec<&FnCoverage> = stats.functions.iter()
+                .filter(|f| f.test_count == 0)
+                .collect();
+            if untested.is_empty() {
+                continue;
+            }
+            println!("[{}] {} untested:", crate_name, untested.len());
+            for f in &untested {
+                let loc = format_lines_opt(f.lines);
+                let rel = super::relative_path(&f.file);
+                println!("  {} ({}:{})", f.name, rel, loc);
+            }
+            println!();
+        }
     }
 
-    // Group by file for readable output.
-    let tagged: Vec<TaggedEntry> = untested
-        .iter()
-        .map(|&idx| TaggedEntry {
-            idx,
-            tag: "untested",
-            sig: true,
-            call_line: 0,
-        })
-        .collect();
-    print_file_grouped(&graph, &tagged, false);
-
     Ok(())
+}
+
+#[derive(Default)]
+struct CrateStats {
+    prod_fn: usize,
+    test_fn: usize,
+    tested: usize,
+    untested: usize,
+    functions: Vec<FnCoverage>,
+}
+
+struct FnCoverage {
+    name: String,
+    file: String,
+    lines: Option<(usize, usize)>,
+    test_count: u32,
 }

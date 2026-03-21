@@ -218,9 +218,9 @@ pub enum Commands {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
-    /// Find functions not covered by any test.
-    #[command(visible_alias = "ut")]
-    Untested {
+    /// Per-crate test coverage with per-function test counts.
+    #[command(visible_alias = "cov")]
+    Coverage {
         /// Path to the database directory.
         db: PathBuf,
         /// BFS depth from test functions (default: 2).
@@ -229,9 +229,6 @@ pub enum Commands {
         /// Output format (text or json).
         #[arg(long, default_value = "text")]
         format: OutputFormat,
-        /// Filter by file path suffix.
-        #[arg(long)]
-        file: Option<String>,
     },
     /// Search string literal arguments across all chunks.
     #[command(visible_alias = "str")]

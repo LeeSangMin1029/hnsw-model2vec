@@ -1,6 +1,6 @@
 //! Code intelligence commands — structural queries on code-chunked databases.
 //!
-//! Provides `symbols`, `def`, `refs`, `impact`, `gather`, and `trace`
+//! Provides `symbols`, `def`, `refs`, `impact`, and `trace`
 //! subcommands that parse the structured text field of code chunks
 //! (produced by `chunk_code`) and answer structural navigation queries.
 //!
@@ -22,15 +22,13 @@ use anyhow::Result;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow, run_untested};
+pub use commands::{run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow, run_coverage};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 
 pub use v_code_intel::bfs::build_bfs_json;
 #[cfg(test)]
 pub use v_code_intel::context;
-#[cfg(test)]
-pub use v_code_intel::gather;
 pub use v_code_intel::graph;
 pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path, grouped_json};
 pub use v_code_intel::impact;

@@ -196,16 +196,6 @@ impl KoreanTokenizer {
         })
     }
 
-    /// Set the filter chain for indexing.
-    pub fn set_index_filters(&mut self, filters: FilterChain) {
-        self.index_filters = filters;
-    }
-
-    /// Set the filter chain for queries.
-    pub fn set_query_filters(&mut self, filters: FilterChain) {
-        self.query_filters = filters;
-    }
-
     /// Preprocess text before tokenization.
     fn preprocess(&self, text: &str) -> String {
         let mut result = text.to_string();

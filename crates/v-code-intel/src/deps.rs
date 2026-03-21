@@ -163,38 +163,3 @@ pub fn collect_transitive_files(graph: &DepGraph, start: &str, depth: usize) -> 
     visited
 }
 
-/// Extract crate name from path for color grouping.
-pub fn crate_group(path: &str) -> &str {
-    if let Some(start) = path.find("crates/") {
-        let rest = &path[start + 7..];
-        if let Some(end) = rest.find('/') {
-            return &path[start..start + 7 + end];
-        }
-    }
-    if let Some(start) = path.find("src/") {
-        return &path[..start + 3];
-    }
-    path
-}
-
-/// Find the length of the common path prefix among all file paths.
-pub fn common_prefix_len(paths: &[&str]) -> usize {
-    if paths.is_empty() {
-        return 0;
-    }
-    let first = paths[0].as_bytes();
-    let mut len = first.len();
-    for p in &paths[1..] {
-        let b = p.as_bytes();
-        len = len.min(b.len());
-        for i in 0..len {
-            if first[i] != b[i] {
-                len = i;
-                break;
-            }
-        }
-    }
-    // Snap back to last '/' boundary.
-    let first_str = &paths[0][..len];
-    first_str.rfind('/').map_or(0, |i| i + 1)
-}

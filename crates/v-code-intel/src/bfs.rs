@@ -3,17 +3,17 @@
 //! Provides `bfs_generic`, `BfsDirection`, `HasIdx`, and `BfsEntryExt` —
 //! the building blocks for context, gather, impact, and trace modules.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::graph::CallGraph;
-use crate::helpers::{format_lines_opt, format_lines_str_opt, relative_path};
+use crate::helpers::{format_lines_str_opt, relative_path};
 
 // ── Shared trait for BFS entry types ─────────────────────────────────────
 
 /// Trait for BFS entry types that carry a graph index.
 ///
-/// Implemented by `context::BfsEntry`, `gather::GatherEntry`, and
-/// `impact::BfsEntry` so that shared display logic can be reused.
+/// Implemented by `context::BfsEntry` and `impact::BfsEntry`
+/// so that shared display logic can be reused.
 pub trait HasIdx {
     fn idx(&self) -> u32;
 }
@@ -96,30 +96,6 @@ pub fn build_bfs_json<E: BfsEntryExt>(
 
     map.insert("results".to_owned(), serde_json::Value::Array(items));
     serde_json::Value::Object(map)
-}
-
-/// Print BFS results grouped by depth for any entry type implementing `BfsEntryExt`.
-pub fn print_bfs_grouped<E: BfsEntryExt>(graph: &CallGraph, entries: &[E]) {
-    let mut by_depth: BTreeMap<u32, Vec<&E>> = BTreeMap::new();
-    for e in entries {
-        by_depth.entry(e.depth()).or_default().push(e);
-    }
-
-    for (depth, items) in &by_depth {
-        let label = E::depth_label(*depth);
-        println!("  [{label}]");
-        for e in items {
-            let i = e.idx() as usize;
-            let file = relative_path(&graph.files[i]);
-            let name = &graph.names[i];
-            let kind = &graph.kinds[i];
-            let lines = format_lines_opt(graph.lines[i]);
-            let test_marker = if e.is_test(graph) { " [test]" } else { "" };
-            let suffix = e.extra_text_suffix();
-            println!("    {file}{lines}  [{kind}] {name}{test_marker}{suffix}");
-        }
-        println!();
-    }
 }
 
 // ── Generic BFS ──────────────────────────────────────────────────────────

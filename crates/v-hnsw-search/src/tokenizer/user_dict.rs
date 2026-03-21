@@ -4,7 +4,6 @@
 //! of domain-specific vocabulary, proper nouns, etc.
 
 use std::io::{self, BufRead};
-use std::path::Path;
 use v_hnsw_core::VhnswError;
 
 /// A user dictionary entry.
@@ -100,17 +99,6 @@ impl UserDictionary {
     /// Lines starting with `#` are treated as comments.
     /// Empty lines are skipped.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be read or contains invalid entries.
-    pub fn load_from_csv<P: AsRef<Path>>(path: P) -> Result<Self, VhnswError> {
-        let file = std::fs::File::open(path.as_ref()).map_err(|e| {
-            VhnswError::Tokenizer(format!("failed to open user dictionary: {}", e))
-        })?;
-
-        Self::load_from_reader(io::BufReader::new(file))
-    }
-
     /// Load entries from a reader.
     ///
     /// Expected format: `term,pos,reading` or `term,pos` (one entry per line).

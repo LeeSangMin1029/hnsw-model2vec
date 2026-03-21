@@ -9,67 +9,6 @@ use crate::error::{LspError, Result};
 use crate::lsp::jsonrpc::{Message, Request, RequestId, Version};
 use crate::shm::ShmRing;
 
-/// Default path for the shared memory file.
-pub fn default_shm_path() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("v-daemon");
-    dir.join("v-lsp.shm")
-}
-
-/// Path to the daemon PID file (matches v-hnsw-storage's port_path() directory).
-fn daemon_pid_path() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return std::path::PathBuf::from(local)
-                .join("v-hnsw")
-                .join("cache")
-                .join("v-daemon.pid");
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
-            return std::path::PathBuf::from(cache)
-                .join("v-hnsw")
-                .join("v-daemon.pid");
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            return std::path::PathBuf::from(home)
-                .join(".cache")
-                .join("v-hnsw")
-                .join("v-daemon.pid");
-        }
-    }
-    std::env::temp_dir().join("v-hnsw").join("v-daemon.pid")
-}
-
-/// Check if the daemon process is alive by reading its PID file.
-pub fn daemon_pid_alive() -> bool {
-    let pid_path = daemon_pid_path();
-    let Ok(pid_str) = std::fs::read_to_string(&pid_path) else {
-        return false;
-    };
-    let Ok(pid) = pid_str.trim().parse::<u32>() else {
-        return false;
-    };
-    process_alive(pid)
-}
-
-#[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    use std::process::Command;
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
-}
-
-#[cfg(not(windows))]
-fn process_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
-
 /// Request/response pair for shared memory IPC.
 ///
 /// Wire format (in the shm slot):

@@ -1586,19 +1586,6 @@ pub fn collect_owner_field_types(chunks: &[ParsedChunk]) -> HashMap<String, Hash
     result
 }
 
-/// Collect project type short names (struct, enum, trait, impl) for extern classification.
-pub fn collect_project_type_shorts(chunks: &[ParsedChunk]) -> HashSet<String> {
-    let mut set = HashSet::new();
-    for c in chunks {
-        if matches!(c.kind.as_str(), "struct" | "enum" | "trait" | "impl") {
-            let leaf = c.name.rsplit("::").next().unwrap_or(&c.name).to_lowercase();
-            let clean = leaf.split('<').next().unwrap_or(&leaf);
-            set.insert(clean.to_owned());
-        }
-    }
-    set
-}
-
 /// Build function name → return type map (lowercase → lowercase leaf type).
 ///
 /// Resolves `Self` to the owning type: `Foo::new → Self` becomes `foo::new → foo`.

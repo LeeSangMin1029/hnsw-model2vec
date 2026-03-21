@@ -147,52 +147,6 @@ pub fn spawn_daemon_and_wait(db: &Path) -> bool {
 }
 
 /// Ensure the daemon is running with the current binary version.
-///
-/// If the binary changed since the daemon started, shuts down the old
-/// daemon and spawns a fresh one. Returns `true` if a daemon is ready.
-pub fn ensure_daemon(db: &Path) -> bool {
-    if is_running() && !is_binary_stale() {
-        return true;
-    }
-    if is_running() && is_binary_stale() {
-        let _ = daemon_rpc("shutdown", serde_json::json!(null), 5);
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    spawn_daemon_and_wait(db)
-}
-
-/// Check whether the current executable is newer than the running daemon.
-fn is_binary_stale() -> bool {
-    let mtime_path = port_path()
-        .parent()
-        .map(|d| d.join("v-daemon.mtime"))
-        .unwrap_or_else(|| std::env::temp_dir().join("v-hnsw").join("v-daemon.mtime"));
-
-    let Ok(stored) = std::fs::read_to_string(&mtime_path) else {
-        return true;
-    };
-    let Ok(stored_ts) = stored.trim().parse::<i64>() else {
-        return true;
-    };
-
-    let Ok(exe) = std::env::current_exe() else {
-        return true;
-    };
-    let Ok(meta) = exe.metadata() else {
-        return true;
-    };
-    let Ok(modified) = meta.modified() else {
-        return true;
-    };
-
-    let current_ts = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    current_ts != stored_ts
-}
-
 /// Auto-start `v-daemon` in background if not already running.
 ///
 /// Looks for `v-daemon` next to the current executable, then in PATH.

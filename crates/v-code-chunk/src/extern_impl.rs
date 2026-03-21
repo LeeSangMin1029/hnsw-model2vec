@@ -20,20 +20,6 @@ pub fn extract_impl_methods(src: &[u8]) -> Vec<(String, String, Option<String>)>
     results
 }
 
-/// Timed variant — accumulates nanoseconds into atomic counters.
-pub fn extract_impl_methods_timed(
-    src: &[u8],
-    ns_parse: &std::sync::atomic::AtomicU64,
-    ns_walk: &std::sync::atomic::AtomicU64,
-) -> Vec<(String, String, Option<String>)> {
-    // In the text scanner there's no separate parse/walk — measure everything as "walk".
-    let _ = ns_parse; // no separate parse phase
-    let tw = std::time::Instant::now();
-    let result = extract_impl_methods(src);
-    ns_walk.fetch_add(tw.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-    result
-}
-
 // ── Scanner ──────────────────────────────────────────────────────────────
 
 struct Scanner<'a> {

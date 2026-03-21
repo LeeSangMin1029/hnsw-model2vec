@@ -4,7 +4,6 @@
 //! Only the subset needed for type inference queries is included.
 
 pub mod jsonrpc;
-pub mod transport;
 
 use serde::{Deserialize, Deserializer, Serialize};
 

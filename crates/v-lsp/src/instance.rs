@@ -9,9 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ra_ap_ide::{
-    Analysis, AnalysisHost, CallHierarchyConfig, CallItem, FileId, FilePosition, FileRange,
-    FindAllRefsConfig, GotoDefinitionConfig, HoverConfig, HoverDocFormat, LineCol, LineIndex,
-    NavigationTarget, Query, SubstTyLen, TextSize,
+    Analysis, AnalysisHost, CallHierarchyConfig, CallItem, FileId, FilePosition, FileRange, GotoDefinitionConfig, HoverConfig, HoverDocFormat, LineCol, LineIndex,
+    NavigationTarget, SubstTyLen, TextSize,
 };
 use ra_ap_load_cargo::{LoadCargoConfig, ProcMacroServerChoice, load_workspace_at};
 use ra_ap_project_model::CargoConfig;
@@ -43,14 +42,6 @@ fn record_empty_nav_file(file: &str) {
     *map.entry(file.to_owned()).or_default() += 1;
 }
 
-/// Get top files contributing to empty_nav, sorted by count descending.
-pub fn empty_nav_file_stats() -> Vec<(String, usize)> {
-    let guard = EMPTY_NAV_FILES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut result: Vec<_> = guard.as_ref().map_or_else(Vec::new, |m| m.iter().map(|(k,v)| (k.clone(), *v)).collect());
-    result.sort_by(|a, b| b.1.cmp(&a.1));
-    result
-}
-
 /// Reset all resolve_call counters and return their previous values.
 pub fn resolve_call_stats() -> ResolveCallStats {
     ResolveCallStats {
@@ -63,21 +54,6 @@ pub fn resolve_call_stats() -> ResolveCallStats {
         goto_miss: RC_GOTO_MISS.swap(0, AtOrd::Relaxed),
         nav_miss: RC_NAV_MISS.swap(0, AtOrd::Relaxed),
         empty_nav: RC_EMPTY_NAV.swap(0, AtOrd::Relaxed),
-    }
-}
-
-/// Peek at resolve_call counters without resetting.
-pub fn resolve_call_stats_peek() -> ResolveCallStats {
-    ResolveCallStats {
-        total: RC_TOTAL.load(AtOrd::Relaxed),
-        ok: RC_OK.load(AtOrd::Relaxed),
-        file_miss: RC_FILE_MISS.load(AtOrd::Relaxed),
-        line_zero: RC_LINE_ZERO.load(AtOrd::Relaxed),
-        pattern_miss: RC_PATTERN_MISS.load(AtOrd::Relaxed),
-        offset_miss: RC_OFFSET_MISS.load(AtOrd::Relaxed),
-        goto_miss: RC_GOTO_MISS.load(AtOrd::Relaxed),
-        nav_miss: RC_NAV_MISS.load(AtOrd::Relaxed),
-        empty_nav: RC_EMPTY_NAV.load(AtOrd::Relaxed),
     }
 }
 
@@ -627,61 +603,6 @@ impl RaInstance {
         Ok(result
             .map(|ri| ri.info.iter().map(|nav| self.nav_to_location(nav)).collect())
             .unwrap_or_default())
-    }
-
-    /// Find all references of the symbol at `file:line:col`.
-    pub fn find_references(
-        &self,
-        file: &str,
-        line: u32,
-        col: u32,
-    ) -> Result<Vec<SymbolLocation>> {
-        let pos = self.file_position(file, line, col)?;
-        let config = FindAllRefsConfig {
-            search_scope: None,
-            minicore: Default::default(),
-        };
-        let results = self
-            .analysis
-            .find_all_refs(pos, &config)
-            .map_err(|e| LspError::Protocol(format!("find_all_refs cancelled: {e}")))?
-            .unwrap_or_default();
-        let mut locs = Vec::new();
-        for result in &results {
-            if let Some(decl) = &result.declaration {
-                locs.push(self.nav_to_location(&decl.nav));
-            }
-            for (&file_id, ranges) in &result.references {
-                if let Some(rel_path) = self.reverse_file_map.get(&file_id) {
-                    if let Some(fi) = self.file_map.get(rel_path) {
-                        for (range, _category) in ranges {
-                            let start = fi.line_index.line_col(range.start());
-                            locs.push(SymbolLocation {
-                                name: String::new(),
-                                file: rel_path.clone(),
-                                full_range_start_line: start.line,
-                                full_range_end_line: fi.line_index.line_col(range.end()).line,
-                                focus_line: Some(start.line),
-                                focus_col: Some(start.col),
-                                kind: None,
-                                container: None,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        Ok(locs)
-    }
-
-    /// Search workspace symbols by name.
-    pub fn workspace_symbols(&self, query_str: &str, limit: usize) -> Result<Vec<SymbolLocation>> {
-        let query = Query::new(query_str.to_owned());
-        let navs = self
-            .analysis
-            .symbol_search(query, limit)
-            .map_err(|e| LspError::Protocol(format!("symbol_search cancelled: {e}")))?;
-        Ok(navs.iter().map(|nav| self.nav_to_location(nav)).collect())
     }
 
     // ── Position resolution ─────────────────────────────────────────

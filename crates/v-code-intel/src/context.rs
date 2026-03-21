@@ -3,7 +3,7 @@
 //! Shows the "context" of a symbol: what it calls (callees), what those
 //! call, etc., up to a configurable depth.
 
-use crate::bfs::{bfs_generic, BfsDirection, BfsEntryExt, HasIdx};
+use crate::bfs::{BfsEntryExt, HasIdx};
 use crate::graph::CallGraph;
 
 /// BFS result entry with depth and score.
@@ -35,11 +35,3 @@ impl BfsEntryExt for BfsEntry {
     }
 }
 
-/// Run depth-limited BFS on the callees direction.
-pub fn bfs_forward(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<BfsEntry> {
-    bfs_generic(graph, seeds, max_depth, BfsDirection::Forward, |idx, depth| {
-        let is_test = graph.is_test[idx as usize];
-        let score = (1.0 / f64::from(depth + 1)) * if is_test { 0.1 } else { 1.0 };
-        Some(BfsEntry { idx, depth, score })
-    })
-}

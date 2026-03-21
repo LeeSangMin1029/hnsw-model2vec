@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use crate::commands::intel::deps::{merge_deps, resolve_symbol, DepGraph, DepSet};
-use v_code_intel::deps::{common_prefix_len, crate_group};
 use crate::commands::intel::parse::ParsedChunk;
 
 fn chunk(name: &str, file: &str, calls: &[&str], types: &[&str]) -> ParsedChunk {
@@ -87,55 +86,6 @@ fn merge_deps_combines_vias() {
 
     let b_vias = &merged["b.rs"];
     assert_eq!(b_vias, &vec!["calls"]);
-}
-
-// ── crate_group ──────────────────────────────────────────────────────
-
-#[test]
-fn crate_group_extracts_crate() {
-    assert_eq!(
-        crate_group("crates/v-hnsw-core/src/lib.rs"),
-        "crates/v-hnsw-core"
-    );
-}
-
-#[test]
-fn crate_group_falls_back_to_src() {
-    assert_eq!(crate_group("src/main.rs"), "src");
-}
-
-#[test]
-fn crate_group_no_anchor() {
-    assert_eq!(crate_group("lib.rs"), "lib.rs");
-}
-
-// ── common_prefix_len ────────────────────────────────────────────────
-
-#[test]
-fn common_prefix_empty() {
-    assert_eq!(common_prefix_len(&[]), 0);
-}
-
-#[test]
-fn common_prefix_single() {
-    assert_eq!(common_prefix_len(&["crates/foo/src/lib.rs"]), "crates/foo/src/".len());
-}
-
-#[test]
-fn common_prefix_multiple() {
-    let paths = &[
-        "crates/foo/src/a.rs",
-        "crates/foo/src/b.rs",
-        "crates/foo/src/sub/c.rs",
-    ];
-    assert_eq!(common_prefix_len(paths), "crates/foo/src/".len());
-}
-
-#[test]
-fn common_prefix_no_common() {
-    let paths = &["alpha/a.rs", "beta/b.rs"];
-    // No common '/' prefix
-    assert_eq!(common_prefix_len(paths), 0);
 }
 
 // ── DepGraph::build ──────────────────────────────────────────────────
