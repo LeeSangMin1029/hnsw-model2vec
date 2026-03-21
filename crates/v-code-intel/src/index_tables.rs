@@ -418,15 +418,15 @@ fn extract_project_type_from_return(ret: &str, project_types: &HashSet<String>) 
 
 // ── Test helpers ────────────────────────────────────────────────────
 
+/// Check if a file path is in a test directory or has a test suffix.
 pub fn is_test_path(path: &str) -> bool {
     path.contains("/tests/") || path.contains("\\tests\\")
         || path.contains("/test/") || path.contains("\\test\\")
         || path.ends_with("_test.rs") || path.ends_with("_test.go")
-        || path.contains("/test_")
 }
 
 pub fn is_test_chunk(c: &ParsedChunk) -> bool {
-    c.is_test || is_test_path(&c.file) || c.name.starts_with("test_")
+    c.is_test || is_test_path(&c.file)
 }
 
 // ── Import map ──────────────────────────────────────────────────────

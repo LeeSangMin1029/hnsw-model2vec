@@ -475,7 +475,7 @@ fn chunk_contains(
 
 // ── Shared helpers ───────────────────────────────────────────────────────
 
-/// Payload-based test detection — uses shared `is_test_path` + text-level check.
+/// Payload-based test detection — uses shared `is_test_path` + first-line `[test]` marker.
 fn is_test_chunk(pstore: &impl PayloadStore, id: u64) -> bool {
     let Some(payload) = pstore.get_payload(id).ok().flatten() else {
         return false;
@@ -483,9 +483,11 @@ fn is_test_chunk(pstore: &impl PayloadStore, id: u64) -> bool {
     if crate::graph::is_test_path(&payload.source) {
         return true;
     }
+    // Check if chunk text's first line contains [test] marker (set by chunker).
     if let Ok(Some(text)) = pstore.get_text(id) {
         let first_line = text.lines().next().unwrap_or("");
-        if first_line.contains("test_") {
+        // "[function] test_foo" — name starts with test_ in the kind header.
+        if first_line.contains("] test_") {
             return true;
         }
     }

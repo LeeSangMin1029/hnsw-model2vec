@@ -446,6 +446,7 @@ pub(crate) fn unwrap_wrapper<'a>(
 /// Check if a function node has a test attribute (`#[test]`, `#[tokio::test]`, etc.).
 ///
 /// Checks prev siblings for attribute/decorator/annotation nodes.
+/// Skips doc comments and other attributes to reach test markers.
 /// Works for Rust (`attribute_item`), Python (`decorator`), Java (`annotation`).
 pub(crate) fn has_test_attribute_with_src(node: &tree_sitter::Node, src: &[u8]) -> bool {
     let mut sibling = node.prev_named_sibling();
@@ -453,31 +454,43 @@ pub(crate) fn has_test_attribute_with_src(node: &tree_sitter::Node, src: &[u8]) 
         match s.kind() {
             "attribute_item" | "attribute" => {
                 if let Ok(text) = s.utf8_text(src) {
-                    let lower = text.to_lowercase();
-                    if lower.contains("test") {
-                        return true;
-                    }
+                    if is_test_attr_text(text) { return true; }
                 }
             }
             "decorator" | "decorator_list" => {
                 if let Ok(text) = s.utf8_text(src) {
                     let lower = text.to_lowercase();
-                    if lower.contains("test") || lower.contains("pytest") {
+                    if lower.contains("@test") || lower.contains("pytest") {
                         return true;
                     }
                 }
             }
             "annotation" | "modifiers" => {
                 if let Ok(text) = s.utf8_text(src) {
-                    let lower = text.to_lowercase();
-                    if lower.contains("test") {
-                        return true;
-                    }
+                    if is_test_attr_text(text) { return true; }
                 }
             }
+            // Skip doc comments / line comments between attributes and function.
+            "line_comment" | "block_comment" | "string_literal" => {}
             _ => break,
         }
         sibling = s.prev_named_sibling();
     }
     false
+}
+
+/// Check if attribute text is a test marker (word-boundary aware).
+/// Matches: `#[test]`, `#[tokio::test]`, `#[rstest]`, `#[test_case]`, `@Test`
+/// Rejects: `#[contest]`, `#[latest]`, `#[attestation]`
+fn is_test_attr_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    // Strip outer #[] or @
+    let inner = lower.trim_start_matches('#').trim_start_matches('[')
+        .trim_end_matches(']').trim();
+    // Exact match or path ending with ::test
+    inner == "test"
+        || inner.ends_with("::test")
+        || inner.starts_with("test(")
+        || inner.starts_with("test_")
+        || inner.starts_with("rstest")
 }

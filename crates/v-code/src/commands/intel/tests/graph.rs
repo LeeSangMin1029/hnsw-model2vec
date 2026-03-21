@@ -157,17 +157,17 @@ fn build_resolves_chained_self_method() {
 #[test]
 fn is_test_detection() {
     let chunks = vec![
-        chunk("test_something", "src/lib.rs", &[]),
-        chunk("run", "src/tests/foo.rs", &[]),
-        chunk("normal", "src/lib.rs", &[]),
-        chunk("also_test", "src/test_helpers.rs", &[]),
+        chunk("test_something", "src/lib.rs", &[]),          // name only, no #[test] attr
+        chunk("run", "src/tests/foo.rs", &[]),                // /tests/ directory
+        chunk("normal", "src/lib.rs", &[]),                   // normal function
+        chunk("also_test", "src/test_helpers.rs", &[]),       // test_ in filename, not a test
     ];
     let graph = CallGraph::build(&chunks);
 
-    assert!(graph.is_test[0], "test_ prefix");
+    assert!(!graph.is_test[0], "name prefix alone is not a test");
     assert!(graph.is_test[1], "/tests/ in path");
     assert!(!graph.is_test[2], "normal function");
-    assert!(graph.is_test[3], "/test_ in path");
+    assert!(!graph.is_test[3], "test_ in filename is not a test");
 }
 
 // ── name_index sorted ────────────────────────────────────────────────

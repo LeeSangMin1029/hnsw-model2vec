@@ -1525,11 +1525,14 @@ fn owning_type_no_qualifier() {
 
 #[test]
 fn is_test_detection() {
+    // Test directories
     assert!(is_test_path("src/tests/foo.rs"));
     assert!(is_test_path("src/test/bar.rs"));
+    // Test file suffixes
     assert!(is_test_path("parser_test.rs"));
     assert!(is_test_path("parser_test.go"));
-    assert!(is_test_path("src/test_helpers.rs"));
+    // Non-test files (test_ prefix in filename is NOT a test indicator)
+    assert!(!is_test_path("src/test_helpers.rs"));
     assert!(!is_test_path("src/lib.rs"));
     assert!(!is_test_path("src/main.rs"));
 }
