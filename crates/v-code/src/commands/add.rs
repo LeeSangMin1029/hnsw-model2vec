@@ -289,57 +289,20 @@ fn prebuild_caches(
         return;
     }
 
-    // Local fallback: spawn RA for hover + call hierarchy.
-    let workspace_root = std::env::current_dir().ok();
-    let ra = workspace_root.as_ref().and_then(|root| {
-        eprintln!("    [ra] spawning RA instance...");
-        match v_lsp::instance::RaInstance::spawn(root) {
-            Ok(r) => {
-                eprintln!("    [ra] RA ready");
-                Some(r)
+    // Try daemon's resident RA for type collection (avoids spawning a second RA).
+    let (lsp_types, ra) = if v_hnsw_storage::daemon_client::is_running() {
+        match try_daemon_collect_types(&db_path.to_string_lossy()) {
+            Some(types) => {
+                eprintln!("    [daemon] LSP types collected via daemon RA");
+                (types, None)
             }
-            Err(e) => {
-                eprintln!("    [ra] spawn failed: {e}");
-                None
+            None => {
+                eprintln!("    [daemon] ra/collect-types failed, falling back to local RA");
+                spawn_local_ra_and_collect(db_path, &chunks, &new_suffixes)
             }
         }
-    });
-
-    let lsp_types = if let Some(ref ra) = ra {
-        let t_hover = std::time::Instant::now();
-
-        // Load cached LSP types — skip hover for unchanged files.
-        let cached = v_code_intel::loader::load_lsp_types_cache(db_path);
-        let types = if let Some(mut cached_types) = cached {
-            // Build set of unchanged file suffixes to skip.
-            let unchanged: std::collections::HashSet<&str> = chunks.iter()
-                .map(|c| c.file.as_str())
-                .filter(|f| !new_suffixes.contains(f))
-                .collect();
-            if unchanged.len() == chunks.iter().map(|c| c.file.as_str()).collect::<std::collections::HashSet<_>>().len() {
-                eprintln!("    [ra-hover] no changed chunks, using cache");
-            } else {
-                eprintln!("    [ra-hover] skipping {} unchanged files, querying changed chunks",
-                    unchanged.len());
-                let delta = v_code_intel::lsp_client::collect_types_via_ra_filtered(
-                    &chunks, ra, Some(&unchanged),
-                );
-                // Merge delta into cached types.
-                cached_types.return_types.extend(delta.return_types);
-                cached_types.receiver_types.extend(delta.receiver_types);
-            }
-            cached_types
-        } else {
-            v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra)
-        };
-
-        eprintln!("    [ra-hover] type collection: {:.1}s", t_hover.elapsed().as_secs_f64());
-        v_code_intel::loader::save_lsp_types_cache(db_path, &types);
-        types
     } else {
-        // No RA available — try loading cache anyway.
-        v_code_intel::loader::load_lsp_types_cache(db_path)
-            .unwrap_or_default()
+        spawn_local_ra_and_collect(db_path, &chunks, &new_suffixes)
     };
 
     // Build set of unchanged files to skip RA call hierarchy queries.
@@ -539,4 +502,72 @@ fn try_daemon_graph_build(db_path: &str) -> bool {
         300,
     )
     .is_ok()
+}
+
+/// Ask daemon's resident RA to collect LSP types (avoids spawning a second RA).
+fn try_daemon_collect_types(db_path: &str) -> Option<v_code_intel::lsp_client::LspTypes> {
+    let result = v_hnsw_storage::daemon_client::daemon_rpc(
+        "ra/collect-types",
+        serde_json::json!({ "db": db_path }),
+        120,
+    )
+    .ok()?;
+    serde_json::from_value(result).ok()
+}
+
+/// Spawn a local RA instance and collect LSP types (fallback when daemon is unavailable).
+fn spawn_local_ra_and_collect<'a>(
+    db_path: &std::path::Path,
+    chunks: &[v_code_intel::parse::ParsedChunk],
+    new_suffixes: &std::collections::HashSet<&'a str>,
+) -> (v_code_intel::lsp_client::LspTypes, Option<v_lsp::instance::RaInstance>) {
+    let workspace_root = std::env::current_dir().ok();
+    let ra = workspace_root.as_ref().and_then(|root| {
+        eprintln!("    [ra] spawning RA instance...");
+        match v_lsp::instance::RaInstance::spawn(root) {
+            Ok(r) => {
+                eprintln!("    [ra] RA ready");
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("    [ra] spawn failed: {e}");
+                None
+            }
+        }
+    });
+
+    let lsp_types = if let Some(ref ra) = ra {
+        let t_hover = std::time::Instant::now();
+
+        let cached = v_code_intel::loader::load_lsp_types_cache(db_path);
+        let types = if let Some(mut cached_types) = cached {
+            let unchanged: std::collections::HashSet<&str> = chunks.iter()
+                .map(|c| c.file.as_str())
+                .filter(|f| !new_suffixes.contains(f))
+                .collect();
+            if unchanged.len() == chunks.iter().map(|c| c.file.as_str()).collect::<std::collections::HashSet<_>>().len() {
+                eprintln!("    [ra-hover] no changed chunks, using cache");
+            } else {
+                eprintln!("    [ra-hover] skipping {} unchanged files, querying changed chunks",
+                    unchanged.len());
+                let delta = v_code_intel::lsp_client::collect_types_via_ra_filtered(
+                    chunks, ra, Some(&unchanged),
+                );
+                cached_types.return_types.extend(delta.return_types);
+                cached_types.receiver_types.extend(delta.receiver_types);
+            }
+            cached_types
+        } else {
+            v_code_intel::lsp_client::collect_types_via_ra(chunks, ra)
+        };
+
+        eprintln!("    [ra-hover] type collection: {:.1}s", t_hover.elapsed().as_secs_f64());
+        v_code_intel::loader::save_lsp_types_cache(db_path, &types);
+        types
+    } else {
+        v_code_intel::loader::load_lsp_types_cache(db_path)
+            .unwrap_or_default()
+    };
+
+    (lsp_types, ra)
 }
