@@ -25,7 +25,6 @@ pub mod reason;
 pub mod stats;
 pub mod lsp_client;
 pub mod ra_direct;
-pub mod stub_workspace;
 pub mod trace;
 
 #[cfg(test)]

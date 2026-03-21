@@ -131,6 +131,10 @@ fn dispatch(
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -4, e.to_string())),
         },
+        "ra/collect-types" => match crate::code::handle_collect_types(request.params.clone(), state.ra.as_ref()) {
+            Ok(v) => Ok(ok_response(id, v)),
+            Err(e) => Ok(err_response(id, -5, e.to_string())),
+        },
         method => Ok(err_response(id, -32601, format!("Unknown method: {method}"))),
     }
 }

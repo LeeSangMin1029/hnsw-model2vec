@@ -277,7 +277,15 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Spawn single RaInstance for both hover type inference + call hierarchy.
+    // Try daemon graph/build (hover + call hierarchy + graph — no local RA spawn).
+    // Fallback to local RA spawn if daemon is unavailable.
+    if try_daemon_graph_build(&db_path.to_string_lossy()) {
+        eprintln!("    [cache] graph built via daemon");
+        eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
+        return;
+    }
+
+    // Local fallback: spawn RA for hover + call hierarchy.
     let workspace_root = std::env::current_dir().ok();
     let ra = workspace_root.as_ref().and_then(|root| {
         eprintln!("    [ra] spawning RA instance...");
@@ -293,7 +301,6 @@ fn prebuild_caches(
         }
     });
 
-    // Hover type inference via RaInstance (replaces lspmux + stub workspace).
     let lsp_types = if let Some(ref ra) = ra {
         let t_hover = std::time::Instant::now();
         let types = v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra);
@@ -481,4 +488,43 @@ fn scan_files_fast(input_path: &std::path::Path, exclude: &[String]) -> Vec<Path
     }
     // Fallback to walkdir.
     scan_files(input_path, exclude, chunk_code::is_supported_code_file)
+}
+
+/// Send `graph/build` to the daemon (hover + call hierarchy + graph save).
+///
+/// Returns true if daemon handled the request successfully.
+fn try_daemon_graph_build(db_path: &str) -> bool {
+    use std::io::{BufRead, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let Ok(addr) = "127.0.0.1:19530".parse() else { return false };
+    let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let request = serde_json::json!({
+        "id": 1,
+        "method": "graph/build",
+        "params": { "db": db_path }
+    });
+
+    let mut writer = std::io::BufWriter::new(&stream);
+    let Ok(json) = serde_json::to_string(&request) else { return false };
+    if writeln!(writer, "{json}").is_err() || writer.flush().is_err() {
+        return false;
+    }
+
+    let mut reader = std::io::BufReader::new(&stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return false;
+    }
+
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return false;
+    };
+    response.get("result").is_some()
 }

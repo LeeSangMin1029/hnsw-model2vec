@@ -1,6 +1,7 @@
-//! Code intelligence (v-code) daemon handler: graph/build.
+//! Code intelligence (v-code) daemon handlers: graph/build + ra/collect-types.
 //!
 //! Builds call graphs using tree-sitter + RA call hierarchy.
+//! Collects hover-based type information using the daemon's resident RA instance.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -30,9 +31,15 @@ pub fn handle_graph_build(
 
     let chunks = v_code_intel::loader::load_chunks(&db)?;
 
+    let lsp_types = if let Some(ra) = ra {
+        v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra)
+    } else {
+        v_code_intel::lsp_client::LspTypes::default()
+    };
+
     let graph = v_code_intel::graph::CallGraph::build_with_lsp(
         &chunks,
-        &v_code_intel::lsp_client::LspTypes::default(),
+        &lsp_types,
         ra,
     );
     let _ = graph.save(&db);
@@ -46,4 +53,39 @@ pub fn handle_graph_build(
         "status": "ok",
         "nodes": graph.len(),
     }))
+}
+
+/// Collect hover-based type information using the daemon's resident RA instance.
+///
+/// Loads chunks from the DB cache, runs `collect_types_via_ra`, and returns
+/// serialized `LspTypes`. This avoids RA re-spawn (~20s) on incremental adds.
+pub fn handle_collect_types(
+    params: serde_json::Value,
+    ra: Option<&v_lsp::instance::RaInstance>,
+) -> anyhow::Result<serde_json::Value> {
+    let ra = ra.ok_or_else(|| anyhow::anyhow!("RA not available"))?;
+
+    #[derive(serde::Deserialize)]
+    struct CollectTypesParams {
+        db: String,
+    }
+
+    let p: CollectTypesParams = serde_json::from_value(params)
+        .map_err(|e| anyhow::anyhow!("Invalid ra/collect-types params: {e}"))?;
+    let db_path = PathBuf::from(&p.db);
+    let db = db_path
+        .canonicalize()
+        .unwrap_or_else(|_| db_path.clone());
+
+    let chunks = v_code_intel::loader::load_chunks(&db)?;
+    let lsp_types = v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra);
+
+    let receiver_count: usize = lsp_types.receiver_types.values().map(|m| m.len()).sum();
+    eprintln!(
+        "[daemon] collect-types: {} receivers, {} return_types",
+        receiver_count,
+        lsp_types.return_types.len(),
+    );
+
+    Ok(serde_json::to_value(lsp_types)?)
 }
