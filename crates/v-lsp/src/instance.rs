@@ -174,7 +174,7 @@ impl RaInstance {
             t0.elapsed().as_secs_f64()
         );
 
-        // Prime caches: trigger type inference for all crates so goto_definition works.
+        // Prime caches: trigger type inference for all crates so hover works fast.
         let t_prime = Instant::now();
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get())

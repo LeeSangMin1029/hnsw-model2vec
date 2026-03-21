@@ -116,6 +116,7 @@ opt-level = 3
 # Deploy: cargo build --release -p v-hnsw -p v-code       (full optimization)
 [profile.local]
 inherits = "release"
+lto = false
 incremental = true
 
 [profile.release]
