@@ -381,14 +381,6 @@ pub enum Commands {
         /// Path to the database directory.
         db: PathBuf,
     },
-    /// Verify call-site accuracy of the call graph.
-    Verify {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Show detailed wrong lines, extern calls, and unresolved samples.
-        #[arg(short, long)]
-        verbose: bool,
-    },
     /// Create a new file at a project-relative path.
     #[command(visible_alias = "cf")]
     CreateFile {

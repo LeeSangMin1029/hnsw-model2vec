@@ -12,6 +12,7 @@ members = [
     "crates/v-hnsw",
     "crates/v-code",
     "crates/v-daemon",
+    "crates/v-lsp",
 ]
 resolver = "2"
 
@@ -35,6 +36,7 @@ v-code-intel = { path = "crates/v-code-intel" }
 v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 v-hnsw-cli = { path = "crates/v-hnsw-cli" }
 v-daemon = { path = "crates/v-daemon" }
+v-lsp = { path = "crates/v-lsp" }
 
 # Error handling
 anyhow = "1"
@@ -71,6 +73,13 @@ zstd = "0.13"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+
+# rust-analyzer as library (in-process type inference in v-lsp)
+ra_ap_ide = "0.0.324"
+ra_ap_load-cargo = "0.0.324"
+ra_ap_vfs = "0.0.324"
+ra_ap_project_model = "0.0.324"
 
 # Dev dependencies
 proptest = "1"

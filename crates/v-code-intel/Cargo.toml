@@ -11,6 +11,7 @@ license.workspace = true
 v-hnsw-core.workspace = true
 v-hnsw-storage.workspace = true
 v-code-chunk.workspace = true
+v-lsp.workspace = true
 
 # Error handling
 anyhow = "1"

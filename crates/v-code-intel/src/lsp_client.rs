@@ -456,7 +456,7 @@ pub fn collect_lsp_types(
     let mut null_count = 0usize;
     let mut hover_ok = 0usize;
 
-    for (i, q) in queries.iter().enumerate() {
+    for (_i, q) in queries.iter().enumerate() {
         let path = Path::new(&q.file);
         if let Some(type_str) = client.hover(path, q.line, q.col) {
             hover_ok += 1;

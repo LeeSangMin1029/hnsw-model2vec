@@ -37,6 +37,7 @@ pub fn current_rss_mb() -> f64 {
             pagefile_usage: usize,
             peak_pagefile_usage: usize,
         }
+        #[expect(unsafe_code, reason = "FFI for Windows memory profiling")]
         unsafe extern "system" {
             fn GetCurrentProcess() -> *mut std::ffi::c_void;
             fn K32GetProcessMemoryInfo(
@@ -525,6 +526,26 @@ impl CallGraph {
             }
         }
         eprintln!("      [graph] pass 2+ iterative: {:.1}ms ({iter_passes} passes)  RSS: {:.1}MB (+{:.1})", t_iter.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
+
+        // RA outgoing+incoming calls: add edges that tree-sitter missed.
+        let t_ra = std::time::Instant::now();
+        let ra_result = crate::ra_direct::resolve_via_ra(chunks);
+        if !ra_result.edges.is_empty() {
+            let mut ra_added = 0usize;
+            for &(src, tgt, line) in &ra_result.edges {
+                if src < chunks.len() && tgt < chunks.len() && src != tgt {
+                    let tgt_u32 = tgt as u32;
+                    if !adj.callees[src].contains(&tgt_u32) {
+                        adj.callees[src].push(tgt_u32);
+                        adj.callers[tgt].push(src as u32);
+                        adj.call_sites[src].push((tgt_u32, line));
+                        ra_added += 1;
+                    }
+                }
+            }
+            eprintln!("      [graph] RA edges: +{ra_added} new ({} total from RA, {:.1}s)",
+                ra_result.edges.len(), t_ra.elapsed().as_secs_f64());
+        }
 
         let t3 = std::time::Instant::now();
         adj.dedup();
