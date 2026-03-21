@@ -278,29 +278,23 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // All RA usage goes through daemon. Never spawn RA locally.
-    if v_hnsw_storage::daemon_client::is_running() {
-        if try_daemon_graph_build(&db_path.to_string_lossy()) {
-            eprintln!("    [cache] graph built via daemon");
+    // Graph build always goes through daemon (RA-based, precise).
+    // Auto-start daemon if not running.
+    if !v_hnsw_storage::daemon_client::is_running() {
+        eprintln!("    [daemon] not running, starting...");
+        if !v_hnsw_storage::daemon_client::spawn_daemon_and_wait(db_path) {
+            eprintln!("    [daemon] failed to start — graph.bin will be missing until daemon is available");
             eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
             return;
         }
-        eprintln!("    [daemon] graph/build failed, building locally (tree-sitter only)");
-    } else {
-        eprintln!("    [daemon] not running, building graph locally (tree-sitter only)");
+        eprintln!("    [daemon] started");
     }
 
-    // Fallback: tree-sitter only graph (no RA).
-    let lsp_types = v_code_intel::loader::load_lsp_types_cache(db_path)
-        .unwrap_or_default();
-
-    let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_with_lsp(&chunks, &lsp_types, None);
-    eprintln!("    [cache] graph build: {:.1}ms (tree-sitter only)", t3.elapsed().as_secs_f64() * 1000.0);
-
-    let t4 = std::time::Instant::now();
-    let _ = graph.save(db_path);
-    eprintln!("    [cache] graph.bin save: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
+    if try_daemon_graph_build(&db_path.to_string_lossy()) {
+        eprintln!("    [cache] graph built via daemon");
+    } else {
+        eprintln!("    [daemon] graph/build failed — run `v-daemon --db {}` manually", db_path.display());
+    }
     eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
 }
 

@@ -54,10 +54,6 @@ pub fn load_or_build_graph_with_chunks(
 }
 
 fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
-    if !v_hnsw_storage::daemon_client::is_running() {
-        return DaemonBuildResult::Unavailable;
-    }
-
     let Some(canonical) = db.canonicalize().ok() else {
         return DaemonBuildResult::Unavailable;
     };
@@ -67,20 +63,41 @@ fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
         return DaemonBuildResult::Ready(Box::new(g));
     }
 
-    // No cached graph — fire-and-forget build request to daemon.
-    // Fall back to tree-sitter immediately instead of blocking 300s.
+    // Auto-start daemon if not running.
+    if !v_hnsw_storage::daemon_client::is_running() {
+        eprintln!("[graph] Daemon not running, starting...");
+        if !v_hnsw_storage::daemon_client::spawn_daemon_and_wait(&canonical) {
+            return DaemonBuildResult::Unavailable;
+        }
+        eprintln!("[graph] Daemon started");
+    }
+
+    // Blocking RPC — wait for daemon to build the graph (RA-based).
     let Some(db_str) = canonical.to_str() else {
         return DaemonBuildResult::Unavailable;
     };
     let params = serde_json::json!({"db": db_str});
-    eprintln!("[graph] Requesting daemon graph build (non-blocking)...");
-    v_hnsw_storage::daemon_client::daemon_rpc_fire_and_forget("graph/build", params);
-    DaemonBuildResult::Building
+    eprintln!("[graph] Building graph via daemon (RA)...");
+    match v_hnsw_storage::daemon_client::daemon_rpc("graph/build", params, 300) {
+        Ok(_) => {
+            // Daemon saved graph.bin — load it.
+            if let Some(g) = v_code_intel::graph::CallGraph::load(&canonical) {
+                return DaemonBuildResult::Ready(Box::new(g));
+            }
+            DaemonBuildResult::Unavailable
+        }
+        Err(e) => {
+            eprintln!("[graph] Daemon graph/build failed: {e}");
+            DaemonBuildResult::Unavailable
+        }
+    }
 }
 
-fn daemon_spawn_and_wait(_db: &std::path::Path) {
-    // Do NOT auto-spawn daemon — tree-sitter resolution is sufficient.
-    // Users can manually start v-daemon if they want LSP-enhanced graphs.
+fn daemon_spawn_and_wait(db: &std::path::Path) {
+    if !v_hnsw_storage::daemon_client::is_running() {
+        eprintln!("[graph] Starting daemon...");
+        v_hnsw_storage::daemon_client::spawn_daemon_and_wait(db);
+    }
 }
 
 pub use v_code_intel::parse::ParsedChunk;
