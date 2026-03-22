@@ -121,19 +121,17 @@ pub fn run(
         state.maybe_unload_model();
         state.maybe_evict_databases();
 
-        // Poll file watcher for source changes → invalidate graph cache + auto-reindex.
+        // Poll file watcher for source changes → invalidate graph cache only.
+        // Actual reindex is deferred to the next explicit `v-code add` call.
+        // This prevents daemon memory spikes from background reindexing.
         if let Some(ref mut w) = watcher {
             let changed = w.poll_changes();
             if !changed.is_empty() {
                 eprintln!(
-                    "[watcher] {} file(s) changed, invalidating graph cache + auto-reindex",
+                    "[watcher] {} file(s) changed, invalidating graph cache",
                     changed.len(),
                 );
-                for f in &changed {
-                    tracing::debug!(file = %f.display(), "source file changed");
-                }
                 w.invalidate_graph_cache();
-                w.auto_reindex();
             }
         }
 

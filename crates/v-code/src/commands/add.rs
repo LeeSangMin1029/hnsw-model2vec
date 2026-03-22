@@ -112,19 +112,43 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         let _ = config.save(&db_path);
     }
 
-    // === Pass 1: Chunk all files (parallel via rayon) ===
-    // Extern is spawned AFTER chunk to avoid allocator contention.
+    // === Pass 1: Chunk all files via daemon RA ===
     eprintln!("  [rss] start: {:.0}MB", v_code_intel::graph::current_rss_mb());
     let t0 = std::time::Instant::now();
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
-    super::ingest::chunk_code_files(
-        &code_files,
-        is_interrupted,
-        &mut entries,
-        &mut file_metadata_map,
-    );
-    eprintln!("  chunk: {:.1}s  RSS: {:.0}MB", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
+
+    // Ensure daemon is running for RA-based chunking.
+    if !v_hnsw_storage::daemon_client::is_running() {
+        eprintln!("  [daemon] not running, starting...");
+        if !v_hnsw_storage::daemon_client::spawn_daemon_and_wait(&db_path) {
+            // Fallback: tree-sitter chunking if daemon unavailable.
+            eprintln!("  [daemon] failed to start, falling back to tree-sitter");
+            super::ingest::chunk_code_files(
+                &code_files,
+                is_interrupted,
+                &mut entries,
+                &mut file_metadata_map,
+            );
+            eprintln!("  chunk: {:.1}s  RSS: {:.0}MB (tree-sitter fallback)", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
+        }
+    }
+
+    if entries.is_empty() && v_hnsw_storage::daemon_client::is_running() {
+        match super::ingest::chunk_via_daemon(&code_files, &db_path, &mut entries, &mut file_metadata_map) {
+            Ok(()) => eprintln!("  chunk: {:.1}s  RSS: {:.0}MB (daemon RA)", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb()),
+            Err(e) => {
+                eprintln!("  [daemon] chunk failed: {e}, falling back to tree-sitter");
+                super::ingest::chunk_code_files(
+                    &code_files,
+                    is_interrupted,
+                    &mut entries,
+                    &mut file_metadata_map,
+                );
+                eprintln!("  chunk: {:.1}s  RSS: {:.0}MB (tree-sitter fallback)", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
+            }
+        }
+    }
 
     // === Build called_by + direct bulk write (zero-copy path) ===
     println!("Symbols: {} (functions, structs, enums, ...)", entries.len());
