@@ -6,7 +6,6 @@ members = [
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
     "crates/v-hnsw-rerank",
-    "crates/v-code-chunk",
     "crates/v-code-intel",
     "crates/v-hnsw-cli",
     "crates/v-hnsw",
@@ -31,7 +30,6 @@ v-hnsw-storage = { path = "crates/v-hnsw-storage" }
 v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
 v-code = { path = "crates/v-code" }
-v-code-chunk = { path = "crates/v-code-chunk" }
 v-code-intel = { path = "crates/v-code-intel" }
 v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 v-hnsw-cli = { path = "crates/v-hnsw-cli" }
@@ -91,20 +89,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 debug = "line-tables-only"
 
 # Optimize heavy deps in dev builds for faster runtime.
-[profile.dev.package.tree-sitter]
-opt-level = 3
-[profile.dev.package.tree-sitter-rust]
-opt-level = 3
-[profile.dev.package.tree-sitter-python]
-opt-level = 3
-[profile.dev.package.tree-sitter-java]
-opt-level = 3
-[profile.dev.package.tree-sitter-c]
-opt-level = 3
-[profile.dev.package.tree-sitter-javascript]
-opt-level = 3
-[profile.dev.package.v-code-chunk]
-opt-level = 3
 [profile.dev.package.v-code-intel]
 opt-level = 2
 [profile.dev.package.v-hnsw-core]
