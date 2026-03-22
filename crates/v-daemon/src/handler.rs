@@ -135,18 +135,10 @@ fn dispatch(
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -5, e.to_string())),
         },
-        "code/chunk" => {
-            let result = crate::code::handle_chunk_files(request.params.clone(), state.ra.as_ref());
-            // Free salsa body type inference caches after chunking.
-            if let Some(ref mut ra) = state.ra {
-                ra.garbage_collect();
-                eprintln!("[ra] garbage collected after code/chunk");
-            }
-            match result {
-                Ok(v) => Ok(ok_response(id, v)),
-                Err(e) => Ok(err_response(id, -6, e.to_string())),
-            }
-        }
+        "code/chunk" => match crate::code::handle_chunk_files(request.params.clone(), state.ra.as_mut()) {
+            Ok(v) => Ok(ok_response(id, v)),
+            Err(e) => Ok(err_response(id, -6, e.to_string())),
+        },
         method => Ok(err_response(id, -32601, format!("Unknown method: {method}"))),
     }
 }

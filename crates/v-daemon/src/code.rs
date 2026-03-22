@@ -85,7 +85,7 @@ pub fn handle_collect_types(
 /// `discover_tests_in_file`, and source text parsing.
 pub fn handle_chunk_files(
     params: serde_json::Value,
-    ra: Option<&v_lsp::instance::RaInstance>,
+    ra: Option<&mut v_lsp::instance::RaInstance>,
 ) -> anyhow::Result<serde_json::Value> {
     let ra = ra.ok_or_else(|| anyhow::anyhow!("RA not available — daemon starting?"))?;
 
@@ -98,9 +98,7 @@ pub fn handle_chunk_files(
         .map_err(|e| anyhow::anyhow!("Invalid code/chunk params: {e}"))?;
 
     let t0 = std::time::Instant::now();
-    let chunks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ra.chunk_files(&p.files)
-    })).map_err(|e| anyhow::anyhow!("chunk_files panicked: {:?}", e))?;
+    let chunks = ra.chunk_files(&p.files);
     eprintln!(
         "[daemon] code/chunk: {} files → {} chunks ({:.1}ms)",
         p.files.len(), chunks.len(),

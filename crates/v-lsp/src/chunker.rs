@@ -48,45 +48,24 @@ impl RaInstance {
     /// - `outgoing_calls` → call edges with line numbers
     /// - `discover_tests_in_file` → test function detection
     /// - source text → signatures, imports, visibility
-    pub fn chunk_files(&self, files: &[String]) -> Vec<RaChunk> {
+    pub fn chunk_files(&mut self, files: &[String]) -> Vec<RaChunk> {
         let mut all_chunks = Vec::new();
-        let mut test_ranges: HashMap<FileId, HashSet<u32>> = HashMap::new();
+        const BATCH_SIZE: usize = 50;
+        let mut files_processed = 0usize;
 
-        let analysis = self.analysis();
-
-        // Phase 1: runnables (test detection)
-        let t_run = std::time::Instant::now();
-        let rss_before_run = 0.0;
-        for file_key in files {
-            if let Some(fi) = self.file_map().get(file_key) {
-                if let Ok(runnables) = analysis.runnables(fi.file_id) {
-                    let file_len = TextSize::from(fi.source.len() as u32);
-                    let ranges: HashSet<u32> = runnables.iter()
-                        .filter(|r| format!("{:?}", r.kind).contains("Test"))
-                        .filter_map(|r| {
-                            let start = r.nav.focus_range.unwrap_or(r.nav.full_range).start();
-                            if start < file_len {
-                                Some(fi.line_index.line_col(start).line)
-                            } else { None }
-                        })
-                        .collect();
-                    if !ranges.is_empty() {
-                        test_ranges.insert(fi.file_id, ranges);
-                    }
-                }
-            }
-        }
-
-        eprintln!("    [chunker] phase 1 runnables: {:.1}ms, RSS delta: {:.0}MB",
-            t_run.elapsed().as_secs_f64() * 1000.0, 0.0 - rss_before_run);
-
-        // Phase 2: file_structure + outgoing_calls
-        let t_struct = std::time::Instant::now();
-        let rss_before_struct = 0.0;
+        let t_start = std::time::Instant::now();
         let mut call_count = 0u32;
 
         for file_key in files {
-            let Some(fi) = self.file_map().get(file_key) else { continue };
+            // Batch GC: every N files, free salsa body type inference caches.
+            if files_processed > 0 && files_processed % BATCH_SIZE == 0 {
+                self.garbage_collect();
+                eprintln!("    [chunker] GC after {} files ({} chunks so far)", files_processed, all_chunks.len());
+            }
+            files_processed += 1;
+
+            let analysis = self.analysis();
+            let Some(fi) = self.file_map().get(file_key) else { files_processed += 1; continue };
             let source = &fi.source;
             let lines: Vec<&str> = source.lines().collect();
             let config = FileStructureConfig { exclude_locals: true };
@@ -95,7 +74,8 @@ impl RaInstance {
             // Extract imports from source.
             let imports = extract_imports(source);
 
-            let file_tests = test_ranges.get(&fi.file_id);
+            let is_test_file = file_key.contains("/tests/") || file_key.contains("\\tests\\")
+                || file_key.contains("/test/") || file_key.ends_with("_test.rs");
             let mut chunk_index = 0;
 
             for node in &structure {
@@ -147,7 +127,7 @@ impl RaInstance {
                 let signature = node.detail.clone();
 
                 // Is test?
-                let is_test = file_tests.map_or(false, |tests| tests.contains(&(start_line_0 as u32)));
+                let is_test = is_test_file;
 
                 let (calls, call_lines) = if kind == "function" {
                     call_count += 1;
@@ -209,8 +189,8 @@ impl RaInstance {
             }
         }
 
-        eprintln!("    [chunker] phase 2 structure+calls: {:.1}ms, {} outgoing_calls, RSS delta: {:.0}MB",
-            t_struct.elapsed().as_secs_f64() * 1000.0, call_count, 0.0 - rss_before_struct);
+        eprintln!("    [chunker] done: {:.1}s, {} files, {} outgoing_calls, {} chunks",
+            t_start.elapsed().as_secs_f64(), files_processed, call_count, all_chunks.len());
 
         all_chunks
     }
