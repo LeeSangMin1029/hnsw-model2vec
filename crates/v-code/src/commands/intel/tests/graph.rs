@@ -66,16 +66,12 @@ fn build_deduplicates_edges() {
 #[test]
 fn build_resolves_short_names() {
     let chunks = vec![
-        {
-            let mut c = chunk("mod_a::Alpha", "src/a.rs", &["Beta"]);
-            c.imports = vec!["use mod_b::Beta;".to_owned()];
-            c
-        },
+        chunk("mod_a::Alpha", "src/a.rs", &["Beta"]),
         chunk("mod_b::Beta", "src/b.rs", &[]),
     ];
     let graph = CallGraph::build(&chunks);
 
-    // "Beta" should resolve to mod_b::Beta via import
+    // "Beta" matches mod_b::Beta via short name fallback
     assert_eq!(graph.callees[0], vec![1]);
 }
 
@@ -121,35 +117,19 @@ fn resolve_no_match() {
     assert!(results.is_empty());
 }
 
-// ── self.method() resolution ─────────────────────────────────────────
+// ── RA-resolved method calls ─────────────────────────────────────────
 
 #[test]
-fn build_resolves_self_method_calls() {
+fn build_resolves_method_calls_from_ra() {
+    // RA resolves self.helper → Resolver::helper (via outgoing_calls)
     let chunks = vec![
         chunk("Resolver::helper", "src/lsp.rs", &[]),
-        chunk("Resolver::do_work", "src/lsp.rs", &["self.helper"]),
+        chunk("Resolver::do_work", "src/lsp.rs", &["Resolver::helper"]),
     ];
     let graph = CallGraph::build(&chunks);
 
-    // self.helper → Resolver::helper (owning type from chunk name)
-    assert_eq!(graph.callees[1], vec![0], "self.helper should resolve to Resolver::helper");
-    assert_eq!(graph.callers[0], vec![1], "Resolver::helper should have do_work as caller");
-}
-
-#[test]
-fn build_resolves_chained_self_method() {
-    // self.config.bar should NOT resolve to Foo::bar — config is a field,
-    // and without knowing config's type we can't assume bar belongs to Foo.
-    // This prevents false positives like self.manifest.get_collection → CollectionManager::get_collection
-    // when manifest is actually a Manifest.
-    let chunks = vec![
-        chunk("Foo::bar", "src/foo.rs", &[]),
-        chunk("Foo::run", "src/foo.rs", &["self.config.bar"]),
-    ];
-    let graph = CallGraph::build(&chunks);
-
-    let empty: Vec<u32> = vec![];
-    assert_eq!(graph.callees[1], empty, "self.config.bar should not resolve without field type info");
+    assert_eq!(graph.callees[1], vec![0]);
+    assert_eq!(graph.callers[0], vec![1]);
 }
 
 // ── is_test detection ────────────────────────────────────────────────

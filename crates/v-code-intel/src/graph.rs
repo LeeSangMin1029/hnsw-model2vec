@@ -9,9 +9,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::index_tables::{self, extract_leaf_type, strip_generics_from_key};
+use crate::index_tables::{self, strip_generics_from_key};
 use crate::parse::ParsedChunk;
-use crate::resolve::{ChunkCtx, ResolveCtx, resolve_calls};
 
 /// Source hash — auto-computed by build.rs for cache invalidation.
 const GRAPH_SOURCE_HASH: &str = env!("GRAPH_SOURCE_HASH");
@@ -187,24 +186,11 @@ impl AdjState {
 impl CallGraph {
     pub fn build(chunks: &[ParsedChunk]) -> Self { Self::build_full(chunks) }
 
+    /// Build the call graph from parsed chunks.
+    ///
+    /// Resolves calls by simple name matching (exact → short fallback).
+    /// Chunks should already contain accurate call data from RA via daemon.
     pub fn build_full(chunks: &[ParsedChunk]) -> Self {
-        Self::build_with_lsp(chunks, &crate::lsp_client::LspTypes::default(), None)
-    }
-
-    pub fn build_with_lsp(
-        chunks: &[ParsedChunk],
-        lsp_types: &crate::lsp_client::LspTypes,
-        ra: Option<&v_lsp::instance::RaInstance>,
-    ) -> Self {
-        Self::build_with_lsp_filtered(chunks, lsp_types, ra, None)
-    }
-
-    pub fn build_with_lsp_filtered(
-        chunks: &[ParsedChunk],
-        lsp_types: &crate::lsp_client::LspTypes,
-        ra: Option<&v_lsp::instance::RaInstance>,
-        ra_skip_files: Option<&HashSet<&str>>,
-    ) -> Self {
         let rss0 = current_rss_mb();
         eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
 
@@ -212,177 +198,36 @@ impl CallGraph {
         let meta = ChunkMeta::collect(chunks);
         eprintln!("      [graph] meta collect: {:.1}ms  RSS: {:.1}MB (+{:.1})", t0.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
 
-        // Build index tables in parallel.
         let t1 = std::time::Instant::now();
+        let owner_field_types = index_tables::collect_owner_field_types(chunks);
         let mut adj = AdjState::new(chunks.len());
-        let (left, right) = rayon::join(
-            || rayon::join(
-                || rayon::join(
-                    || index_tables::collect_owner_types(chunks),
-                    || index_tables::collect_owner_field_types(chunks),
-                ),
-                || rayon::join(
-                    || index_tables::build_return_type_map(chunks),
-                    || index_tables::collect_trait_methods(chunks),
-                ),
-            ),
-            || rayon::join(
-                || index_tables::build_method_owner_index(chunks),
-                || rayon::join(
-                    || index_tables::collect_instantiated_types(chunks),
-                    || index_tables::build_trait_impl_method_map(chunks),
-                ),
-            ),
-        );
-        let ((owner_types, owner_field_types), (mut return_type_map, _trait_methods)) = left;
-        let (method_owners, (instantiated, trait_impl_methods)) = right;
 
-        // LSP return type overlay
-        merge_lsp_return_types(&mut return_type_map, &lsp_types.return_types, chunks);
-        eprintln!("      [graph] index tables: {:.1}ms  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
-
-        let extern_all_methods: HashSet<String> = HashSet::new();
-
-        // Build ResolveCtx (shared across all chunks)
-        let rctx = ResolveCtx {
-            exact: &meta.exact, short: &meta.short,
-            kinds: &meta.kinds, names: &meta.names,
-            return_type_map: &return_type_map,
-            method_owners: &method_owners,
-            instantiated: &instantiated,
-            trait_impl_methods: &trait_impl_methods,
-            enum_variants: &meta.enum_variants,
-            extern_all_methods: &extern_all_methods,
-        };
-
-        // Pre-compute per-chunk contexts.
-        let t2 = std::time::Instant::now();
-        use rayon::prelude::*;
-        let mut ctxs: Vec<ChunkCtx> = chunks.par_iter()
-            .map(|c| build_chunk_ctx(c, &owner_types, &owner_field_types))
-            .collect();
-
-        // Inject LSP-resolved receiver types.
-        inject_lsp_receivers(&mut ctxs, &lsp_types.receiver_types, &meta);
-
-        // Pass 1: parallel resolve.
-        let par_results: Vec<_> = chunks.par_iter()
-            .zip(ctxs.par_iter_mut())
-            .enumerate()
-            .map(|(src, (c, ctx))| resolve_calls(src, c, ctx, &rctx, None))
-            .collect();
-
-        let mut resolved_indices: Vec<Vec<bool>> = Vec::with_capacity(chunks.len());
-        for (src, (edges, type_edges, _, _)) in par_results.iter().enumerate() {
-            for &(tgt, line) in edges { adj.add_edge(src, tgt, line); }
-            for &(tgt, _) in type_edges {
-                if tgt as usize != src {
-                    adj.callees[src].push(tgt);
-                    adj.callers[tgt as usize].push(src as u32);
+        // Resolve calls by name matching: exact (lowercase) → short (last :: segment).
+        for (src, chunk) in chunks.iter().enumerate() {
+            for (call_idx, call) in chunk.calls.iter().enumerate() {
+                let lower = call.to_lowercase();
+                let tgt = meta.exact.get(&lower).copied()
+                    .or_else(|| {
+                        let short = lower.rsplit("::").next().unwrap_or(&lower);
+                        meta.short.get(short).copied()
+                    });
+                if let Some(tgt) = tgt {
+                    let line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
+                    adj.add_edge(src, tgt, line);
+                }
+            }
+            // Type ref edges.
+            for ty in &chunk.types {
+                let lower = ty.to_lowercase();
+                if let Some(&tgt) = meta.exact.get(&lower).or_else(|| meta.short.get(&lower)) {
+                    if tgt as usize != src {
+                        adj.callees[src].push(tgt);
+                        adj.callers[tgt as usize].push(src as u32);
+                    }
                 }
             }
         }
-        for (src, (_, _, receiver_updates, resolved)) in par_results.into_iter().enumerate() {
-            for (var, ty) in receiver_updates {
-                ctxs[src].receiver_types.entry(var).or_insert(ty);
-            }
-            debug_assert_eq!(src, resolved_indices.len());
-            resolved_indices.push(resolved);
-        }
-        eprintln!("      [graph] pass 1 resolve: {:.1}ms ({} chunks)  RSS: {:.1}MB (+{:.1})", t2.elapsed().as_secs_f64() * 1000.0, chunks.len(), current_rss_mb(), current_rss_mb() - rss0);
-
-        // Pass 2+: iterative convergence.
-        let names_lower: Vec<String> = meta.names.iter().map(|n| n.to_lowercase()).collect();
-        let names_short: Vec<&str> = names_lower.iter().map(|n| n.rsplit("::").next().unwrap_or(n)).collect();
-        let callee_param_index: Vec<HashMap<u8, String>> = chunks.iter().map(|c| {
-            c.param_types.iter().enumerate().filter_map(|(i, (name, ty))| {
-                if name.eq_ignore_ascii_case("self") || ty.is_empty() { return None; }
-                Some((i as u8, extract_leaf_type(&ty.to_lowercase()).to_owned()))
-            }).collect()
-        }).collect();
-
-        let t_iter = std::time::Instant::now();
-        let mut iter_passes = 0u32;
-        for _ in 0..3 {
-            let prev_total: usize = adj.callees.iter().map(|c| c.len()).sum();
-
-            // Compute extra receiver types from resolved callees.
-            let extra: Vec<HashMap<String, String>> = chunks.par_iter().enumerate()
-                .map(|(src, chunk)| {
-                    let mut extra = HashMap::new();
-                    for (var, callee_name) in &chunk.let_call_bindings {
-                        let cl = callee_name.to_lowercase();
-                        let leaf = cl.rsplit("::").next().unwrap_or(&cl).rsplit('.').next().unwrap_or(&cl);
-                        for &ci in &adj.callees[src] {
-                            if names_short[ci as usize] == leaf {
-                                if let Some(ret) = return_type_map.get(&names_lower[ci as usize]) {
-                                    extra.entry(var.to_lowercase()).or_insert_with(|| ret.clone());
-                                }
-                            }
-                        }
-                    }
-                    for (pname, _, callee_raw, callee_arg, _) in &chunk.param_flows {
-                        let cl = callee_raw.to_lowercase();
-                        let leaf = cl.rsplit("::").next().unwrap_or(&cl).rsplit('.').next().unwrap_or(&cl);
-                        for &ci in &adj.callees[src] {
-                            if names_short[ci as usize] != leaf { continue; }
-                            if let Some(ty) = callee_param_index[ci as usize].get(callee_arg) {
-                                if !ty.is_empty() {
-                                    extra.entry(pname.to_lowercase()).or_insert_with(|| ty.clone());
-                                }
-                            }
-                        }
-                    }
-                    extra
-                }).collect();
-
-            for (src, e) in extra.iter().enumerate() {
-                for (var, ty) in e { ctxs[src].receiver_types.entry(var.clone()).or_insert_with(|| ty.clone()); }
-            }
-
-            // Delta resolve: only enriched chunks.
-            let enriched: Vec<usize> = (0..chunks.len()).filter(|&i| !extra[i].is_empty()).collect();
-            let delta: Vec<(usize, Vec<(u32, u32)>)> = enriched.par_iter()
-                .map(|&src| {
-                    let (edges, _, _, _) = resolve_calls(src, &chunks[src], &mut ctxs[src].clone_for_delta(), &rctx, Some(&resolved_indices[src]));
-                    (src, edges)
-                }).collect();
-
-            for (src, edges) in &delta {
-                for &(tgt, line) in edges {
-                    if tgt as usize != *src && !adj.callees[*src].contains(&tgt) {
-                        adj.callees[*src].push(tgt);
-                        adj.callers[tgt as usize].push(*src as u32);
-                        adj.call_sites[*src].push((tgt, line));
-                    }
-                }
-            }
-            let new_total: usize = adj.callees.iter().map(|c| c.len()).sum();
-            iter_passes += 1;
-            let enriched_count = extra.iter().filter(|m| !m.is_empty()).count();
-            eprintln!("        [iter] pass {iter_passes}: edges {prev_total}->{new_total} (+{}), enriched chunks: {enriched_count}, RSS: {:.1}MB", new_total - prev_total, current_rss_mb());
-            if new_total == prev_total { break; }
-        }
-        eprintln!("      [graph] pass 2+ iterative: {:.1}ms ({iter_passes} passes)  RSS: {:.1}MB (+{:.1})", t_iter.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
-
-        // RA call hierarchy edges.
-        let t_ra = std::time::Instant::now();
-        let ra_result = crate::ra_direct::resolve_via_ra_filtered(chunks, ra, ra_skip_files);
-        if !ra_result.edges.is_empty() {
-            let mut ra_added = 0usize;
-            for &(src, tgt, line) in &ra_result.edges {
-                if src < chunks.len() && tgt < chunks.len() && src != tgt {
-                    let tgt_u32 = tgt as u32;
-                    if !adj.callees[src].contains(&tgt_u32) {
-                        adj.callees[src].push(tgt_u32);
-                        adj.callers[tgt].push(src as u32);
-                        adj.call_sites[src].push((tgt_u32, line));
-                        ra_added += 1;
-                    }
-                }
-            }
-            eprintln!("      [graph] RA edges: +{ra_added} new ({} total from RA, {:.1}s)", ra_result.edges.len(), t_ra.elapsed().as_secs_f64());
-        }
+        eprintln!("      [graph] resolve: {:.1}ms ({} chunks)  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, chunks.len(), current_rss_mb(), current_rss_mb() - rss0);
 
         adj.dedup();
         let extern_calls = vec![Vec::new(); chunks.len()];
@@ -485,115 +330,3 @@ fn graph_cache_path(db: &Path) -> std::path::PathBuf {
     db.join("cache").join("graph.bin")
 }
 
-/// Build per-chunk context for resolution.
-fn build_chunk_ctx(
-    chunk: &ParsedChunk,
-    owner_types: &HashMap<String, Vec<String>>,
-    owner_field_types: &HashMap<String, HashMap<String, String>>,
-) -> ChunkCtx {
-    let imports = index_tables::build_import_map(&chunk.imports);
-    let self_type = index_tables::owning_type(&chunk.name);
-    let call_types = index_tables::extract_call_types(&chunk.calls);
-    let mut receiver_types = index_tables::build_receiver_type_map(chunk);
-
-    // Generic trait bounds: T: Search → receiver_types["t"] = "search"
-    let generic_bounds = chunk.signature.as_deref()
-        .map(index_tables::parse_generic_trait_bounds)
-        .unwrap_or_default();
-    for (param, bound) in &generic_bounds {
-        receiver_types.entry(param.clone()).or_insert_with(|| bound.clone());
-    }
-
-    // Owner field types → receiver_types for self.field resolution
-    if let Some(ref owner) = self_type {
-        if let Some(fields) = owner_field_types.get(owner.as_str()) {
-            for (fname, fty) in fields {
-                let leaf = extract_leaf_type(fty).to_owned();
-                receiver_types.entry(fname.clone()).or_insert(leaf);
-            }
-        }
-        // Owner type_refs → source_types
-        if let Some(type_refs) = owner_types.get(owner.as_str()) {
-            let source_types: HashSet<String> = type_refs.iter().map(|t| t.to_lowercase()).collect();
-            return ChunkCtx {
-                imports, self_type, receiver_types,
-                call_types_set: call_types.into_iter().collect(),
-                import_leaves: HashSet::new(),
-                source_types_set: source_types,
-            };
-        }
-    }
-
-    ChunkCtx {
-        imports, self_type, receiver_types,
-        call_types_set: call_types.into_iter().collect(),
-        import_leaves: HashSet::new(),
-        source_types_set: HashSet::new(),
-    }
-}
-
-/// Merge LSP-resolved return types into tree-sitter return_type_map.
-fn merge_lsp_return_types(
-    return_type_map: &mut HashMap<String, String>,
-    lsp_return_types: &HashMap<String, String>,
-    chunks: &[ParsedChunk],
-) {
-    if lsp_return_types.is_empty() { return; }
-
-    let mut short_to_full: HashMap<String, Vec<String>> = HashMap::new();
-    for key in return_type_map.keys() {
-        let short = key.rsplit("::").next().unwrap_or(key);
-        short_to_full.entry(short.to_owned()).or_default().push(key.clone());
-    }
-    for c in chunks.iter().filter(|c| c.kind == "function") {
-        let name_lower = c.name.to_lowercase();
-        let short = name_lower.rsplit("::").next().unwrap_or(&name_lower);
-        short_to_full.entry(short.to_owned()).or_default().push(name_lower);
-    }
-    for names in short_to_full.values_mut() { names.sort(); names.dedup(); }
-
-    let mut lsp_added = 0usize;
-    for (fn_name, ret_type) in lsp_return_types {
-        let full_names = short_to_full.get(fn_name.as_str())
-            .cloned().unwrap_or_else(|| vec![fn_name.clone()]);
-        for full_name in &full_names {
-            use std::collections::hash_map::Entry;
-            match return_type_map.entry(full_name.clone()) {
-                Entry::Vacant(e) => { e.insert(ret_type.clone()); lsp_added += 1; }
-                Entry::Occupied(mut e) => {
-                    if e.get().len() <= 1 || e.get() == "self" {
-                        e.insert(ret_type.clone()); lsp_added += 1;
-                    }
-                }
-            }
-        }
-    }
-    if lsp_added > 0 { eprintln!("      [graph] LSP overlay: +{lsp_added} return types"); }
-}
-
-/// Inject LSP-resolved receiver types into chunk contexts.
-fn inject_lsp_receivers(
-    ctxs: &mut [ChunkCtx],
-    lsp_receivers: &HashMap<usize, HashMap<String, String>>,
-    meta: &ChunkMeta,
-) {
-    if lsp_receivers.is_empty() { return; }
-    let mut lsp_injected = 0usize;
-    let (mut project, mut ext) = (0usize, 0usize);
-    for (&chunk_idx, types) in lsp_receivers {
-        if chunk_idx < ctxs.len() {
-            for (var, ty) in types {
-                ctxs[chunk_idx].receiver_types.entry(var.clone()).or_insert_with(|| {
-                    lsp_injected += 1;
-                    if meta.exact.contains_key(ty.as_str()) || meta.short.contains_key(ty.as_str()) {
-                        project += 1;
-                    } else { ext += 1; }
-                    ty.clone()
-                });
-            }
-        }
-    }
-    if lsp_injected > 0 {
-        eprintln!("      [graph] LSP receiver injection: +{lsp_injected} var types ({project} project, {ext} extern)");
-    }
-}

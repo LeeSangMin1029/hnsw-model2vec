@@ -30,18 +30,7 @@ pub fn handle_graph_build(
         .unwrap_or_else(|_| db_path.clone());
 
     let chunks = v_code_intel::loader::load_chunks(&db)?;
-
-    let lsp_types = if let Some(ra) = ra {
-        v_code_intel::lsp_client::collect_types_via_ra(&chunks, ra)
-    } else {
-        v_code_intel::lsp_client::LspTypes::default()
-    };
-
-    let graph = v_code_intel::graph::CallGraph::build_with_lsp(
-        &chunks,
-        &lsp_types,
-        ra,
-    );
+    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
     let _ = graph.save(&db);
 
     eprintln!(
