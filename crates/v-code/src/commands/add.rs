@@ -188,7 +188,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         // Pre-build chunks.bin + graph.bin caches directly from in-memory entries.
             drop(engine); // Release exclusive lock.
         let t_cache = std::time::Instant::now();
-        prebuild_caches(&db_path, &entries, &current_sources);
+        prebuild_caches(&db_path);
         eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
     }
 
@@ -199,13 +199,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 ///
 /// Single source of truth: `from_code_chunk` → chunks.bin → graph.bin.
 /// verify/context/blast use these caches without any rebuilding.
-fn prebuild_caches(
-    db_path: &std::path::Path,
-    new_entries: &[CodeChunkEntry],
-    current_sources: &std::collections::HashSet<String>,
-) {
-    use v_code_intel::parse::ParsedChunk;
-
+/// Rebuild chunks.bin + graph.bin from DB.
+///
+/// Always rebuilds from scratch — loads all chunks from DB, no incremental merge.
+/// This is simple and correct. Performance is fine (~200ms for 3000 chunks).
+fn prebuild_caches(db_path: &std::path::Path) {
     let t_total = std::time::Instant::now();
 
     let cache = v_code_intel::loader::cache_path(db_path);
@@ -213,64 +211,16 @@ fn prebuild_caches(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Collect sources that were just re-chunked.
+    // Load all chunks from DB (single source of truth).
     let t0 = std::time::Instant::now();
-    let new_sources: std::collections::HashSet<&str> = new_entries
-        .iter()
-        .map(|e| e.source.as_str())
-        .collect();
-
-    // Convert new entries → ParsedChunks (no DB round-trip).
-    // Use file_path_str (matches to_embed_text's File: line used in DB text parsing).
-    let mut chunks: Vec<ParsedChunk> = new_entries
-        .iter()
-        .map(|e| ParsedChunk::from_code_chunk(&e.chunk, &e.file_path_str, e.chunk.imports.clone()))
-        .collect();
-
-    // For incremental adds: merge with existing cache (keep chunks from unchanged files).
-    // Only attempt if a cache file already exists (skip on full rebuild).
-    //
-    // chunk.file is a relative path (e.g. "crates/v-code/src/lib.rs") while
-    // new_sources uses file_path_str and current_sources uses normalize_source
-    // (absolute path). Build a suffix set from current_sources for matching.
-    let current_suffixes: std::collections::HashSet<&str> = current_sources
-        .iter()
-        .filter_map(|abs| {
-            // Match suffix: the chunk.file relative path is a suffix of the absolute path.
-            abs.find("crates/").map(|pos| &abs[pos..])
-                .or_else(|| abs.find("src/").map(|pos| &abs[pos..]))
-        })
-        .collect();
-    let new_suffixes: std::collections::HashSet<&str> = new_sources
-        .iter()
-        .filter_map(|abs| {
-            abs.find("crates/").map(|pos| &abs[pos..])
-                .or_else(|| abs.find("src/").map(|pos| &abs[pos..]))
-        })
-        .collect();
-
-    if cache.exists() {
-        if let Ok(existing) = v_code_intel::loader::load_chunks(db_path) {
-            let existing_len = existing.len();
-            let mut kept = 0usize;
-            let mut skipped_new = 0usize;
-            let mut skipped_deleted = 0usize;
-            for c in existing {
-                let in_new = new_suffixes.contains(c.file.as_str());
-                let in_current = current_suffixes.contains(c.file.as_str());
-                if !in_new && in_current {
-                    chunks.push(c);
-                    kept += 1;
-                } else if in_new {
-                    skipped_new += 1;
-                } else {
-                    skipped_deleted += 1;
-                }
-            }
-            eprintln!("    [merge] existing={existing_len}, kept={kept}, skipped(new={skipped_new}, del={skipped_deleted})");
+    let chunks = match v_code_intel::loader::load_chunks_from_db(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("    [cache] failed to load chunks from DB: {e}");
+            return;
         }
-    }
-    eprintln!("    [cache] chunks convert: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
+    };
+    eprintln!("    [cache] loaded {} chunks from DB ({:.1}ms)", chunks.len(), t0.elapsed().as_secs_f64() * 1000.0);
 
     // Save chunks.bin
     let t1 = std::time::Instant::now();
@@ -280,8 +230,7 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Build graph directly from chunks (calls already resolved by RA in code/chunk).
-    // No need for daemon graph/build RPC — avoids duplicate RA work.
+    // Build graph.
     let t3 = std::time::Instant::now();
     let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
     eprintln!("    [cache] graph build: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());

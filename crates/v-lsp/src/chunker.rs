@@ -109,8 +109,8 @@ impl RaInstance {
                 let start_line_0 = fi.line_index.line_col(node.node_range.start()).line as usize;
                 let end_line_0 = fi.line_index.line_col(node.node_range.end()).line as usize;
 
-                // Skip small chunks (< 3 lines).
-                if end_line_0.saturating_sub(start_line_0) < 2 { continue; }
+                // Skip empty chunks (0 lines).
+                if end_line_0 < start_line_0 { continue; }
 
                 // Build full name with parent (impl block).
                 let name = if let Some(parent_idx) = node.parent {
