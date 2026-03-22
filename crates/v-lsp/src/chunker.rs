@@ -52,10 +52,11 @@ impl RaInstance {
         let mut all_chunks = Vec::new();
         let mut test_ranges: HashMap<FileId, HashSet<u32>> = HashMap::new();
 
-        // Single analysis snapshot for the entire batch — avoid re-creating per file.
         let analysis = self.analysis();
 
-        // Pre-collect test functions per file via runnables (safer than discover_tests).
+        // Phase 1: runnables (test detection)
+        let t_run = std::time::Instant::now();
+        let rss_before_run = 0.0;
         for file_key in files {
             if let Some(fi) = self.file_map().get(file_key) {
                 if let Ok(runnables) = analysis.runnables(fi.file_id) {
@@ -76,12 +77,18 @@ impl RaInstance {
             }
         }
 
+        eprintln!("    [chunker] phase 1 runnables: {:.1}ms, RSS delta: {:.0}MB",
+            t_run.elapsed().as_secs_f64() * 1000.0, 0.0 - rss_before_run);
+
+        // Phase 2: file_structure + outgoing_calls
+        let t_struct = std::time::Instant::now();
+        let rss_before_struct = 0.0;
+        let mut call_count = 0u32;
+
         for file_key in files {
             let Some(fi) = self.file_map().get(file_key) else { continue };
             let source = &fi.source;
             let lines: Vec<&str> = source.lines().collect();
-
-            // Get file structure (symbols).
             let config = FileStructureConfig { exclude_locals: true };
             let Ok(structure) = analysis.file_structure(&config, fi.file_id) else { continue };
 
@@ -142,8 +149,8 @@ impl RaInstance {
                 // Is test?
                 let is_test = file_tests.map_or(false, |tests| tests.contains(&(start_line_0 as u32)));
 
-                // For functions: get outgoing calls via RA using navigation_range.
                 let (calls, call_lines) = if kind == "function" {
+                    call_count += 1;
                     let nav_line = fi.line_index.line_col(node.navigation_range.start()).line;
                     let nav_col = fi.line_index.line_col(node.navigation_range.start()).col;
                     self.extract_calls_with_analysis(&analysis, file_key, nav_line, nav_col)
@@ -201,6 +208,9 @@ impl RaInstance {
                 });
             }
         }
+
+        eprintln!("    [chunker] phase 2 structure+calls: {:.1}ms, {} outgoing_calls, RSS delta: {:.0}MB",
+            t_struct.elapsed().as_secs_f64() * 1000.0, call_count, 0.0 - rss_before_struct);
 
         all_chunks
     }

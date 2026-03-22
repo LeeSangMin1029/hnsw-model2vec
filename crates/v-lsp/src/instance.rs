@@ -548,6 +548,11 @@ impl RaInstance {
     /// Access the RA analysis snapshot (always fresh from host).
     pub fn analysis(&self) -> Analysis { self.host.analysis() }
 
+    /// Trigger salsa LRU cache eviction to free body type inference memory.
+    pub fn garbage_collect(&mut self) {
+        self.host.trigger_garbage_collection();
+    }
+
     /// Access the file map (relative path → FileInfo).
     pub(crate) fn file_map(&self) -> &HashMap<String, FileInfo> { &self.file_map }
 
