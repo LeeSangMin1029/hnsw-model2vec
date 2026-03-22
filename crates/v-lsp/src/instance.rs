@@ -596,8 +596,10 @@ impl RaInstance {
             }
         }
         if count > 0 {
+            let t = std::time::Instant::now();
             self.host.apply_change(change);
             self.analysis = self.host.analysis();
+            eprintln!("    [ra] apply_change: {:.1}ms ({count} files)", t.elapsed().as_secs_f64() * 1000.0);
             // Update file_map entries.
             for (rel_path, new_content) in files {
                 if let Some(fi) = self.file_map.get_mut(rel_path.as_str()) {

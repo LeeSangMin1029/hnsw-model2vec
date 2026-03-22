@@ -185,10 +185,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         println!("Done! Code DB ready: {}", db_path.display());
         println!("Use: v-code context/blast/jump/symbols/dupes {}", db_path.display());
 
-        // Pre-build chunks.bin + graph.bin caches directly from in-memory entries.
-            drop(engine); // Release exclusive lock.
+        // Checkpoint + release exclusive lock before rebuilding caches.
+        engine.checkpoint().ok();
+        drop(engine);
         let t_cache = std::time::Instant::now();
-        prebuild_caches(&db_path);
+        prebuild_caches(&db_path, &entries, &current_sources);
         eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
     }
 
@@ -199,11 +200,14 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 ///
 /// Single source of truth: `from_code_chunk` → chunks.bin → graph.bin.
 /// verify/context/blast use these caches without any rebuilding.
-/// Rebuild chunks.bin + graph.bin from DB.
-///
-/// Always rebuilds from scratch — loads all chunks from DB, no incremental merge.
-/// This is simple and correct. Performance is fine (~200ms for 3000 chunks).
-fn prebuild_caches(db_path: &std::path::Path) {
+/// Rebuild chunks.bin + graph.bin from new entries + existing cache.
+fn prebuild_caches(
+    db_path: &std::path::Path,
+    new_entries: &[CodeChunkEntry],
+    current_sources: &std::collections::HashSet<String>,
+) {
+    use v_code_intel::parse::ParsedChunk;
+
     let t_total = std::time::Instant::now();
 
     let cache = v_code_intel::loader::cache_path(db_path);
@@ -211,16 +215,40 @@ fn prebuild_caches(db_path: &std::path::Path) {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Load all chunks from DB (single source of truth).
+    // Convert new entries to ParsedChunks.
     let t0 = std::time::Instant::now();
-    let chunks = match v_code_intel::loader::load_chunks_from_db(db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("    [cache] failed to load chunks from DB: {e}");
-            return;
+
+    let mut chunks: Vec<ParsedChunk> = new_entries.iter()
+        .map(|e| ParsedChunk::from_code_chunk(&e.chunk, &e.file_path_str, e.chunk.imports.clone()))
+        .collect();
+
+    // Collect files that were re-chunked (use source paths for matching).
+    let changed_sources: std::collections::HashSet<&str> = new_entries.iter()
+        .map(|e| e.source.as_str())
+        .collect();
+
+    // Merge: keep existing chunks from unchanged files, skip deleted files.
+    if let Ok(existing) = v_code_intel::loader::load_chunks(db_path) {
+        let mut kept = 0;
+        let mut replaced = 0;
+        for c in existing {
+            let source = v_hnsw_cli::commands::file_utils::normalize_source(std::path::Path::new(&c.file));
+            if changed_sources.contains(source.as_str()) {
+                replaced += 1;
+            } else if current_sources.contains(&source) {
+                chunks.push(c);
+                kept += 1;
+            }
         }
-    };
-    eprintln!("    [cache] loaded {} chunks from DB ({:.1}ms)", chunks.len(), t0.elapsed().as_secs_f64() * 1000.0);
+        if kept > 0 || replaced > 0 {
+            eprintln!("    [merge] kept={kept}, replaced={replaced}");
+        }
+        // Debug: show first changed source and first c.file for path comparison
+        if let Some(cs) = changed_sources.iter().next() {
+            eprintln!("    [debug] changed_source: {cs}");
+        }
+    }
+    eprintln!("    [cache] {} chunks ({} new + existing)", chunks.len(), new_entries.len());
 
     // Save chunks.bin
     let t1 = std::time::Instant::now();

@@ -61,21 +61,10 @@ pub fn daemon_rpc(
     params: serde_json::Value,
     read_timeout_secs: u64,
 ) -> Result<serde_json::Value> {
-    let port = read_port()
-        .ok_or_else(|| anyhow::anyhow!("Daemon not running (no port file)"))?;
-
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
-        .parse()
-        .context("Failed to parse socket address")?;
-    // Retry connect — daemon may still be binding port after spawn.
-    let mut stream = None;
-    for _ in 0..30 {
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-            Ok(s) => { stream = Some(s); break; }
-            Err(_) => std::thread::sleep(Duration::from_millis(500)),
-        }
-    }
-    let mut stream = stream.context("Failed to connect to daemon after retries")?;
+    let port = read_port().unwrap_or(19530);
+    let addr = format!("127.0.0.1:{port}");
+    let mut stream = TcpStream::connect(&addr)
+        .context("Failed to connect to daemon")?;
 
     stream.set_read_timeout(Some(Duration::from_secs(read_timeout_secs)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -142,7 +131,8 @@ pub fn notify_reload(db_path: &Path) -> Result<()> {
 ///
 /// Returns `true` if the daemon became reachable within the deadline.
 /// Spawn daemon in background. Port opens immediately, RA loads async.
-/// Daemon queues incoming connections until RA is ready.
+/// Spawn daemon if not running. Returns immediately.
+/// Daemon loads RA then opens port — `daemon_rpc` will wait for connection.
 pub fn spawn_daemon_and_wait(db: &Path) -> bool {
     if is_running() { return true; }
     spawn_daemon(db);
