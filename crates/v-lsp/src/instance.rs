@@ -553,6 +553,62 @@ impl RaInstance {
     /// Access the file map (relative path → FileInfo).
     pub(crate) fn file_map(&self) -> &HashMap<String, FileInfo> { &self.file_map }
 
+    /// Update a file's content in the RA database (incremental update).
+    ///
+    /// After calling this, `analysis()` will reflect the new content.
+    /// The file must already exist in the file_map (added at workspace load).
+    pub fn update_file(&mut self, rel_path: &str, new_content: String) -> bool {
+        let Some(fi) = self.file_map.get(rel_path) else {
+            return false;
+        };
+        let file_id = fi.file_id;
+
+        // Apply change to RA database.
+        let mut change = ra_ap_hir_expand::change::ChangeWithProcMacros {
+            source_change: ra_ap_base_db::FileChange::default(),
+            proc_macros: None,
+        };
+        change.change_file(file_id, Some(new_content.clone()));
+        self.host.apply_change(change);
+        self.analysis = self.host.analysis();
+
+        // Update file_map entry (source + line_index).
+        let line_index = LineIndex::new(&new_content);
+        if let Some(fi) = self.file_map.get_mut(rel_path) {
+            fi.line_index = line_index;
+            fi.source = new_content;
+        }
+
+        true
+    }
+
+    /// Update multiple files at once (single apply_change call).
+    pub fn update_files(&mut self, files: &[(String, String)]) -> usize {
+        let mut change = ra_ap_hir_expand::change::ChangeWithProcMacros {
+            source_change: ra_ap_base_db::FileChange::default(),
+            proc_macros: None,
+        };
+        let mut count = 0;
+        for (rel_path, new_content) in files {
+            if let Some(fi) = self.file_map.get(rel_path.as_str()) {
+                change.change_file(fi.file_id, Some(new_content.clone()));
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.host.apply_change(change);
+            self.analysis = self.host.analysis();
+            // Update file_map entries.
+            for (rel_path, new_content) in files {
+                if let Some(fi) = self.file_map.get_mut(rel_path.as_str()) {
+                    fi.line_index = LineIndex::new(new_content);
+                    fi.source = new_content.clone();
+                }
+            }
+        }
+        count
+    }
+
     // ── Call Hierarchy API ──────────────────────────────────────────
 
     /// Find all callers of the symbol at `file:line:col` (incoming calls).

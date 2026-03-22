@@ -28,6 +28,8 @@ crossbeam.workspace = true
 
 # rust-analyzer as library (in-process type inference, no LSP/TCP overhead)
 ra_ap_ide.workspace = true
+ra_ap_hir-expand = { version = "0.0.324", package = "ra_ap_hir_expand" }
+ra_ap_base-db = { version = "0.0.324", package = "ra_ap_base_db" }
 ra_ap_load-cargo.workspace = true
 ra_ap_vfs.workspace = true
 ra_ap_project_model.workspace = true

@@ -117,12 +117,31 @@ pub fn run(
         state.maybe_unload_model();
         state.maybe_evict_databases();
 
-        // Poll file watcher for source changes → invalidate graph cache only.
-        // Actual reindex is deferred to the next explicit `v-code add` call.
-        // This prevents daemon memory spikes from background reindexing.
+        // Poll file watcher for source changes → update RA + invalidate graph cache.
         if let Some(ref mut w) = watcher {
             let changed = w.poll_changes();
             if !changed.is_empty() {
+                // Read changed files and update RA's internal database.
+                if let Some(ref mut ra) = state.ra {
+                    let updates: Vec<(String, String)> = changed.iter()
+                        .filter_map(|path| {
+                            let content = std::fs::read_to_string(path).ok()?;
+                            let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+                            let abs_str = v_hnsw_core::strip_unc_prefix(&abs.to_string_lossy())
+                                .replace('\\', "/");
+                            let root = ra.workspace_root().to_string_lossy().replace('\\', "/");
+                            let root = v_hnsw_core::strip_unc_prefix(&root);
+                            let rel = abs_str.strip_prefix(root)
+                                .and_then(|s| s.strip_prefix('/'))
+                                .unwrap_or(&abs_str);
+                            Some((rel.to_owned(), content))
+                        })
+                        .collect();
+                    let n = ra.update_files(&updates);
+                    if n > 0 {
+                        eprintln!("[watcher] {} file(s) updated in RA", n);
+                    }
+                }
                 eprintln!(
                     "[watcher] {} file(s) changed, invalidating graph cache",
                     changed.len(),
