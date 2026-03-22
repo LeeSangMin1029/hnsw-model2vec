@@ -7,8 +7,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Source file extensions to watch.
@@ -22,24 +20,19 @@ const IGNORED_DIRS: &[&str] = &[
     "dist", "build", ".next", ".nuxt",
 ];
 
-/// Guards against concurrent auto-reindex runs.
-static REINDEX_RUNNING: AtomicBool = AtomicBool::new(false);
-
 /// Watches project directories for source file changes.
 pub struct FileWatcher {
     _watcher: RecommendedWatcher,
     rx: mpsc::Receiver<PathBuf>,
     pending: HashSet<PathBuf>,
     db_path: PathBuf,
-    input_path: Option<PathBuf>,
 }
 
 impl FileWatcher {
     /// Start watching the given directories recursively.
     ///
-    /// `input_path` is the source root for `v-code add` (read from `DbConfig`).
     /// Returns `None` if watcher creation fails (non-fatal — daemon runs without watching).
-    pub fn new(watch_dirs: &[PathBuf], db_path: PathBuf, input_path: Option<PathBuf>) -> Option<Self> {
+    pub fn new(watch_dirs: &[PathBuf], db_path: PathBuf) -> Option<Self> {
         let (tx, rx) = mpsc::channel();
 
         let sender = tx.clone();
@@ -82,14 +75,10 @@ impl FileWatcher {
             rx,
             pending: HashSet::new(),
             db_path,
-            input_path,
         })
     }
 
     /// Poll for changes. Returns changed source files immediately.
-    ///
-    /// No debounce — `REINDEX_RUNNING` guard prevents concurrent runs
-    /// and body_hash early cutoff skips unchanged symbols.
     pub fn poll_changes(&mut self) -> Vec<PathBuf> {
         while let Ok(path) = self.rx.try_recv() {
             self.pending.insert(path);
@@ -113,34 +102,6 @@ impl FileWatcher {
         }
     }
 
-    /// Trigger automatic re-indexing in-process via `v_code::commands::add::run`.
-    ///
-    /// Runs on a background thread. Only one reindex runs at a time —
-    /// subsequent requests are skipped until the current one finishes.
-    pub fn auto_reindex(&self) {
-        let Some(ref input) = self.input_path else {
-            eprintln!("[watcher] No input_path configured — skipping auto-reindex");
-            return;
-        };
-
-        // Guard: only one reindex at a time.
-        if REINDEX_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            eprintln!("[watcher] Auto-reindex already in progress, skipping");
-            return;
-        }
-
-        let db = self.db_path.clone();
-        let input = input.clone();
-
-        std::thread::spawn(move || {
-            eprintln!("[watcher] Starting in-process reindex: {} → {}", input.display(), db.display());
-            match v_code::commands::add::run(db, input, &[]) {
-                Ok(()) => eprintln!("[watcher] In-process reindex completed"),
-                Err(e) => eprintln!("[watcher] In-process reindex failed: {e}"),
-            }
-            REINDEX_RUNNING.store(false, Ordering::SeqCst);
-        });
-    }
 }
 
 /// Check if a path has a source file extension.

@@ -100,11 +100,7 @@ pub fn run(
             let db_canon = db.canonicalize().ok()?;
             let project_root = v_code_intel::helpers::find_project_root(&db_canon)?;
             eprintln!("[daemon] Project root: {}", project_root.display());
-            // Read input_path from DB config for auto-reindex.
-            let input_path = v_hnsw_storage::DbConfig::load(&db_canon)
-                .ok()
-                .and_then(|c| c.input_path.map(PathBuf::from));
-            FileWatcher::new(&[project_root], db_canon, input_path)
+            FileWatcher::new(&[project_root], db_canon)
         });
 
     loop {

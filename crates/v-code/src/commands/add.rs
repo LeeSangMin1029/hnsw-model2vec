@@ -122,33 +122,12 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     if !v_hnsw_storage::daemon_client::is_running() {
         eprintln!("  [daemon] not running, starting...");
         if !v_hnsw_storage::daemon_client::spawn_daemon_and_wait(&db_path) {
-            // Fallback: tree-sitter chunking if daemon unavailable.
-            eprintln!("  [daemon] failed to start, falling back to tree-sitter");
-            super::ingest::chunk_code_files(
-                &code_files,
-                is_interrupted,
-                &mut entries,
-                &mut file_metadata_map,
-            );
-            eprintln!("  chunk: {:.1}s  RSS: {:.0}MB (tree-sitter fallback)", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
+            anyhow::bail!("daemon failed to start — run `v-daemon --db {}` first", db_path.display());
         }
     }
 
-    if entries.is_empty() && v_hnsw_storage::daemon_client::is_running() {
-        match super::ingest::chunk_via_daemon(&code_files, &db_path, &mut entries, &mut file_metadata_map) {
-            Ok(()) => eprintln!("  chunk: {:.1}s  RSS: {:.0}MB (daemon RA)", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb()),
-            Err(e) => {
-                eprintln!("  [daemon] chunk failed: {e}, falling back to tree-sitter");
-                super::ingest::chunk_code_files(
-                    &code_files,
-                    is_interrupted,
-                    &mut entries,
-                    &mut file_metadata_map,
-                );
-                eprintln!("  chunk: {:.1}s  RSS: {:.0}MB (tree-sitter fallback)", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
-            }
-        }
-    }
+    super::ingest::chunk_via_daemon(&code_files, &db_path, &mut entries, &mut file_metadata_map)?;
+    eprintln!("  chunk: {:.1}s  RSS: {:.0}MB", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
     // === Build called_by + direct bulk write (zero-copy path) ===
     println!("Symbols: {} (functions, structs, enums, ...)", entries.len());
