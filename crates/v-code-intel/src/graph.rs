@@ -3,7 +3,7 @@
 //! Provides `CallGraph` — a pre-built, bincode-cached graph that maps
 //! chunk indices to their callees and callers for fast BFS traversal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -82,7 +82,6 @@ struct ChunkMeta {
     name_index: Vec<(String, u32)>,
     exact: HashMap<String, u32>,
     short: HashMap<String, u32>,
-    enum_variants: HashSet<String>,
 }
 
 impl ChunkMeta {
@@ -136,18 +135,7 @@ impl ChunkMeta {
 
         name_index.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Collect enum variant names for variant detection
-        let mut enum_variants = HashSet::new();
-        for (i, chunk) in chunks.iter().enumerate() {
-            if kinds[i] == "enum" {
-                let leaf = names[i].rsplit("::").next().unwrap_or(&names[i]).to_lowercase();
-                for v in &chunk.enum_variants {
-                    enum_variants.insert(format!("{leaf}::{v}"));
-                }
-            }
-        }
-
-        Self { names, files, kinds, lines, signatures, is_test, name_index, exact, short, enum_variants }
+        Self { names, files, kinds, lines, signatures, is_test, name_index, exact, short }
     }
 }
 

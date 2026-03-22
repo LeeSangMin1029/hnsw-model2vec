@@ -11,7 +11,7 @@ static GRAPH_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn handle_graph_build(
     params: serde_json::Value,
-    ra: Option<&v_lsp::instance::RaInstance>,
+    _ra: Option<&v_lsp::instance::RaInstance>,
 ) -> anyhow::Result<serde_json::Value> {
     let _guard = GRAPH_LOCK
         .lock()

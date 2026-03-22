@@ -58,30 +58,6 @@ fn struct_chunk(name: &str, file: &str) -> ParsedChunk {
     }
 }
 
-fn enum_chunk(name: &str, file: &str, variants: &[&str]) -> ParsedChunk {
-    ParsedChunk {
-        kind: "enum".to_owned(),
-        name: name.to_owned(),
-        file: file.to_owned(),
-        lines: Some((1, 5)),
-        signature: None,
-        calls: vec![],
-        call_lines: vec![],
-        types: vec![],
-        imports: vec![],
-        string_args: vec![],
-        param_flows: vec![],
-        param_types: vec![],
-        field_types: vec![],
-        local_types: vec![],
-        let_call_bindings: vec![],
-        return_type: None,
-        field_accesses: vec![],
-        enum_variants: variants.iter().map(|s| s.to_string()).collect(),
-        is_test: false,
-    }
-}
-
 fn has_edge(graph: &CallGraph, caller: &str, callee: &str) -> bool {
     let caller_lower = caller.to_lowercase();
     let callee_lower = callee.to_lowercase();
@@ -92,17 +68,6 @@ fn has_edge(graph: &CallGraph, caller: &str, callee: &str) -> bool {
     } else {
         false
     }
-}
-
-fn callee_names<'a>(graph: &'a CallGraph, caller: &str) -> Vec<&'a str> {
-    let caller_lower = caller.to_lowercase();
-    let Some(ci) = graph.names.iter().position(|n| n.to_lowercase() == caller_lower) else {
-        return vec![];
-    };
-    graph.callees[ci]
-        .iter()
-        .map(|&t| graph.names[t as usize].as_str())
-        .collect()
 }
 
 // ── Exact name matching ─────────────────────────────────────────────

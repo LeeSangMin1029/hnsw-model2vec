@@ -1,6 +1,6 @@
 //! Index table builders and utilities for call graph construction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use crate::parse::ParsedChunk;
 
 // ── Field types ─────────────────────────────────────────────────────
