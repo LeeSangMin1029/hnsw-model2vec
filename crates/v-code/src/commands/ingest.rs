@@ -86,6 +86,7 @@ pub fn chunk_via_daemon(
     }
     let t0 = std::time::Instant::now();
     let params = serde_json::json!({ "files": file_keys });
+
     let result = v_hnsw_storage::daemon_client::daemon_rpc("code/chunk", params, 300)
         .map_err(|e| anyhow::anyhow!("daemon code/chunk failed: {e}"))?;
 

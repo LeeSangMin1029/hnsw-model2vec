@@ -87,7 +87,7 @@ pub fn handle_chunk_files(
     params: serde_json::Value,
     ra: Option<&v_lsp::instance::RaInstance>,
 ) -> anyhow::Result<serde_json::Value> {
-    let ra = ra.ok_or_else(|| anyhow::anyhow!("RA not available"))?;
+    let ra = ra.ok_or_else(|| anyhow::anyhow!("RA not available — daemon starting?"))?;
 
     #[derive(serde::Deserialize)]
     struct ChunkParams {

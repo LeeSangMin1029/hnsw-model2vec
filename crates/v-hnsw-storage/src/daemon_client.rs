@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -67,8 +67,15 @@ pub fn daemon_rpc(
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}")
         .parse()
         .context("Failed to parse socket address")?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-        .context("Failed to connect to daemon")?;
+    // Retry connect — daemon may still be binding port after spawn.
+    let mut stream = None;
+    for _ in 0..30 {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            Ok(s) => { stream = Some(s); break; }
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+    let mut stream = stream.context("Failed to connect to daemon after retries")?;
 
     stream.set_read_timeout(Some(Duration::from_secs(read_timeout_secs)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -134,16 +141,12 @@ pub fn notify_reload(db_path: &Path) -> Result<()> {
 /// Spawn daemon and wait until ready (max 10s).
 ///
 /// Returns `true` if the daemon became reachable within the deadline.
+/// Spawn daemon in background. Port opens immediately, RA loads async.
+/// Daemon queues incoming connections until RA is ready.
 pub fn spawn_daemon_and_wait(db: &Path) -> bool {
+    if is_running() { return true; }
     spawn_daemon(db);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if is_running() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    false
+    true
 }
 
 /// Ensure the daemon is running with the current binary version.

@@ -57,16 +57,7 @@ pub fn run(
         .context("Database not found")?;
     let mut state = DaemonState::new(initial.as_deref())?;
 
-    // Spawn RA instance in background (reused across graph/build requests).
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    match v_lsp::instance::RaInstance::spawn(&workspace_root) {
-        Ok(ra) => {
-            eprintln!("[daemon] RA instance loaded");
-            state.ra = Some(ra);
-        }
-        Err(e) => eprintln!("[daemon] RA spawn failed (graph/build will retry): {e}"),
-    }
-
+    // Bind port FIRST so is_running() returns true while RA loads.
     let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
         Ok(l) => l,
         Err(_) if crate::client::is_running() => {
@@ -89,9 +80,21 @@ pub fn run(
     } else {
         eprintln!("[daemon] Idle timeout: {timeout_secs}s");
     }
-    eprintln!("[daemon] Ready for connections");
+    eprintln!("[daemon] Ready for connections (RA loading in background...)");
+
+    // Load RA in background thread so main loop can accept connections immediately.
+    let ra_result = {
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let handle = std::thread::spawn(move || {
+            v_lsp::instance::RaInstance::spawn(&workspace_root)
+        });
+        handle
+    };
+    // We'll check ra_result in the main loop.
+    let mut ra_handle: Option<std::thread::JoinHandle<_>> = Some(ra_result);
 
     let mut last_activity = Instant::now();
+    let mut pending_connections: Vec<(std::net::TcpStream, std::net::SocketAddr)> = Vec::new();
 
     // Start file watcher for the project root (if a DB is configured).
     let mut watcher = db_path
@@ -104,6 +107,22 @@ pub fn run(
         });
 
     loop {
+        // Check if background RA load finished.
+        if let Some(ref handle) = ra_handle {
+            if handle.is_finished() {
+                if let Some(h) = ra_handle.take() {
+                    match h.join() {
+                        Ok(Ok(ra)) => {
+                            eprintln!("[daemon] RA instance loaded");
+                            state.ra = Some(ra);
+                        }
+                        Ok(Err(e)) => eprintln!("[daemon] RA spawn failed: {e}"),
+                        Err(_) => eprintln!("[daemon] RA thread panicked"),
+                    }
+                }
+            }
+        }
+
         if is_interrupted() {
             eprintln!("\n[daemon] Received shutdown signal");
             break;
@@ -148,16 +167,35 @@ pub fn run(
         match listener.accept() {
             Ok((stream, addr)) => {
                 eprintln!("[daemon] Connection from {addr}");
-                if let Err(e) =
-                    crate::handler::handle_client(stream, &mut state, &mut last_activity)
-                {
-                    if e.to_string().contains("Shutdown requested") {
-                        break;
+                // If RA not ready yet, queue the connection for later.
+                if state.ra.is_none() && ra_handle.is_some() {
+                    eprintln!("[daemon] RA not ready, queuing connection");
+                    pending_connections.push((stream, addr));
+                } else {
+                    if let Err(e) =
+                        crate::handler::handle_client(stream, &mut state, &mut last_activity)
+                    {
+                        if e.to_string().contains("Shutdown requested") {
+                            break;
+                        }
+                        eprintln!("[daemon] Client error: {e}");
                     }
-                    eprintln!("[daemon] Client error: {e}");
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Process queued connections if RA is now ready.
+                if state.ra.is_some() && !pending_connections.is_empty() {
+                    let queued: Vec<_> = pending_connections.drain(..).collect();
+                    eprintln!("[daemon] Processing {} queued connection(s)", queued.len());
+                    for (stream, addr) in queued {
+                        eprintln!("[daemon] Dequeued connection from {addr}");
+                        if let Err(e) =
+                            crate::handler::handle_client(stream, &mut state, &mut last_activity)
+                        {
+                            eprintln!("[daemon] Client error: {e}");
+                        }
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
