@@ -10,34 +10,34 @@ use ra_ap_ide::{FileId, StructureNodeKind, FileStructureConfig, SymbolKind, Text
 use crate::instance::RaInstance;
 
 /// A code chunk extracted via RA — equivalent to `v-code-chunk::CodeChunk` + `v-code-intel::ParsedChunk`.
+/// Code chunk extracted via RA. Serialized as JSON over daemon RPC.
+///
+/// Split into identity + source + relations for clarity,
+/// but kept as one struct for serde simplicity.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RaChunk {
+    // ── identity ──
     pub kind: String,
     pub name: String,
     pub file: String,
     pub lines: Option<(usize, usize)>,
+    pub visibility: String,
+    pub is_test: bool,
+    pub chunk_index: usize,
+    // ── source ──
+    pub text: String,
     pub signature: Option<String>,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    // ── relations (call graph) ──
     pub calls: Vec<String>,
     pub call_lines: Vec<u32>,
     pub types: Vec<String>,
     pub imports: Vec<String>,
-    pub string_args: Vec<(String, String, u32, u8)>,
-    pub param_flows: Vec<(String, u8, String, u8, u32)>,
     pub param_types: Vec<(String, String)>,
     pub field_types: Vec<(String, String)>,
-    pub local_types: Vec<(String, String)>,
-    pub let_call_bindings: Vec<(String, String)>,
     pub return_type: Option<String>,
-    pub field_accesses: Vec<(String, String)>,
     pub enum_variants: Vec<String>,
-    pub is_test: bool,
-    pub text: String,
-    pub visibility: String,
-    pub start_byte: usize,
-    pub end_byte: usize,
-    pub chunk_index: usize,
-    pub ast_hash: u64,
-    pub body_hash: u64,
 }
 
 impl RaInstance {
@@ -179,29 +179,22 @@ impl RaInstance {
                     kind: kind.to_owned(),
                     name,
                     file: file_key.clone(),
-                    lines: Some((start_line_0 + 1, end_line_0 + 1)), // 1-based
+                    lines: Some((start_line_0 + 1, end_line_0 + 1)),
+                    visibility,
+                    is_test,
+                    chunk_index: { let idx = chunk_index; chunk_index += 1; idx },
+                    text,
                     signature,
+                    start_byte: node.node_range.start().into(),
+                    end_byte: node.node_range.end().into(),
                     calls,
                     call_lines,
                     types,
                     imports: imports.clone(),
-                    string_args: Vec::new(), // TODO: parse → syntax tree walk
-                    param_flows: Vec::new(), // TODO: parse → syntax tree walk
                     param_types,
                     field_types,
-                    local_types: Vec::new(), // TODO: hover on locals
-                    let_call_bindings: Vec::new(), // TODO: hover + goto_def
                     return_type,
-                    field_accesses: Vec::new(), // TODO: parse → syntax tree walk
                     enum_variants,
-                    is_test,
-                    text,
-                    visibility,
-                    start_byte: node.node_range.start().into(),
-                    end_byte: node.node_range.end().into(),
-                    chunk_index: { let idx = chunk_index; chunk_index += 1; idx },
-                    ast_hash: 0,
-                    body_hash: 0,
                 });
             }
         }
