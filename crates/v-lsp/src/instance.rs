@@ -74,7 +74,6 @@ pub struct ResolveCallStats {
 /// A live rust-analyzer instance holding the project database in memory.
 pub struct RaInstance {
     host: AnalysisHost,
-    analysis: Analysis,
     file_map: HashMap<String, FileInfo>,
     reverse_file_map: HashMap<FileId, String>,
     workspace_root: PathBuf,
@@ -169,7 +168,6 @@ impl RaInstance {
 
         Ok(Self {
             host,
-            analysis,
             file_map,
             reverse_file_map,
             workspace_root: workspace_root.to_path_buf(),
@@ -206,7 +204,7 @@ impl RaInstance {
             range,
         };
 
-        match self.analysis.hover(&config, file_range) {
+        match self.host.analysis().hover(&config, file_range) {
             Ok(Some(hover)) => {
                 let markup = hover.info.markup.as_str();
                 Ok(Some(markup.to_owned()))
@@ -329,7 +327,7 @@ impl RaInstance {
             range,
         };
 
-        let hover = self.analysis.hover(&config, file_range).ok()??;
+        let hover = self.host.analysis().hover(&config, file_range).ok()??;
         extract_type_from_hover_result(&hover.info)
     }
 
@@ -373,7 +371,7 @@ impl RaInstance {
             range,
         };
 
-        let hover_result = self.analysis.hover(&config, file_range).ok()?;
+        let hover_result = self.host.analysis().hover(&config, file_range).ok()?;
         if hover_result.is_none() {
             let line_text = lines.get(target_line).unwrap_or(&"");
             let hover_char = line_text
@@ -482,7 +480,7 @@ impl RaInstance {
         let config = GotoDefinitionConfig {
             minicore: Default::default(),
         };
-        let result = match self.analysis.goto_definition(pos, &config) {
+        let result = match self.host.analysis().goto_definition(pos, &config) {
             Ok(Some(r)) => r,
             _ => {
                 let miss = RC_GOTO_MISS.fetch_add(1, AtOrd::Relaxed);
@@ -512,7 +510,7 @@ impl RaInstance {
                 file_id: fi.file_id,
                 offset: offset + TextSize::from(1u32),
             };
-            let retry = self.analysis.goto_definition(retry_pos, &config);
+            let retry = self.host.analysis().goto_definition(retry_pos, &config);
             if let Ok(Some(r2)) = &retry {
                 if !r2.info.is_empty() {
                     for nav in &r2.info {
@@ -547,8 +545,8 @@ impl RaInstance {
         &self.workspace_root
     }
 
-    /// Access the RA analysis snapshot (for chunker and other internal uses).
-    pub fn analysis(&self) -> &Analysis { &self.analysis }
+    /// Access the RA analysis snapshot (always fresh from host).
+    pub fn analysis(&self) -> Analysis { self.host.analysis() }
 
     /// Access the file map (relative path → FileInfo).
     pub(crate) fn file_map(&self) -> &HashMap<String, FileInfo> { &self.file_map }
@@ -570,7 +568,6 @@ impl RaInstance {
         };
         change.change_file(file_id, Some(new_content.clone()));
         self.host.apply_change(change);
-        self.analysis = self.host.analysis();
 
         // Update file_map entry (source + line_index).
         let line_index = LineIndex::new(&new_content);
@@ -598,8 +595,9 @@ impl RaInstance {
         if count > 0 {
             let t = std::time::Instant::now();
             self.host.apply_change(change);
-            self.analysis = self.host.analysis();
             eprintln!("    [ra] apply_change: {:.1}ms ({count} files)", t.elapsed().as_secs_f64() * 1000.0);
+            // Don't create new analysis snapshot here — it triggers re-analysis.
+            // Next analysis() call will pick up changes lazily.
             // Update file_map entries.
             for (rel_path, new_content) in files {
                 if let Some(fi) = self.file_map.get_mut(rel_path.as_str()) {
@@ -623,7 +621,7 @@ impl RaInstance {
         let pos = self.file_position(file, line, col)?;
         let config = call_hierarchy_config();
         let items = self
-            .analysis
+            .host.analysis()
             .incoming_calls(&config, pos)
             .map_err(|e| LspError::Protocol(format!("incoming_calls cancelled: {e}")))?
             .unwrap_or_default();
@@ -640,7 +638,7 @@ impl RaInstance {
         let pos = self.file_position(file, line, col)?;
         let config = call_hierarchy_config();
         let items = self
-            .analysis
+            .host.analysis()
             .outgoing_calls(&config, pos)
             .map_err(|e| LspError::Protocol(format!("outgoing_calls cancelled: {e}")))?
             .unwrap_or_default();
@@ -661,7 +659,7 @@ impl RaInstance {
             minicore: Default::default(),
         };
         let result = self
-            .analysis
+            .host.analysis()
             .goto_definition(pos, &config)
             .map_err(|e| LspError::Protocol(format!("goto_definition cancelled: {e}")))?;
         Ok(result

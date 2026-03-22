@@ -124,7 +124,28 @@ pub fn run(
         if let Some(ref mut w) = watcher {
             let changed = w.poll_changes();
             if !changed.is_empty() {
-                eprintln!("[watcher] {} file(s) changed, invalidating graph cache", changed.len());
+                eprintln!("[watcher] {} file(s) changed", changed.len());
+                if let Some(ref mut ra) = state.ra {
+                    let updates: Vec<(String, String)> = changed.iter()
+                        .filter_map(|path| {
+                            let content = std::fs::read_to_string(path).ok()?;
+                            let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
+                            let abs_str = v_hnsw_core::strip_unc_prefix(&abs.to_string_lossy())
+                                .replace('\\', "/");
+                            let root = ra.workspace_root().to_string_lossy().replace('\\', "/");
+                            let root = v_hnsw_core::strip_unc_prefix(&root);
+                            let rel = abs_str.strip_prefix(root)
+                                .and_then(|s| s.strip_prefix('/'))
+                                .unwrap_or(&abs_str);
+                            Some((rel.to_owned(), content))
+                        })
+                        .collect();
+                    if !updates.is_empty() {
+                        eprintln!("[watcher] updating {} file(s) in RA...", updates.len());
+                        let n = ra.update_files(&updates);
+                        eprintln!("[watcher] RA update done ({n} files)");
+                    }
+                }
                 w.invalidate_graph_cache();
             }
         }
