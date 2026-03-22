@@ -10,7 +10,6 @@ license.workspace = true
 # Internal crates
 v-hnsw-core.workspace = true
 v-hnsw-storage.workspace = true
-v-code-chunk.workspace = true
 v-lsp.workspace = true
 
 # Error handling
@@ -23,10 +22,6 @@ rayon.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
 bincode.workspace = true
-
-# Macro expansion parsing
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
 
 [dev-dependencies]
 tempfile = "3"

@@ -5390,7 +5390,6 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
- "v-code-chunk",
  "v-code-intel",
  "v-hnsw-cli",
  "v-hnsw-core",
@@ -5427,9 +5426,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tree-sitter",
- "tree-sitter-rust",
- "v-code-chunk",
  "v-hnsw-core",
  "v-hnsw-storage",
  "v-lsp",
@@ -5613,6 +5609,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "v-hnsw-core",
 ]
 
 [[package]]

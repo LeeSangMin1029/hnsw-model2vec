@@ -61,7 +61,7 @@ impl ParsedChunk {
     ///
     /// This is much faster than serializing to text and re-parsing.
     /// Used by `v-code add` to pre-build the chunks.bin cache.
-    pub fn from_code_chunk(chunk: &v_code_chunk::CodeChunk, file: &str, imports: Vec<String>) -> Self {
+    pub fn from_code_chunk(chunk: &crate::chunk_types::CodeChunk, file: &str, imports: Vec<String>) -> Self {
         let lines = if chunk.start_line > 0 || chunk.end_line > 0 {
             Some((chunk.start_line + 1, chunk.end_line + 1))
         } else {

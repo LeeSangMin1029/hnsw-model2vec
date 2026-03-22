@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use rayon::prelude::*;
-use v_code_chunk::extract;
+use crate::minhash;
 use v_hnsw_core::{PayloadStore, PayloadValue};
 use v_hnsw_storage::StorageEngine;
 
@@ -204,7 +204,7 @@ pub fn run_unified_pipeline(
             let jaccard = match (minhash_map.get(&id_a), minhash_map.get(&id_b)) {
                 (Some(sig_a), Some(sig_b)) => {
                     #[expect(clippy::cast_possible_truncation)]
-                    let j = extract::jaccard_from_minhash(sig_a, sig_b) as f32;
+                    let j = minhash::jaccard_from_minhash(sig_a, sig_b) as f32;
                     j
                 }
                 _ => 0.0,
@@ -548,7 +548,7 @@ fn get_hash(pstore: &impl PayloadStore, id: u64, key: &str) -> Option<u64> {
 fn get_minhash(pstore: &impl PayloadStore, id: u64) -> Option<Vec<u64>> {
     let payload = pstore.get_payload(id).ok()??;
     match payload.custom.get("minhash")? {
-        PayloadValue::String(hex) => extract::minhash_from_hex(hex),
+        PayloadValue::String(hex) => minhash::minhash_from_hex(hex),
         _ => None,
     }
 }
@@ -605,7 +605,7 @@ fn minhash_all_pairs(entries: &[(u64, Vec<u64>)], threshold: f64) -> Vec<DupePai
             let (id_a, sig_a) = &entries[i];
             ((i + 1)..n).filter_map(move |j| {
                 let (id_b, sig_b) = &entries[j];
-                let sim = extract::jaccard_from_minhash(sig_a, sig_b);
+                let sim = minhash::jaccard_from_minhash(sig_a, sig_b);
                 #[expect(clippy::cast_possible_truncation)]
                 (sim >= threshold).then_some(DupePair {
                     id_a: *id_a,

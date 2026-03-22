@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use v_code_chunk as chunk_code;
+use v_code_intel::chunk_types as chunk_code;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::{generate_id, get_file_mtime, normalize_source};
 
