@@ -109,7 +109,9 @@ pub fn handle_chunk_files(
         .map_err(|e| anyhow::anyhow!("Invalid code/chunk params: {e}"))?;
 
     let t0 = std::time::Instant::now();
-    let chunks = ra.chunk_files(&p.files);
+    let chunks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ra.chunk_files(&p.files)
+    })).map_err(|e| anyhow::anyhow!("chunk_files panicked: {:?}", e))?;
     eprintln!(
         "[daemon] code/chunk: {} files → {} chunks ({:.1}ms)",
         p.files.len(), chunks.len(),

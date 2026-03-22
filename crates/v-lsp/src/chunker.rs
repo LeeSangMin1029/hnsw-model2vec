@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ra_ap_ide::{FileId, StructureNodeKind, FileStructureConfig, SymbolKind};
+use ra_ap_ide::{FileId, StructureNodeKind, FileStructureConfig, SymbolKind, TextSize};
 
 use crate::instance::RaInstance;
 
@@ -52,16 +52,23 @@ impl RaInstance {
         let mut all_chunks = Vec::new();
         let mut test_ranges: HashMap<FileId, HashSet<u32>> = HashMap::new();
 
-        // Pre-collect test functions per file.
+        // Pre-collect test functions per file via runnables (safer than discover_tests).
         for file_key in files {
             if let Some(fi) = self.file_map().get(file_key) {
-                if let Ok(tests) = self.analysis().discover_tests_in_file(fi.file_id) {
-                    let ranges: HashSet<u32> = tests.iter()
-                        .filter_map(|t| t.text_range.map(|r| {
-                            fi.line_index.line_col(r.start()).line
-                        }))
+                if let Ok(runnables) = self.analysis().runnables(fi.file_id) {
+                    let file_len = TextSize::from(fi.source.len() as u32);
+                    let ranges: HashSet<u32> = runnables.iter()
+                        .filter(|r| format!("{:?}", r.kind).contains("Test"))
+                        .filter_map(|r| {
+                            let start = r.nav.focus_range.unwrap_or(r.nav.full_range).start();
+                            if start < file_len {
+                                Some(fi.line_index.line_col(start).line)
+                            } else { None }
+                        })
                         .collect();
-                    test_ranges.insert(fi.file_id, ranges);
+                    if !ranges.is_empty() {
+                        test_ranges.insert(fi.file_id, ranges);
+                    }
                 }
             }
         }
@@ -93,6 +100,12 @@ impl RaInstance {
                 };
                 if !include { continue; }
 
+                let file_len = TextSize::from(source.len() as u32);
+                if node.node_range.end() > file_len {
+                    eprintln!("[chunker] skip {}: range {:?} > file_len {} in {file_key}",
+                        node.label, node.node_range, source.len());
+                    continue;
+                }
                 let start_line_0 = fi.line_index.line_col(node.node_range.start()).line as usize;
                 let end_line_0 = fi.line_index.line_col(node.node_range.end()).line as usize;
 
@@ -126,9 +139,11 @@ impl RaInstance {
                 // Is test?
                 let is_test = file_tests.map_or(false, |tests| tests.contains(&(start_line_0 as u32)));
 
-                // For functions: get outgoing calls via RA.
+                // For functions: get outgoing calls via RA using navigation_range.
                 let (calls, call_lines) = if kind == "function" {
-                    self.extract_calls(file_key, start_line_0 as u32, &node.label)
+                    let nav_line = fi.line_index.line_col(node.navigation_range.start()).line;
+                    let nav_col = fi.line_index.line_col(node.navigation_range.start()).col;
+                    self.extract_calls_at(file_key, nav_line, nav_col)
                 } else {
                     (Vec::new(), Vec::new())
                 };
@@ -194,16 +209,9 @@ impl RaInstance {
         all_chunks
     }
 
-    /// Extract calls from a function using `outgoing_calls`.
-    fn extract_calls(&self, file: &str, start_line: u32, fn_name: &str) -> (Vec<String>, Vec<u32>) {
-        // Find the column of the function name for call hierarchy.
-        let col = self.file_map().get(file).and_then(|fi| {
-            let line = fi.source.lines().nth(start_line as usize)?;
-            let pat = format!("fn {fn_name}");
-            line.find(&pat).map(|pos| (pos + 3) as u32)
-        }).unwrap_or(7);
-
-        match self.outgoing_calls(file, start_line, col) {
+    /// Extract calls from a function using `outgoing_calls` at exact position.
+    fn extract_calls_at(&self, file: &str, line: u32, col: u32) -> (Vec<String>, Vec<u32>) {
+        match self.outgoing_calls(file, line, col) {
             Ok(callees) => {
                 let mut calls = Vec::new();
                 let mut lines = Vec::new();
