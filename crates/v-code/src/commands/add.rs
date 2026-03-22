@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use v_code_chunk as chunk_code;
 use v_hnsw_cli::commands::db_config::DbConfig;
 use v_hnsw_cli::commands::file_index;
 use v_hnsw_cli::commands::file_utils::scan_files;
@@ -70,7 +69,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let mut lang_counts: HashMap<&str, usize> = HashMap::new();
     for f in &code_files {
         let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let lang = chunk_code::lang_for_extension(ext).unwrap_or("other");
+        let lang = v_hnsw_core::lang_for_ext(ext);
         *lang_counts.entry(lang).or_default() += 1;
     }
     let mut lang_summary: Vec<_> = lang_counts.iter().collect();
@@ -447,7 +446,7 @@ fn scan_files_fast(input_path: &std::path::Path, exclude: &[String]) -> Vec<Path
                 .filter_map(|line| {
                     let path = input_path.join(line);
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if chunk_code::is_supported_code_file(ext) {
+                    if v_hnsw_core::is_code_ext(ext) {
                         Some(path)
                     } else {
                         None
@@ -460,7 +459,7 @@ fn scan_files_fast(input_path: &std::path::Path, exclude: &[String]) -> Vec<Path
         }
     }
     // Fallback to walkdir.
-    scan_files(input_path, exclude, chunk_code::is_supported_code_file)
+    scan_files(input_path, exclude, v_hnsw_core::is_code_ext)
 }
 
 

@@ -111,7 +111,7 @@ pub fn chunk_via_daemon(
         let mtime = get_file_mtime(code_path).unwrap_or(0);
         let size = file_index::get_file_size(code_path).unwrap_or(0);
         let ext = code_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let lang = chunk_code::lang_for_extension(ext).unwrap_or("rust");
+        let lang = v_hnsw_core::lang_for_ext(ext);
 
         let mut chunk_ids = Vec::with_capacity(chunks.len());
         for (idx, chunk_val) in chunks.iter().enumerate() {

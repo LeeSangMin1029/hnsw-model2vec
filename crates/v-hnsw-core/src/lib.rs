@@ -74,6 +74,26 @@ pub fn strip_unc_prefix_path(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(strip_unc_prefix(&path.to_string_lossy()))
 }
 
+/// Map file extension to language name. Returns `"other"` for unsupported extensions.
+pub fn lang_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "rs" => "rust",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "py" | "pyi" => "python",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" | "hh" => "cpp",
+        _ => "other",
+    }
+}
+
+/// Check if a file extension is a supported code file.
+pub fn is_code_ext(ext: &str) -> bool {
+    lang_for_ext(ext) != "other"
+}
+
 /// Read a little-endian `u64` from a byte slice at the given offset.
 pub fn read_le_u64(data: &[u8], offset: usize) -> Option<u64> {
     let bytes: [u8; 8] = data.get(offset..offset + 8)?.try_into().ok()?;

@@ -72,12 +72,13 @@ fn resolve_ext(ext: &str) -> Option<LangInfo> {
 
 /// Check if a file extension is a supported code file.
 pub fn is_supported_code_file(ext: &str) -> bool {
-    resolve_ext(ext).is_some()
+    v_hnsw_core::is_code_ext(ext)
 }
 
 /// Map a file extension to a language name for tagging.
 pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
-    resolve_ext(ext).map(|info| info.name)
+    let lang = v_hnsw_core::lang_for_ext(ext);
+    if lang == "other" { None } else { Some(lang) }
 }
 
 /// Dispatch to the appropriate language chunker based on file extension.

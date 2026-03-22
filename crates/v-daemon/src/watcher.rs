@@ -10,9 +10,6 @@ use std::sync::mpsc;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Source file extensions to watch.
-const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "ts", "js", "go", "c", "cpp", "java", "tsx", "jsx",
-];
 
 /// Directories to skip entirely.
 const IGNORED_DIRS: &[&str] = &[
@@ -108,7 +105,7 @@ impl FileWatcher {
 fn is_source_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| SOURCE_EXTENSIONS.contains(&ext))
+        .is_some_and(v_hnsw_core::is_code_ext)
 }
 
 /// Check if a path is inside an ignored directory.
