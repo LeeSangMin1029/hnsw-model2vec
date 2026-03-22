@@ -551,6 +551,9 @@ impl RaInstance {
     /// Access the file map (relative path → FileInfo).
     pub(crate) fn file_map(&self) -> &HashMap<String, FileInfo> { &self.file_map }
 
+    /// Access the reverse file map (FileId → relative path).
+    pub(crate) fn reverse_file_map(&self) -> &HashMap<FileId, String> { &self.reverse_file_map }
+
     /// Update a file's content in the RA database (incremental update).
     ///
     /// After calling this, `analysis()` will reflect the new content.
@@ -865,13 +868,6 @@ fn normalize_vfs_path(vfs_path: &str, project_root: &Path) -> String {
 
     if let Some(rel) = normalized.strip_prefix(&root_str) {
         let rel = rel.trim_start_matches('/');
-        if let Some((crate_part, rest)) = rel.split_once('/') {
-            let crate_name = crate_part.strip_suffix("-stub").unwrap_or(crate_part);
-            if crate_name == "crates" {
-                return rel.to_owned();
-            }
-            return format!("crates/{crate_name}/{rest}");
-        }
         return rel.to_owned();
     }
     normalized

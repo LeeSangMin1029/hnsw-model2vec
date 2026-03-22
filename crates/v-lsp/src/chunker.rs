@@ -52,10 +52,13 @@ impl RaInstance {
         let mut all_chunks = Vec::new();
         let mut test_ranges: HashMap<FileId, HashSet<u32>> = HashMap::new();
 
+        // Single analysis snapshot for the entire batch — avoid re-creating per file.
+        let analysis = self.analysis();
+
         // Pre-collect test functions per file via runnables (safer than discover_tests).
         for file_key in files {
             if let Some(fi) = self.file_map().get(file_key) {
-                if let Ok(runnables) = self.analysis().runnables(fi.file_id) {
+                if let Ok(runnables) = analysis.runnables(fi.file_id) {
                     let file_len = TextSize::from(fi.source.len() as u32);
                     let ranges: HashSet<u32> = runnables.iter()
                         .filter(|r| format!("{:?}", r.kind).contains("Test"))
@@ -80,7 +83,7 @@ impl RaInstance {
 
             // Get file structure (symbols).
             let config = FileStructureConfig { exclude_locals: true };
-            let Ok(structure) = self.analysis().file_structure(&config, fi.file_id) else { continue };
+            let Ok(structure) = analysis.file_structure(&config, fi.file_id) else { continue };
 
             // Extract imports from source.
             let imports = extract_imports(source);
@@ -143,7 +146,7 @@ impl RaInstance {
                 let (calls, call_lines) = if kind == "function" {
                     let nav_line = fi.line_index.line_col(node.navigation_range.start()).line;
                     let nav_col = fi.line_index.line_col(node.navigation_range.start()).col;
-                    self.extract_calls_at(file_key, nav_line, nav_col)
+                    self.extract_calls_with_analysis(&analysis, file_key, nav_line, nav_col)
                 } else {
                     (Vec::new(), Vec::new())
                 };
@@ -200,6 +203,35 @@ impl RaInstance {
         }
 
         all_chunks
+    }
+
+    /// Extract calls using a pre-created analysis snapshot (avoids re-creating per call).
+    fn extract_calls_with_analysis(&self, analysis: &ra_ap_ide::Analysis, file: &str, line: u32, col: u32) -> (Vec<String>, Vec<u32>) {
+        let file_key = file.replace('\\', "/");
+        let Some(fi) = self.file_map().get(&file_key) else { return (Vec::new(), Vec::new()) };
+        let line_col = ra_ap_ide::LineCol { line, col };
+        let Some(offset) = fi.line_index.offset(line_col) else { return (Vec::new(), Vec::new()) };
+        let pos = ra_ap_ide::FilePosition { file_id: fi.file_id, offset };
+        let config = ra_ap_ide::CallHierarchyConfig { exclude_tests: false, minicore: Default::default() };
+        let items = match analysis.outgoing_calls(&config, pos) {
+            Ok(Some(items)) => items,
+            _ => return (Vec::new(), Vec::new()),
+        };
+        let mut calls = Vec::new();
+        let mut lines = Vec::new();
+        for ci in &items {
+            let name = ci.target.name.to_string();
+            for range in &ci.ranges {
+                if let Some(caller_file) = self.reverse_file_map().get(&range.file_id) {
+                    if let Some(caller_fi) = self.file_map().get(caller_file) {
+                        let call_line = caller_fi.line_index.line_col(range.range.start()).line + 1;
+                        calls.push(name.clone());
+                        lines.push(call_line);
+                    }
+                }
+            }
+        }
+        (calls, lines)
     }
 
     /// Extract calls from a function using `outgoing_calls` at exact position.
