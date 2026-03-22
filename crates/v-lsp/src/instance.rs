@@ -105,10 +105,10 @@ pub struct SymbolLocation {
 }
 
 /// Per-file info needed for hover queries.
-struct FileInfo {
-    file_id: FileId,
-    line_index: LineIndex,
-    source: String,
+pub(crate) struct FileInfo {
+    pub(crate) file_id: FileId,
+    pub(crate) line_index: LineIndex,
+    pub(crate) source: String,
 }
 
 impl RaInstance {
@@ -546,6 +546,12 @@ impl RaInstance {
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
+
+    /// Access the RA analysis snapshot (for chunker and other internal uses).
+    pub fn analysis(&self) -> &Analysis { &self.analysis }
+
+    /// Access the file map (relative path → FileInfo).
+    pub(crate) fn file_map(&self) -> &HashMap<String, FileInfo> { &self.file_map }
 
     // ── Call Hierarchy API ──────────────────────────────────────────
 

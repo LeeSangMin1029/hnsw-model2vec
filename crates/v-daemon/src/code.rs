@@ -89,3 +89,32 @@ pub fn handle_collect_types(
 
     Ok(serde_json::to_value(lsp_types)?)
 }
+
+/// Extract code chunks from files using the daemon's RA instance.
+///
+/// Replaces tree-sitter chunking: uses `file_structure`, `outgoing_calls`,
+/// `discover_tests_in_file`, and source text parsing.
+pub fn handle_chunk_files(
+    params: serde_json::Value,
+    ra: Option<&v_lsp::instance::RaInstance>,
+) -> anyhow::Result<serde_json::Value> {
+    let ra = ra.ok_or_else(|| anyhow::anyhow!("RA not available"))?;
+
+    #[derive(serde::Deserialize)]
+    struct ChunkParams {
+        files: Vec<String>,
+    }
+
+    let p: ChunkParams = serde_json::from_value(params)
+        .map_err(|e| anyhow::anyhow!("Invalid code/chunk params: {e}"))?;
+
+    let t0 = std::time::Instant::now();
+    let chunks = ra.chunk_files(&p.files);
+    eprintln!(
+        "[daemon] code/chunk: {} files → {} chunks ({:.1}ms)",
+        p.files.len(), chunks.len(),
+        t0.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    Ok(serde_json::to_value(&chunks)?)
+}

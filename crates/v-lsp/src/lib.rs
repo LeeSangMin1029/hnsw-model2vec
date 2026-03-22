@@ -9,6 +9,7 @@
 pub mod lsp;
 pub mod instance;
 pub mod shm;
+pub mod chunker;
 pub mod client;
 pub mod error;
 

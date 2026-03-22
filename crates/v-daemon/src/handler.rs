@@ -135,6 +135,10 @@ fn dispatch(
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -5, e.to_string())),
         },
+        "code/chunk" => match crate::code::handle_chunk_files(request.params.clone(), state.ra.as_ref()) {
+            Ok(v) => Ok(ok_response(id, v)),
+            Err(e) => Ok(err_response(id, -6, e.to_string())),
+        },
         method => Ok(err_response(id, -32601, format!("Unknown method: {method}"))),
     }
 }
