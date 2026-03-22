@@ -87,19 +87,6 @@ fn dispatch(
 ) -> Result<JsonRpcResponse> {
     let id = request.id;
 
-    // Apply pending RA file updates before processing request.
-    if !state.pending_ra_updates.is_empty() {
-        if let Some(ref mut ra) = state.ra {
-            let updates = std::mem::take(&mut state.pending_ra_updates);
-            let n = ra.update_files(&updates);
-            if n > 0 {
-                eprintln!("[ra] applied {n} pending file updates");
-            }
-        } else {
-            state.pending_ra_updates.clear();
-        }
-    }
-
     match request.method.as_str() {
         "search" => {
             let params: SearchParams =

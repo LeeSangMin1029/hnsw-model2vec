@@ -152,8 +152,6 @@ pub struct DaemonState {
     query_cache: QueryCache,
     /// In-process rust-analyzer instance (spawned once, reused across requests).
     pub ra: Option<v_lsp::instance::RaInstance>,
-    /// Queued file updates from watcher — applied lazily on next RPC.
-    pub pending_ra_updates: Vec<(String, String)>,
 }
 
 impl DaemonState {
@@ -166,7 +164,6 @@ impl DaemonState {
             databases: HashMap::new(),
             query_cache: QueryCache::global(),
             ra: None,
-            pending_ra_updates: Vec::new(),
         };
 
         // Store the initial DB path but don't load it yet.

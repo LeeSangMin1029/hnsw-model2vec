@@ -136,30 +136,11 @@ pub fn run(
         state.maybe_unload_model();
         state.maybe_evict_databases();
 
-        // Poll file watcher for source changes → queue RA updates + invalidate graph cache.
+        // Poll file watcher for source changes → invalidate graph cache.
         if let Some(ref mut w) = watcher {
             let changed = w.poll_changes();
             if !changed.is_empty() {
-                // Queue file updates for RA (applied lazily on next RPC).
-                for path in &changed {
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-                        let abs_str = v_hnsw_core::strip_unc_prefix(&abs.to_string_lossy())
-                            .replace('\\', "/");
-                        if let Some(ref ra) = state.ra {
-                            let root = ra.workspace_root().to_string_lossy().replace('\\', "/");
-                            let root = v_hnsw_core::strip_unc_prefix(&root);
-                            let rel = abs_str.strip_prefix(root)
-                                .and_then(|s| s.strip_prefix('/'))
-                                .unwrap_or(&abs_str);
-                            state.pending_ra_updates.push((rel.to_owned(), content));
-                        }
-                    }
-                }
-                eprintln!(
-                    "[watcher] {} file(s) changed, invalidating graph cache ({} queued for RA)",
-                    changed.len(), state.pending_ra_updates.len(),
-                );
+                eprintln!("[watcher] {} file(s) changed, invalidating graph cache", changed.len());
                 w.invalidate_graph_cache();
             }
         }
