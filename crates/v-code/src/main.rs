@@ -55,9 +55,6 @@ fn run() -> anyhow::Result<()> {
         Commands::Blast { db, symbol, depth, include_tests, scope } => {
             intel::run_blast(db, symbol, depth, include_tests, scope)
         }
-        Commands::Jump { db, symbol, depth, include_tests } => {
-            intel::run_jump(db, symbol, depth, include_tests)
-        }
         Commands::Trace { db, from, to } => {
             intel::run_trace(db, from, to)
         }

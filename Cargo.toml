@@ -5,7 +5,6 @@ members = [
     "crates/v-hnsw-storage",
     "crates/v-hnsw-search",
     "crates/v-hnsw-embed",
-    "crates/v-hnsw-rerank",
     "crates/v-code-intel",
     "crates/v-hnsw-cli",
     "crates/v-hnsw",
@@ -33,7 +32,6 @@ v-hnsw-search = { path = "crates/v-hnsw-search" }
 v-hnsw-embed = { path = "crates/v-hnsw-embed" }
 v-code = { path = "crates/v-code" }
 v-code-intel = { path = "crates/v-code-intel" }
-v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 v-hnsw-cli = { path = "crates/v-hnsw-cli" }
 v-daemon = { path = "crates/v-daemon" }
 

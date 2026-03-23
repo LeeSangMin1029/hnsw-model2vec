@@ -225,7 +225,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 
         println!();
         println!("Done! Code DB ready: {}", db_path.display());
-        println!("Use: v-code context/blast/jump/symbols/dupes {}", db_path.display());
+        println!("Use: v-code context/blast/symbols/dupes {}", db_path.display());
 
         // Checkpoint + release exclusive lock before rebuilding caches.
         engine.checkpoint().ok();

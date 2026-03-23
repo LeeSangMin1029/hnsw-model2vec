@@ -60,7 +60,7 @@ pub enum Commands {
         /// Filter results to symbols whose file path contains this prefix.
         #[arg(long)]
         scope: Option<String>,
-        /// Show DFS callee tree instead of grouped context (same as `jump`).
+        /// Show DFS callee tree instead of grouped context.
         #[arg(long)]
         tree: bool,
     },
@@ -90,20 +90,6 @@ pub enum Commands {
         from: String,
         /// Target symbol name.
         to: String,
-    },
-    /// Show execution flow tree (DFS callee traversal).
-    #[command(visible_alias = "j")]
-    Jump {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Symbol name to trace execution flow for.
-        symbol: String,
-        /// Max DFS depth (default: 2).
-        #[arg(long, default_value = "2")]
-        depth: u32,
-        /// Include test symbols in the flow tree (excluded by default).
-        #[arg(long)]
-        include_tests: bool,
     },
     /// Find duplicate code (token Jaccard default, --ast structural).
     #[command(visible_alias = "dup")]

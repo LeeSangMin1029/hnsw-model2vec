@@ -1,7 +1,7 @@
 //! CLI command handlers for code-intel subcommands.
 //!
 //! Each `run_*` function corresponds to a CLI subcommand (stats, symbols,
-//! context, blast, jump, trace, etc.). Pure analysis logic lives in `v-code-intel`.
+//! context, blast, trace, etc.). Pure analysis logic lives in `v-code-intel`.
 
 use std::path::{Path, PathBuf};
 
@@ -342,15 +342,6 @@ fn run_context_tree(db: &Path, symbol: &str, depth: u32, include_tests: bool) ->
     Ok(())
 }
 
-/// `v-code jump <db> <symbol> --depth N`
-pub fn run_jump(
-    db: PathBuf,
-    symbol: String,
-    depth: u32,
-    include_tests: bool,
-) -> Result<()> {
-    run_context_tree(&db, &symbol, depth, include_tests)
-}
 
 /// Resolve a symbol name to graph indices, printing a message if not found.
 /// Returns `None` (and prints) when resolution yields no results.

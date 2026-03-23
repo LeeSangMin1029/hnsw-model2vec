@@ -1,6 +1,6 @@
 //! Code intelligence commands — structural queries on code-chunked databases.
 //!
-//! Provides `symbols`, `context`, `blast`, `jump`, and `trace`
+//! Provides `symbols`, `context`, `blast`, and `trace`
 //! subcommands that parse the structured text field of code chunks
 //! (produced by `chunk_code`) and answer structural navigation queries.
 //!
@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_aliases, run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_coverage, run_dead};
+pub use commands::{run_aliases, run_stats, run_symbols, run_context, run_blast, run_trace, run_coverage, run_dead};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 
