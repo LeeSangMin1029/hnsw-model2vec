@@ -26,6 +26,7 @@ pub mod parse;
 pub mod reason;
 pub mod stats;
 pub mod lsp_client;
+pub mod mir_edges;
 pub mod ra_direct;
 pub mod trace;
 

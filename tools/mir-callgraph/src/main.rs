@@ -19,8 +19,10 @@ use serde::Serialize;
 struct CallEdge {
     caller: String,
     caller_file: String,
+    caller_kind: String,
     callee: String,
     line: usize,
+    is_local: bool,
 }
 
 struct MirCallbacks {
@@ -57,7 +59,31 @@ fn extract_call_edges(tcx: TyCtxt<'_>, json: bool) {
 
         let body = tcx.optimized_mir(def_id);
         let caller_name = tcx.def_path_str(def_id.to_def_id());
-        let caller_file = format!("{:?}", source_map.span_to_filename(body.span));
+        let caller_file = match source_map.span_to_filename(body.span) {
+            rustc_span::FileName::Real(ref name) => {
+                // local path가 있으면 사용, 없으면 remapped 사용
+                let path_str = format!("{name:?}");
+                // RealFileName에서 name 필드 추출
+                if let Some(start) = path_str.find("name: \"") {
+                    let rest = &path_str[start + 7..];
+                    if let Some(end) = rest.find('"') {
+                        rest[..end].replace("\\\\", "/").to_string()
+                    } else {
+                        path_str
+                    }
+                } else {
+                    path_str
+                }
+            }
+            other => format!("{other:?}"),
+        };
+        let caller_kind = match def_kind {
+            rustc_hir::def::DefKind::Fn => "fn",
+            rustc_hir::def::DefKind::AssocFn => "method",
+            rustc_hir::def::DefKind::Closure => "closure",
+            _ => "other",
+        }
+        .to_string();
 
         for block in body.basic_blocks.iter() {
             let terminator = block.terminator();
@@ -78,8 +104,10 @@ fn extract_call_edges(tcx: TyCtxt<'_>, json: bool) {
                 edges.push(CallEdge {
                     caller: caller_name.clone(),
                     caller_file: caller_file.clone(),
+                    caller_kind: caller_kind.clone(),
                     callee: callee_name,
                     line: call_line,
+                    is_local: callee_def_id.is_local(),
                 });
             }
         }
