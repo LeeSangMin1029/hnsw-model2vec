@@ -63,7 +63,7 @@ impl MirEdgeMap {
         Ok(map)
     }
 
-    /// Load all .jsonl files from a directory.
+    /// Load all `.edges.jsonl` files from a directory.
     pub fn from_dir(dir: &Path) -> Result<Self> {
         let mut combined = Self::default();
         let entries = std::fs::read_dir(dir)
@@ -72,7 +72,7 @@ impl MirEdgeMap {
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            if path.to_string_lossy().ends_with(".edges.jsonl") {
                 let partial = Self::from_jsonl(&path)?;
                 for (k, v) in partial.by_location {
                     combined.by_location.entry(k).or_default().extend(v);
@@ -110,6 +110,14 @@ pub fn run_mir_callgraph(project_root: &Path, mir_callgraph_bin: Option<&Path>) 
 
     let bin = mir_callgraph_bin
         .map(|p| p.to_path_buf())
+        .or_else(|| {
+            // Look for mir-callgraph next to current exe first
+            std::env::current_exe().ok()
+                .and_then(|exe| {
+                    let sibling = exe.with_file_name(if cfg!(windows) { "mir-callgraph.exe" } else { "mir-callgraph" });
+                    sibling.exists().then_some(sibling)
+                })
+        })
         .unwrap_or_else(|| std::path::PathBuf::from("mir-callgraph"));
 
     let status = Command::new(&bin)
@@ -124,6 +132,52 @@ pub fn run_mir_callgraph(project_root: &Path, mir_callgraph_bin: Option<&Path>) 
     }
 
     MirEdgeMap::from_dir(&out_dir)
+}
+
+/// A chunk definition extracted from MIR — function/struct/enum with location info.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MirChunk {
+    pub name: String,
+    pub file: String,
+    pub kind: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+}
+
+/// Load MIR chunks from a JSONL file.
+pub fn load_mir_chunks(path: &Path) -> Result<Vec<MirChunk>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open MIR chunks: {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut chunks = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let chunk: MirChunk = serde_json::from_str(&line)
+            .with_context(|| format!("failed to parse MIR chunk: {line}"))?;
+        chunks.push(chunk);
+    }
+    Ok(chunks)
+}
+
+/// Load all chunks from `.chunks.jsonl` files in a directory.
+pub fn load_all_mir_chunks(dir: &Path) -> Result<Vec<MirChunk>> {
+    let mut all = Vec::new();
+    let entries = std::fs::read_dir(dir)
+        .with_context(|| format!("failed to read MIR chunks dir: {}", dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        if path.to_string_lossy().ends_with(".chunks.jsonl") {
+            all.extend(load_mir_chunks(&path)?);
+        }
+    }
+    Ok(all)
 }
 
 /// Normalize a file path for consistent lookup.

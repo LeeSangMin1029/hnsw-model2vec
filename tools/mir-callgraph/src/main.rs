@@ -36,6 +36,7 @@ struct MirChunk {
     start_line: usize,
     end_line: usize,
     signature: Option<String>,
+    visibility: String,
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────
@@ -73,6 +74,34 @@ fn extract_filename(source_map: &rustc_span::source_map::SourceMap, span: rustc_
     }
 }
 
+/// Extract visibility string from `tcx.visibility(def_id)`.
+fn extract_visibility(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> String {
+    let vis = tcx.visibility(def_id);
+    if vis.is_public() {
+        "pub".to_string()
+    } else {
+        // Restricted visibility: pub(crate), pub(super), pub(in path), or private
+        let vis_str = format!("{vis:?}");
+        if vis_str.contains("Restricted") {
+            // For pub(crate), the restricted DefId points to the crate root
+            if let rustc_middle::ty::Visibility::Restricted(restricted_id) = vis {
+                if restricted_id == tcx.parent_module_from_def_id(def_id.expect_local()).to_def_id() {
+                    // private (restricted to own module) — empty string
+                    String::new()
+                } else if restricted_id == LOCAL_CRATE.as_def_id() {
+                    "pub(crate)".to_string()
+                } else {
+                    format!("pub(in {})", tcx.def_path_str(restricted_id))
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    }
+}
+
 fn extract_all(tcx: TyCtxt<'_>, json: bool) {
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let source_map = tcx.sess.source_map();
@@ -80,10 +109,54 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
     let mut edges: Vec<CallEdge> = Vec::new();
     let mut chunks: Vec<MirChunk> = Vec::new();
 
+    // ── Phase 1: HIR items — struct/enum/trait/impl ─────────────────
+    for item_id in tcx.hir_free_items() {
+        let item = tcx.hir_item(item_id);
+        let kind_str = match &item.kind {
+            rustc_hir::ItemKind::Struct(..) => "struct",
+            rustc_hir::ItemKind::Enum(..) => "enum",
+            rustc_hir::ItemKind::Trait(..) => "trait",
+            rustc_hir::ItemKind::Impl(..) => "impl",
+            _ => continue,
+        };
+
+        let span = item.span;
+        let file = extract_filename(source_map, span);
+        let start = source_map.lookup_char_pos(span.lo());
+        let end = source_map.lookup_char_pos(span.hi());
+        let def_id = item.owner_id.def_id;
+        let vis = extract_visibility(tcx, def_id.to_def_id());
+
+        // For impl blocks, build a more descriptive name
+        let name = if kind_str == "impl" {
+            tcx.def_path_str(def_id.to_def_id())
+        } else {
+            tcx.def_path_str(def_id.to_def_id())
+        };
+
+        // Signature from source: everything before the first `{`
+        let sig_str = source_map
+            .span_to_snippet(span)
+            .ok()
+            .and_then(|snippet| {
+                snippet.find('{').map(|brace| snippet[..brace].trim().to_string())
+            });
+
+        chunks.push(MirChunk {
+            name,
+            file,
+            kind: kind_str.to_string(),
+            start_line: start.line,
+            end_line: end.line,
+            signature: sig_str,
+            visibility: vis,
+        });
+    }
+
+    // ── Phase 2: MIR keys — functions, closures (call edges + fn chunks) ──
     for &def_id in tcx.mir_keys(()) {
         let def_kind = tcx.def_kind(def_id);
 
-        // Only functions/methods (skip closures for chunks, keep for edges)
         let is_fn = matches!(def_kind,
             rustc_hir::def::DefKind::Fn
             | rustc_hir::def::DefKind::AssocFn
@@ -91,29 +164,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
         let is_closure = matches!(def_kind, rustc_hir::def::DefKind::Closure);
 
         if !is_fn && !is_closure {
-            // Also extract struct/enum/trait as chunks (no MIR body)
-            let kind_str = match def_kind {
-                rustc_hir::def::DefKind::Struct => "struct",
-                rustc_hir::def::DefKind::Enum => "enum",
-                rustc_hir::def::DefKind::Trait => "trait",
-                rustc_hir::def::DefKind::Impl { .. } => "impl",
-                _ => continue,
-            };
-
-            let hir_id = tcx.local_def_id_to_hir_id(def_id);
-            let span = tcx.hir_span(hir_id);
-            let file = extract_filename(source_map, span);
-            let start = source_map.lookup_char_pos(span.lo());
-            let end = source_map.lookup_char_pos(span.hi());
-
-            chunks.push(MirChunk {
-                name: tcx.def_path_str(def_id.to_def_id()),
-                file,
-                kind: kind_str.to_string(),
-                start_line: start.line,
-                end_line: end.line,
-                signature: None,
-            });
+            // struct/enum/trait/impl are handled by HIR traversal above
             continue;
         }
 
@@ -132,9 +183,15 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
             let start = source_map.lookup_char_pos(body.span.lo());
             let end = source_map.lookup_char_pos(body.span.hi());
 
-            // Extract signature from fn_sig
-            let sig = tcx.fn_sig(def_id).skip_binder().skip_binder();
-            let sig_str = format!("{sig:?}");
+            // fn signature: source text up to the first `{`
+            let sig_str = source_map
+                .span_to_snippet(body.span)
+                .ok()
+                .and_then(|snippet| {
+                    snippet.find('{').map(|brace| snippet[..brace].trim().to_string())
+                });
+
+            let vis = extract_visibility(tcx, def_id.to_def_id());
 
             chunks.push(MirChunk {
                 name: caller_name.clone(),
@@ -142,7 +199,8 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
                 kind: caller_kind.to_string(),
                 start_line: start.line,
                 end_line: end.line,
-                signature: Some(sig_str),
+                signature: sig_str,
+                visibility: vis,
             });
         }
 

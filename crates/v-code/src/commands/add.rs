@@ -111,22 +111,24 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         let _ = config.save(&db_path);
     }
 
-    // === Pass 1: Chunk all files via daemon RA ===
+    // === Pass 1: Extract chunks via MIR (no daemon needed) ===
     eprintln!("  [rss] start: {:.0}MB", v_code_intel::graph::current_rss_mb());
     let t0 = std::time::Instant::now();
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
 
-    // Ensure daemon is running for RA-based chunking.
-    if !v_hnsw_storage::daemon_client::is_running() {
-        eprintln!("  [daemon] not running, starting...");
-        if !v_hnsw_storage::daemon_client::spawn_daemon_and_wait(&db_path) {
-            anyhow::bail!("daemon failed to start — run `v-daemon --db {}` first", db_path.display());
-        }
-    }
+    // Run mir-callgraph to extract chunks + edges
+    let mir_out_dir = input_path.join("target").join("mir-edges");
+    std::fs::create_dir_all(&mir_out_dir).ok();
+    v_code_intel::mir_edges::run_mir_callgraph(&input_path, None)
+        .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
 
-    super::ingest::chunk_via_daemon(&code_files, &db_path, &mut entries, &mut file_metadata_map)?;
-    eprintln!("  chunk: {:.1}s  RSS: {:.0}MB", t0.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
+    // Load MIR chunks and create CodeChunkEntries from source files
+    let mir_chunks = v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)
+        .context("failed to load MIR chunks")?;
+    super::ingest::chunk_from_mir(&mir_chunks, &db_path, &mut entries, &mut file_metadata_map)?;
+    eprintln!("  chunk: {:.1}s ({} chunks)  RSS: {:.0}MB",
+        t0.elapsed().as_secs_f64(), entries.len(), v_code_intel::graph::current_rss_mb());
 
     // === Build called_by + direct bulk write (zero-copy path) ===
     println!("Symbols: {} (functions, structs, enums, ...)", entries.len());
@@ -260,7 +262,22 @@ fn prebuild_caches(
 
     // Build graph.
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build(&chunks);
+    let mir_edges_dir = db_path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .join("target")
+        .join("mir-edges");
+    let graph = if mir_edges_dir.exists() {
+        match v_code_intel::mir_edges::MirEdgeMap::from_dir(&mir_edges_dir) {
+            Ok(mir) if mir.total > 0 => {
+                eprintln!("    [cache] MIR edges: {} total", mir.total);
+                v_code_intel::graph::CallGraph::build_with_mir(&chunks, &mir)
+            }
+            _ => v_code_intel::graph::CallGraph::build(&chunks),
+        }
+    } else {
+        v_code_intel::graph::CallGraph::build(&chunks)
+    };
     eprintln!("    [cache] graph build: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());
 
     let t4 = std::time::Instant::now();

@@ -121,7 +121,10 @@ pub(crate) fn resolve_by_name(chunks: &[ParsedChunk], index: &ChunkIndex) -> Res
 
 // ── MIR-based resolver ──────────────────────────────────────────────
 
-/// Resolve call edges using MIR data, falling back to name matching.
+/// Resolve call edges directly from MIR edge map.
+///
+/// Iterates MIR caller→callee pairs and maps them to chunk indices.
+/// Does not depend on chunk.calls (which may be empty in MIR mode).
 pub(crate) fn resolve_with_mir(
     chunks: &[ParsedChunk],
     index: &ChunkIndex,
@@ -129,53 +132,55 @@ pub(crate) fn resolve_with_mir(
 ) -> ResolvedEdges {
     let mut adj = ResolvedEdges::new(chunks.len());
     let mut mir_resolved: usize = 0;
-    let mut name_fallback: usize = 0;
-    let mut unresolved: usize = 0;
+    let mut mir_external: usize = 0;
 
-    for (src, chunk) in chunks.iter().enumerate() {
-        let chunk_lower = chunk.name.to_lowercase();
-        let mir_callees = find_mir_caller(mir_edges, &chunk_lower);
+    // Build name → chunk_index map for fast lookup
+    let mut name_to_idx: HashMap<String, u32> = HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        let lower = c.name.to_lowercase();
+        name_to_idx.insert(lower.clone(), i as u32);
+        let short = extract_type_method(&lower);
+        if short != lower {
+            name_to_idx.entry(short.to_owned()).or_insert(i as u32);
+        }
+    }
 
-        for (call_idx, call) in chunk.calls.iter().enumerate() {
-            let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
+    // Resolve from MIR edge map directly
+    for (caller_name, callees) in &mir_edges.by_caller {
+        let caller_lower = caller_name.to_lowercase();
+        let src = resolve_mir_name(&caller_lower, &name_to_idx, index);
+        let Some(src) = src else { continue };
 
-            // 1) MIR resolution
-            let mir_tgt = mir_callees.and_then(|callees| {
-                for (callee_name, _) in callees {
-                    let callee_lower = callee_name.to_lowercase();
-                    if let Some(&idx) = index.exact.get(&callee_lower) {
-                        if callee_matches_call(&callee_lower, &call.to_lowercase()) {
-                            return Some(idx);
-                        }
-                    }
-                    let short_callee = extract_type_method(&callee_lower);
-                    if let Some(&idx) = index.exact.get(short_callee) {
-                        if callee_matches_call(short_callee, &call.to_lowercase()) {
-                            return Some(idx);
-                        }
-                    }
-                }
-                None
-            });
-
-            if let Some(tgt) = mir_tgt {
+        for (callee_name, line) in callees {
+            let callee_lower = callee_name.to_lowercase();
+            let tgt = resolve_mir_name(&callee_lower, &name_to_idx, index);
+            if let Some(tgt) = tgt {
                 mir_resolved += 1;
-                adj.add_edge(src, tgt, call_line);
-            } else if let Some(tgt) = index.resolve_name(call) {
-                name_fallback += 1;
-                adj.add_edge(src, tgt, call_line);
+                adj.add_edge(src as usize, tgt, *line as u32);
             } else {
-                unresolved += 1;
+                mir_external += 1;
             }
         }
+    }
+
+    // Type ref edges from chunks
+    for (src, chunk) in chunks.iter().enumerate() {
         resolve_type_refs(src, chunk, index, &mut adj);
     }
 
-    eprintln!(
-        "      [edge-resolve] mir={mir_resolved} fallback={name_fallback} unresolved={unresolved}"
-    );
+    eprintln!("      [edge-resolve] mir={mir_resolved} external={mir_external}");
     adj.dedup();
     adj
+}
+
+/// Resolve a MIR fully-qualified name to a chunk index.
+fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>, index: &ChunkIndex) -> Option<u32> {
+    name_to_idx.get(name).copied()
+        .or_else(|| {
+            let short = extract_type_method(name);
+            name_to_idx.get(short).copied()
+        })
+        .or_else(|| index.resolve_name(name))
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
