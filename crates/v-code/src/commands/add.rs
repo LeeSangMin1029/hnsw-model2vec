@@ -117,11 +117,36 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
 
-    // Run mir-callgraph to extract chunks + edges
+    // Run mir-callgraph — only for crates containing changed files
     let mir_out_dir = input_path.join("target").join("mir-edges");
     std::fs::create_dir_all(&mir_out_dir).ok();
-    v_code_intel::mir_edges::run_mir_callgraph(&input_path, None)
-        .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
+
+    let has_cached_edges = mir_out_dir.exists()
+        && std::fs::read_dir(&mir_out_dir).is_ok_and(|mut d| d.any(|e| {
+            e.is_ok_and(|e| e.path().to_string_lossy().ends_with(".edges.jsonl"))
+        }));
+
+    if has_cached_edges {
+        // Incremental: only re-analyze crates with changed Rust files that are in file_index
+        let rust_changed: Vec<_> = code_files.iter()
+            .filter(|f| f.extension().and_then(|e| e.to_str()) == Some("rs"))
+            .filter(|f| {
+                let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
+                file_idx.get_file(&source).is_some()
+            })
+            .collect();
+        let changed_crates = v_code_intel::mir_edges::detect_changed_crates(&input_path, &rust_changed);
+        if !changed_crates.is_empty() {
+            let crate_refs: Vec<&str> = changed_crates.iter().map(|s| s.as_str()).collect();
+            eprintln!("  [mir] incremental: {} crate(s) — {}", crate_refs.len(), crate_refs.join(", "));
+            v_code_intel::mir_edges::run_mir_callgraph_for(&input_path, None, &crate_refs)
+                .context("mir-callgraph incremental failed")?;
+        }
+    } else {
+        // Initial: analyze entire workspace
+        v_code_intel::mir_edges::run_mir_callgraph(&input_path, None)
+            .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
+    }
 
     // Load MIR chunks and create CodeChunkEntries — only for changed files
     let mir_chunks = v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)

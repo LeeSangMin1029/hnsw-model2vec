@@ -99,41 +99,92 @@ impl MirEdgeMap {
     }
 }
 
-/// Run mir-callgraph tool and return edge map.
-///
-/// `project_root`: path to the Cargo project
-/// `mir_callgraph_bin`: path to the mir-callgraph binary (if None, look in PATH)
-pub fn run_mir_callgraph(project_root: &Path, mir_callgraph_bin: Option<&Path>) -> Result<MirEdgeMap> {
-    let out_dir = project_root.join("target").join("mir-edges");
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("failed to create MIR edge dir: {}", out_dir.display()))?;
-
-    let bin = mir_callgraph_bin
+/// Find the mir-callgraph binary.
+fn find_mir_callgraph_bin(override_path: Option<&Path>) -> std::path::PathBuf {
+    override_path
         .map(|p| p.to_path_buf())
         .or_else(|| {
-            // Look for mir-callgraph next to current exe first
             std::env::current_exe().ok()
                 .and_then(|exe| {
                     let sibling = exe.with_file_name(if cfg!(windows) { "mir-callgraph.exe" } else { "mir-callgraph" });
                     sibling.exists().then_some(sibling)
                 })
         })
-        .unwrap_or_else(|| std::path::PathBuf::from("mir-callgraph"));
+        .unwrap_or_else(|| std::path::PathBuf::from("mir-callgraph"))
+}
 
-    let status = Command::new(&bin)
-        .current_dir(project_root)
+/// Run mir-callgraph on the entire workspace.
+pub fn run_mir_callgraph(project_root: &Path, mir_callgraph_bin: Option<&Path>) -> Result<MirEdgeMap> {
+    run_mir_callgraph_for(project_root, mir_callgraph_bin, &[])
+}
+
+/// Run mir-callgraph for specific crates only (or all if `crates` is empty).
+pub fn run_mir_callgraph_for(
+    project_root: &Path,
+    mir_callgraph_bin: Option<&Path>,
+    crates: &[&str],
+) -> Result<MirEdgeMap> {
+    let out_dir = project_root.join("target").join("mir-edges");
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("failed to create MIR edge dir: {}", out_dir.display()))?;
+
+    let bin = find_mir_callgraph_bin(mir_callgraph_bin);
+
+    let mut cmd = Command::new(&bin);
+    cmd.current_dir(project_root)
         .arg("--keep-going")
         .env("MIR_CALLGRAPH_OUT", &out_dir)
-        .env("MIR_CALLGRAPH_JSON", "1")
-        .status()
+        .env("MIR_CALLGRAPH_JSON", "1");
+
+    for krate in crates {
+        cmd.arg("-p").arg(krate);
+    }
+
+    let status = cmd.status()
         .with_context(|| format!("failed to run mir-callgraph: {}", bin.display()))?;
 
-    // Don't fail on non-zero exit — some crates may fail but others succeed
     if !status.success() {
         eprintln!("  [mir] mir-callgraph exited with {status} (partial results may be available)");
     }
 
     MirEdgeMap::from_dir(&out_dir)
+}
+
+/// Detect which crates contain the given changed files.
+///
+/// Walks up from each file to find the nearest Cargo.toml, then extracts the package name.
+pub fn detect_changed_crates(project_root: &Path, changed_files: &[impl AsRef<Path>]) -> Vec<String> {
+    let mut crates = std::collections::HashSet::new();
+    for file in changed_files {
+        let file = file.as_ref();
+        let abs = if file.is_absolute() {
+            file.to_path_buf()
+        } else {
+            project_root.join(file)
+        };
+        // Walk up to find Cargo.toml
+        let mut dir = abs.parent();
+        while let Some(d) = dir {
+            let cargo_toml = d.join("Cargo.toml");
+            if cargo_toml.exists() {
+                // Extract package name from Cargo.toml
+                if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("name") {
+                            if let Some(name) = trimmed.split('"').nth(1) {
+                                crates.insert(name.to_owned());
+                            }
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+    crates.into_iter().collect()
 }
 
 /// A chunk definition extracted from MIR — function/struct/enum with location info.
