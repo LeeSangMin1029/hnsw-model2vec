@@ -335,16 +335,20 @@ fn main() {
     let json = args.iter().any(|a| a == "--json");
     let exe = env::current_exe().unwrap_or_default();
 
+    let keep_going = args.iter().any(|a| a == "--keep-going");
     let mut cmd = Command::new("cargo");
     cmd.arg("+nightly")
         .arg("check")
         .env("RUSTC_WRAPPER", &exe);
+    if keep_going {
+        cmd.arg("--keep-going");
+    }
 
     if json {
         cmd.env("MIR_CALLGRAPH_JSON", "1");
     }
 
-    for arg in args.iter().skip(1).filter(|a| *a != "--json") {
+    for arg in args.iter().skip(1).filter(|a| *a != "--json" && *a != "--keep-going") {
         cmd.arg(arg);
     }
 

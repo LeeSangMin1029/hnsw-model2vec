@@ -122,13 +122,15 @@ pub fn run_mir_callgraph(project_root: &Path, mir_callgraph_bin: Option<&Path>) 
 
     let status = Command::new(&bin)
         .current_dir(project_root)
+        .arg("--keep-going")
         .env("MIR_CALLGRAPH_OUT", &out_dir)
         .env("MIR_CALLGRAPH_JSON", "1")
         .status()
         .with_context(|| format!("failed to run mir-callgraph: {}", bin.display()))?;
 
+    // Don't fail on non-zero exit — some crates may fail but others succeed
     if !status.success() {
-        anyhow::bail!("mir-callgraph exited with {status}");
+        eprintln!("  [mir] mir-callgraph exited with {status} (partial results may be available)");
     }
 
     MirEdgeMap::from_dir(&out_dir)
