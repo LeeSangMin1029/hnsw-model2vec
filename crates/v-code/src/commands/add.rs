@@ -123,10 +123,13 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     v_code_intel::mir_edges::run_mir_callgraph(&input_path, None)
         .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
 
-    // Load MIR chunks and create CodeChunkEntries from source files
+    // Load MIR chunks and create CodeChunkEntries — only for changed files
     let mir_chunks = v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)
         .context("failed to load MIR chunks")?;
-    super::ingest::chunk_from_mir(&mir_chunks, &db_path, &mut entries, &mut file_metadata_map)?;
+    let changed_sources: std::collections::HashSet<String> = code_files.iter()
+        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source(f))
+        .collect();
+    super::ingest::chunk_from_mir(&mir_chunks, &db_path, &mut entries, &mut file_metadata_map, Some(&changed_sources))?;
     eprintln!("  chunk: {:.1}s ({} chunks)  RSS: {:.0}MB",
         t0.elapsed().as_secs_f64(), entries.len(), v_code_intel::graph::current_rss_mb());
 

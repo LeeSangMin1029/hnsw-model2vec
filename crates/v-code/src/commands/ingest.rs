@@ -247,6 +247,7 @@ pub fn chunk_from_mir(
     db_path: &Path,
     entries: &mut Vec<CodeChunkEntry>,
     file_metadata_map: &mut HashMap<String, (u64, u64, Vec<u64>)>,
+    changed_sources: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), anyhow::Error> {
     use v_hnsw_cli::commands::file_utils::{generate_id, get_file_mtime, normalize_source};
 
@@ -263,9 +264,13 @@ pub fn chunk_from_mir(
         root_str.push('/');
     }
 
-    // Group MIR chunks by file
+    // Group MIR chunks by file — skip external crate files
     let mut by_file: HashMap<String, Vec<&v_code_intel::mir_edges::MirChunk>> = HashMap::new();
     for mc in mir_chunks {
+        // Skip external crate files (.cargo/registry, rustup toolchain, etc.)
+        if mc.file.contains(".cargo") || mc.file.contains("registry") || mc.file.contains("rustup") {
+            continue;
+        }
         by_file.entry(mc.file.clone()).or_default().push(mc);
     }
 
@@ -290,6 +295,14 @@ pub fn chunk_from_mir(
         let all_lines: Vec<&str> = file_text.lines().collect();
 
         let source = normalize_source(&file_path);
+
+        // Skip unchanged files if filter is provided
+        if let Some(changed) = changed_sources {
+            if !changed.contains(&source) {
+                continue;
+            }
+        }
+
         let file_path_str = file_path.to_string_lossy().to_string();
         let mtime = get_file_mtime(&file_path).unwrap_or(0);
         let size = file_index::get_file_size(&file_path).unwrap_or(0);
