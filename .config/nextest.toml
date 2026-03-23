@@ -1,2 +1,8 @@
 [profile.default]
 status-level = "fail"
+# Skip Korean tokenizer tests by default — each loads lindera dict (~8s/process).
+# Run them explicitly: cargo nextest r --profile korean
+default-filter = "not (package(v-hnsw-search) & test(/korean/))"
+
+[profile.korean]
+status-level = "pass"

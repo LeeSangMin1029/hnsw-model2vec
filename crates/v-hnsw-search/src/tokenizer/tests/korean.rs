@@ -3,7 +3,7 @@ use crate::tokenizer::korean::{
     WhitespaceTokenizer,
 };
 
-use super::test_dict_path;
+use super::{test_dict_path, shared_korean_tokenizer};
 
 #[test]
 fn test_token_kind_from_pos() {
@@ -62,7 +62,7 @@ fn test_korean_tokenizer_creation() {
 
 #[test]
 fn test_korean_tokenizer_basic() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
     let tokens = tokenizer.tokenize("안녕하세요").expect("tokenize");
 
     assert!(!tokens.is_empty());
@@ -71,7 +71,7 @@ fn test_korean_tokenizer_basic() {
 
 #[test]
 fn test_korean_tokenizer_mixed() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
     let tokens = tokenizer.tokenize("Hello 세계").expect("tokenize");
 
     assert!(!tokens.is_empty());
@@ -79,14 +79,14 @@ fn test_korean_tokenizer_mixed() {
 
 #[test]
 fn test_korean_tokenizer_empty() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
     let tokens = tokenizer.tokenize("").expect("tokenize");
     assert!(tokens.is_empty());
 }
 
 #[test]
 fn test_korean_tokenizer_for_index() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
     let tokens = tokenizer.tokenize_for_index("한국은 아름다운 나라입니다").expect("tokenize");
 
     // Should filter out stopwords and short tokens
@@ -98,7 +98,7 @@ fn test_korean_tokenizer_for_index() {
 
 #[test]
 fn test_korean_tokenizer_unicode_normalization() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
 
     // Full-width characters should be normalized
     let tokens = tokenizer.tokenize("１２３").expect("tokenize");
@@ -206,7 +206,7 @@ fn test_whitespace_tokenizer_positions() {
 
 #[test]
 fn test_korean_tokenizer_long_sentence() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
     let text = "인공지능은 인간의 학습능력과 추론능력 지각능력 자연언어의 이해능력 등을 컴퓨터 프로그램으로 실현한 기술이다";
     let tokens = tokenizer.tokenize(text).expect("tokenize");
     assert!(tokens.len() >= 5, "Long sentence should produce many tokens: {}", tokens.len());
@@ -214,7 +214,7 @@ fn test_korean_tokenizer_long_sentence() {
 
 #[test]
 fn test_korean_tokenizer_repeated_text() {
-    let tokenizer = KoreanTokenizer::new(&test_dict_path()).expect("create tokenizer");
+    let tokenizer = shared_korean_tokenizer();
     let text = "가가가가가";
     let tokens = tokenizer.tokenize(text).expect("tokenize");
     assert!(!tokens.is_empty());
