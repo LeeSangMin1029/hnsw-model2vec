@@ -174,13 +174,36 @@ pub(crate) fn resolve_with_mir(
 }
 
 /// Resolve a MIR fully-qualified name to a chunk index.
+///
+/// Tries progressively shorter name forms:
+/// 1. Full name: `onttothree_agent::daemon::check_estop`
+/// 2. Strip crate prefix: `daemon::check_estop`
+/// 3. Type::method extract: `check_estop`
+/// 4. ChunkIndex name matching (exact → short fallback)
 fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>, index: &ChunkIndex) -> Option<u32> {
-    name_to_idx.get(name).copied()
-        .or_else(|| {
-            let short = extract_type_method(name);
-            name_to_idx.get(short).copied()
-        })
-        .or_else(|| index.resolve_name(name))
+    // 1. Direct match
+    if let Some(&idx) = name_to_idx.get(name) {
+        return Some(idx);
+    }
+    // 2. Strip crate prefix (first :: segment)
+    if let Some(rest) = name.split_once("::").map(|(_, r)| r) {
+        if let Some(&idx) = name_to_idx.get(rest) {
+            return Some(idx);
+        }
+    }
+    // 3. Type::method (last two :: segments)
+    let short = extract_type_method(name);
+    if let Some(&idx) = name_to_idx.get(short) {
+        return Some(idx);
+    }
+    // 4. Just the last segment
+    if let Some(last) = name.rsplit("::").next() {
+        if let Some(&idx) = name_to_idx.get(last) {
+            return Some(idx);
+        }
+    }
+    // 5. ChunkIndex fallback
+    index.resolve_name(name)
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────

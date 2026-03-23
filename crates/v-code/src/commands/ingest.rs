@@ -275,6 +275,22 @@ pub fn chunk_from_mir(
     }
 
     for (file_key, chunks) in &by_file {
+        // Deduplicate: same name in same file — prefer prod (is_test=false) over test
+        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut deduped: Vec<&v_code_intel::mir_edges::MirChunk> = Vec::new();
+        for mc in chunks {
+            if let Some(&existing_idx) = seen.get(mc.name.as_str()) {
+                // If existing is test and new is prod, replace
+                if deduped[existing_idx].is_test && !mc.is_test {
+                    deduped[existing_idx] = mc;
+                }
+                // Otherwise keep existing (first wins)
+            } else {
+                seen.insert(&mc.name, deduped.len());
+                deduped.push(mc);
+            }
+        }
+        let chunks = &deduped;
         // Resolve file path: try relative to workspace root
         let file_path = {
             let candidate = workspace_root.join(file_key);
