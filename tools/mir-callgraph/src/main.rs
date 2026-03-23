@@ -225,10 +225,13 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
             });
         }
 
-        // Extract call edges
+        // Extract call edges + function reference edges
+        let mut seen_refs: std::collections::HashSet<rustc_hir::def_id::DefId> = std::collections::HashSet::new();
         for block in body.basic_blocks.iter() {
             let terminator = block.terminator();
-            if let TerminatorKind::Call { ref func, .. } = terminator.kind {
+
+            // 1. Direct calls (TerminatorKind::Call)
+            if let TerminatorKind::Call { ref func, ref args, .. } = terminator.kind {
                 let func_ty = func.ty(&body.local_decls, tcx);
                 let callee_def_id = match func_ty.kind() {
                     rustc_middle::ty::TyKind::FnDef(def_id, _) => *def_id,
@@ -240,7 +243,6 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
                     .lookup_char_pos(terminator.source_info.span.lo())
                     .line;
 
-                // Callee definition location — for exact file+line matching.
                 let callee_span = tcx.def_span(callee_def_id);
                 let callee_file_str = extract_filename(source_map, callee_span);
                 let callee_start = source_map.lookup_char_pos(callee_span.lo()).line;
@@ -255,6 +257,31 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
                     line: call_line,
                     is_local: callee_def_id.is_local(),
                 });
+                seen_refs.insert(callee_def_id);
+
+                // 2. Function references passed as arguments
+                for arg in args.iter() {
+                    let arg_ty = arg.node.ty(&body.local_decls, tcx);
+                    if let rustc_middle::ty::TyKind::FnDef(ref_def_id, _) = arg_ty.kind() {
+                        if !seen_refs.contains(ref_def_id) {
+                            seen_refs.insert(*ref_def_id);
+                            let ref_name = canonical_name(tcx, *ref_def_id);
+                            let ref_span = tcx.def_span(*ref_def_id);
+                            let ref_file = extract_filename(source_map, ref_span);
+                            let ref_start = source_map.lookup_char_pos(ref_span.lo()).line;
+                            edges.push(CallEdge {
+                                caller: caller_name.clone(),
+                                caller_file: caller_file.clone(),
+                                caller_kind: caller_kind.to_string(),
+                                callee: ref_name,
+                                callee_file: ref_file,
+                                callee_start_line: ref_start,
+                                line: call_line,
+                                is_local: ref_def_id.is_local(),
+                            });
+                        }
+                    }
+                }
             }
         }
     }

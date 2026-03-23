@@ -638,6 +638,18 @@ pub fn run_dead(
         if name == "main" || name.ends_with("::main") || name.ends_with("::run") {
             continue;
         }
+        // Skip non-Rust files (Python/TS extractors etc.)
+        let file = &graph.files[i];
+        if !file.ends_with(".rs") {
+            continue;
+        }
+        // Skip macro-generated check functions (assert_impl_all!, thread_local!, etc.)
+        if name.contains("::check::assert_impl")
+            || name.contains("::{closure#0}::check")
+            || name.ends_with("::new") && graph.callees[i].is_empty()
+        {
+            continue;
+        }
 
         dead.push(i);
     }
