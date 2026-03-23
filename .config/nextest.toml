@@ -1,9 +1,8 @@
 [profile.default]
 status-level = "fail"
-# Skip Korean tokenizer tests by default — each loads lindera dict (~8s/process).
-# Includes: korean_tokenizer tests + edge_case/consistency/tokenize_for tests that use KoreanTokenizer
-# Run them explicitly: cargo nextest r --profile korean
-default-filter = "not (package(v-hnsw-search) & test(/korean|edge_case|tokenizer_consistency|tokenize_for_index_vs_query|choseong_search/))"
+# Skip lindera-dependent korean tests (8s dict load per process in nextest).
+# Mock tests run without gate. Real dict tests: cargo nextest r --profile korean
+default-filter = "not (package(v-hnsw-search) & test(/korean_tokenizer/))"
 
 [profile.korean]
 status-level = "pass"

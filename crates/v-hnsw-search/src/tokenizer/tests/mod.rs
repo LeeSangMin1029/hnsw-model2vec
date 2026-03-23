@@ -4,6 +4,7 @@ mod filters;
 mod jamo;
 #[cfg(feature = "korean")]
 mod korean;
+mod mock_korean;
 mod user_dict;
 
 use std::path::PathBuf;
@@ -34,10 +35,9 @@ pub(super) fn shared_korean_tokenizer() -> &'static KoreanTokenizer {
     })
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_korean_tokenization_sentence() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
 
     let text = "대한민국은 민주공화국이다";
     let tokens = tokenizer.tokenize(text).expect("tokenize");
@@ -54,10 +54,9 @@ fn test_korean_tokenization_sentence() {
     );
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_korean_tokenization_with_filters() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
 
     let text = "서울은 한국의 수도이다";
     let tokens = tokenizer.tokenize_for_index(text).expect("tokenize");
@@ -99,7 +98,6 @@ fn test_jamo_decomposition_correctness() {
     assert_eq!(extract_choseong("프로그래밍"), "ㅍㄹㄱㄹㅁ");
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_choseong_search() {
     // Basic matching
@@ -157,10 +155,9 @@ fn test_filter_chain() {
     assert!(texts.contains(&"라마바"));
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_edge_case_empty_string() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let tokens = tokenizer.tokenize("").expect("tokenize");
     assert!(tokens.is_empty());
 
@@ -171,10 +168,9 @@ fn test_edge_case_empty_string() {
     assert!(tokens.is_empty());
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_edge_case_ascii_only() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let tokens = tokenizer.tokenize("hello world").expect("tokenize");
 
     assert!(!tokens.is_empty());
@@ -183,10 +179,9 @@ fn test_edge_case_ascii_only() {
     assert!(texts.contains(&"world"));
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_edge_case_mixed_content() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let tokens = tokenizer.tokenize("Hello 세계 World 123").expect("tokenize");
 
     assert!(!tokens.is_empty());
@@ -200,20 +195,18 @@ fn test_edge_case_mixed_content() {
     );
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_edge_case_whitespace_only() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let tokens = tokenizer.tokenize("   \t\n  ").expect("tokenize");
     // Whitespace-only input should produce minimal/no tokens
     // The exact behavior depends on Lindera
     assert!(tokens.is_empty() || tokens.iter().all(|t| t.text.trim().is_empty()));
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_edge_case_special_characters() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let tokens = tokenizer.tokenize("한글!@#$%^&*()테스트").expect("tokenize");
 
     // Should handle special characters gracefully
@@ -264,10 +257,9 @@ fn test_jamo_edge_cases() {
     assert_eq!(extract_choseong("ㅎ한ㄱ글"), "ㅎㅎㄱㄱ");
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_tokenizer_consistency() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let text = "동일한 텍스트를 여러 번 토큰화";
 
     let tokens1 = tokenizer.tokenize(text).expect("first tokenize");
@@ -282,10 +274,9 @@ fn test_tokenizer_consistency() {
     }
 }
 
-#[cfg(feature = "korean")]
 #[test]
 fn test_tokenize_for_index_vs_query() {
-    let tokenizer = shared_korean_tokenizer();
+    let tokenizer = mock_korean::MockKoreanTokenizer::new();
     let text = "검색 테스트 문장입니다";
 
     let index_tokens = tokenizer.tokenize_for_index(text).expect("tokenize for index");
