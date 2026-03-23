@@ -127,14 +127,16 @@ fn dispatch(
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -4, e.to_string())),
         },
-        "graph/build" => match crate::code::handle_graph_build(request.params.clone(), state.ra.as_ref()) {
+        "graph/build" => match crate::code::handle_graph_build(request.params.clone()) {
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -4, e.to_string())),
         },
+        #[cfg(feature = "ra")]
         "ra/collect-types" => match crate::code::handle_collect_types(request.params.clone(), state.ra.as_ref()) {
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -5, e.to_string())),
         },
+        #[cfg(feature = "ra")]
         "code/chunk" => match crate::code::handle_chunk_files(request.params.clone(), state.ra.as_mut()) {
             Ok(v) => Ok(ok_response(id, v)),
             Err(e) => Ok(err_response(id, -6, e.to_string())),

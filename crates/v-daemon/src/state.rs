@@ -151,6 +151,7 @@ pub struct DaemonState {
     databases: HashMap<PathBuf, DbIndexes>,
     query_cache: QueryCache,
     /// In-process rust-analyzer instance (spawned once, reused across requests).
+    #[cfg(feature = "ra")]
     pub ra: Option<v_lsp::instance::RaInstance>,
 }
 
@@ -163,6 +164,7 @@ impl DaemonState {
             last_embed_at: Instant::now(),
             databases: HashMap::new(),
             query_cache: QueryCache::global(),
+            #[cfg(feature = "ra")]
             ra: None,
         };
 

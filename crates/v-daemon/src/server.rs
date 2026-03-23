@@ -83,13 +83,16 @@ pub fn run(
     }
 
     // Load RA (blocks, but client connections queue in OS backlog).
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    match v_lsp::instance::RaInstance::spawn(&workspace_root) {
-        Ok(ra) => {
-            eprintln!("[daemon] RA instance loaded");
-            state.ra = Some(ra);
+    #[cfg(feature = "ra")]
+    {
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match v_lsp::instance::RaInstance::spawn(&workspace_root) {
+            Ok(ra) => {
+                eprintln!("[daemon] RA instance loaded");
+                state.ra = Some(ra);
+            }
+            Err(e) => eprintln!("[daemon] RA spawn failed: {e}"),
         }
-        Err(e) => eprintln!("[daemon] RA spawn failed: {e}"),
     }
 
     eprintln!("[daemon] Ready");
@@ -125,6 +128,7 @@ pub fn run(
             let changed = w.poll_changes();
             if !changed.is_empty() {
                 eprintln!("[watcher] {} file(s) changed", changed.len());
+                #[cfg(feature = "ra")]
                 if let Some(ref mut ra) = state.ra {
                     let updates: Vec<(String, String)> = changed.iter()
                         .filter_map(|path| {

@@ -11,7 +11,6 @@ static GRAPH_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn handle_graph_build(
     params: serde_json::Value,
-    _ra: Option<&v_lsp::instance::RaInstance>,
 ) -> anyhow::Result<serde_json::Value> {
     let _guard = GRAPH_LOCK
         .lock()
@@ -48,6 +47,7 @@ pub fn handle_graph_build(
 ///
 /// Loads chunks from the DB cache, runs `collect_types_via_ra`, and returns
 /// serialized `LspTypes`. This avoids RA re-spawn (~20s) on incremental adds.
+#[cfg(feature = "ra")]
 pub fn handle_collect_types(
     params: serde_json::Value,
     ra: Option<&v_lsp::instance::RaInstance>,
@@ -83,6 +83,7 @@ pub fn handle_collect_types(
 ///
 /// Replaces tree-sitter chunking: uses `file_structure`, `outgoing_calls`,
 /// `discover_tests_in_file`, and source text parsing.
+#[cfg(feature = "ra")]
 pub fn handle_chunk_files(
     params: serde_json::Value,
     ra: Option<&mut v_lsp::instance::RaInstance>,

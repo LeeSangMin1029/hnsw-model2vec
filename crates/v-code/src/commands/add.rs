@@ -246,7 +246,7 @@ fn prebuild_caches(
     }
 
     // Convert new entries to ParsedChunks.
-    let t0 = std::time::Instant::now();
+    let _t0 = std::time::Instant::now();
 
     let mut chunks: Vec<ParsedChunk> = new_entries.iter()
         .map(|e| ParsedChunk::from_code_chunk(&e.chunk, &e.file_path_str, e.chunk.imports.clone()))

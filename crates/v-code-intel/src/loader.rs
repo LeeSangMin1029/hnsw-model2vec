@@ -91,14 +91,17 @@ pub fn cache_path(db: &Path) -> PathBuf {
 }
 
 /// Path to the lsp_types.bin cache file for a given database.
+#[cfg(feature = "ra")]
 pub fn lsp_types_cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("lsp_types.bin")
 }
 
 /// Cache format version for `lsp_types.bin`.
+#[cfg(feature = "ra")]
 const LSP_TYPES_CACHE_VERSION: u8 = 1;
 
 /// Load cached LSP types from `lsp_types.bin`.
+#[cfg(feature = "ra")]
 pub fn load_lsp_types_cache(db: &Path) -> Option<crate::lsp_client::LspTypes> {
     let path = lsp_types_cache_path(db);
     let bytes = fs::read(&path).ok()?;
@@ -112,6 +115,7 @@ pub fn load_lsp_types_cache(db: &Path) -> Option<crate::lsp_client::LspTypes> {
 }
 
 /// Save LSP types to `lsp_types.bin` cache.
+#[cfg(feature = "ra")]
 pub fn save_lsp_types_cache(db: &Path, types: &crate::lsp_client::LspTypes) {
     let path = lsp_types_cache_path(db);
     if let Some(parent) = path.parent() {

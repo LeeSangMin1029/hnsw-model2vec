@@ -11,7 +11,9 @@ members = [
     "crates/v-hnsw",
     "crates/v-code",
     "crates/v-daemon",
-    "crates/v-lsp",
+]
+exclude = [
+    "crates/v-lsp",  # RA 의존성 무거움, MIR 기반으로 대체됨
 ]
 resolver = "2"
 
@@ -34,7 +36,6 @@ v-code-intel = { path = "crates/v-code-intel" }
 v-hnsw-rerank = { path = "crates/v-hnsw-rerank" }
 v-hnsw-cli = { path = "crates/v-hnsw-cli" }
 v-daemon = { path = "crates/v-daemon" }
-v-lsp = { path = "crates/v-lsp" }
 
 # Error handling
 anyhow = "1"

@@ -20,7 +20,7 @@ v-hnsw-embed.workspace = true
 v-hnsw-graph.workspace = true
 v-hnsw-search = { workspace = true, features = ["korean"] }
 v-hnsw-storage.workspace = true
-v-lsp.workspace = true
+v-lsp = { path = "../v-lsp", optional = true }
 
 # CLI
 clap = { workspace = true, features = ["derive"] }
@@ -42,6 +42,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # File watching
 notify = "7"
 
+
+[features]
+default = []
+ra = ["dep:v-lsp", "v-code-intel/ra"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
