@@ -77,7 +77,8 @@ pub fn render_tree(
         let file = relative_path(&graph.files[i]);
         let short = apply_alias(file, alias_map);
         let lines = format_lines_opt(graph.lines[i]);
-        buf.push_str(&format!("{short}{lines}  {name}\n"));
+        let test_marker = if graph.is_test[i] { " [test]" } else { "" };
+        buf.push_str(&format!("{short}{lines}  {name}{test_marker}\n"));
         render_children(graph, &node.children, &mut buf, "  ", alias_map);
     }
     buf
@@ -101,9 +102,10 @@ fn render_children(
         let file = relative_path(&graph.files[i]);
         let short = apply_alias(file, alias_map);
         let lines = format_lines_opt(graph.lines[i]);
+        let test_marker = if graph.is_test[i] { " [test]" } else { "" };
         let backref = if child.backreference { "  \u{21a9}" } else { "" };
 
-        buf.push_str(&format!("{prefix}{connector}{short}{lines}  {name}{backref}\n"));
+        buf.push_str(&format!("{prefix}{connector}{short}{lines}  {name}{test_marker}{backref}\n"));
 
         if !child.children.is_empty() {
             let next_prefix = format!("{prefix}{extension}");

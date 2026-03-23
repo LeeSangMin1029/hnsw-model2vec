@@ -164,7 +164,61 @@ pub fn run_mir_callgraph_for(
         eprintln!("  [mir] mir-callgraph exited with {status} (partial results may be available)");
     }
 
+    // Run language-specific extractors (Python, TypeScript)
+    run_language_extractors(project_root, &out_dir);
+
     MirEdgeMap::from_dir(&out_dir)
+}
+
+/// Run Python and TypeScript call graph extractors if available.
+fn run_language_extractors(project_root: &Path, out_dir: &Path) {
+    // Python extractor
+    let py_script = find_extractor_script("py-callgraph", "py_callgraph.py");
+    if let Some(script) = py_script {
+        let status = Command::new("python3")
+            .arg(&script)
+            .arg(project_root)
+            .arg("--out-dir").arg(out_dir)
+            .status();
+        if let Err(e) = status {
+            // python3 not available, try python
+            let _ = Command::new("python")
+                .arg(&script)
+                .arg(project_root)
+                .arg("--out-dir").arg(out_dir)
+                .status()
+                .map_err(|_| eprintln!("  [py-callgraph] python not available: {e}"));
+        }
+    }
+
+    // TypeScript/JavaScript extractor
+    let ts_script = find_extractor_script("ts-callgraph", "ts_callgraph.js");
+    if let Some(script) = ts_script {
+        let _ = Command::new("node")
+            .arg(&script)
+            .arg(project_root)
+            .arg("--out-dir").arg(out_dir)
+            .status()
+            .map_err(|e| eprintln!("  [ts-callgraph] node not available: {e}"));
+    }
+}
+
+/// Find a language extractor script next to the current executable or in tools/.
+fn find_extractor_script(tool_dir: &str, script_name: &str) -> Option<std::path::PathBuf> {
+    // 1. Next to current exe
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.parent()?.join(script_name);
+        if sibling.exists() { return Some(sibling); }
+    }
+    // 2. In tools/ relative to project root (for development)
+    let candidates = [
+        std::path::PathBuf::from(format!("tools/{tool_dir}/{script_name}")),
+        std::env::current_dir().ok()?.join(format!("tools/{tool_dir}/{script_name}")),
+    ];
+    for c in &candidates {
+        if c.exists() { return Some(c.clone()); }
+    }
+    None
 }
 
 /// Detect which crates contain the given changed files.

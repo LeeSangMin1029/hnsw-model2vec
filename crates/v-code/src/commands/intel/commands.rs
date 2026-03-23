@@ -30,6 +30,7 @@ pub fn run_aliases(db: PathBuf) -> Result<()> {
 pub fn run_stats(db: PathBuf) -> Result<()> {
     let chunks = load_chunks(&db)?;
     let stats = build_stats(&chunks);
+    println!("=== stats: {} crates ===\n", stats.len());
     println!(
         "{:<24} {:>8} {:>8} {:>8} {:>8}",
         "crate", "prod_fn", "test_fn", "struct", "enum"
@@ -85,9 +86,9 @@ pub fn run_symbols(
         "No symbols found.",
         |n| {
             if is_file_query {
-                format!("{n} symbols in file:\n")
+                format!("=== symbols: {n} in file ===\n")
             } else {
-                format!("{n} symbols found:\n")
+                format!("=== symbols: {n} found ===\n")
             }
         },
         limit,
@@ -312,7 +313,7 @@ pub fn run_jump(
     let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
     let (alias_map, _legend) = graph.global_aliases();
 
-    println!("=== Execution Flow: {symbol} ===\n");
+    println!("=== jump: {symbol} ===\n");
     let tree = jump::build_flow_tree(&graph, &seeds, depth);
     print!("{}", jump::render_tree(&graph, &tree, &alias_map));
 
@@ -352,7 +353,7 @@ pub fn run_trace(
 
     match trace::bfs_shortest_path(&graph, &sources, &targets) {
         Some(path) => {
-            println!("Call path from \"{from}\" to \"{to}\" ({} hops):\n", path.len() - 1);
+            println!("=== trace: {from} \u{2192} {to} ({} hops) ===\n", path.len() - 1);
             print_trace_path(&graph, &path, &alias_map);
         }
         None => {
@@ -528,9 +529,10 @@ fn print_trace_path(
         let name = &graph.names[i];
         let lines = format_lines_opt(graph.lines[i]);
 
+        let test_marker = if graph.is_test[i] { " [test]" } else { "" };
         let arrow = if step == 0 { "  " } else { "→ " };
         let indent = if step == 0 { "" } else { &"  ".repeat(step) };
-        println!("  {indent}{arrow}{short_file}{lines}  {name}");
+        println!("  {indent}{arrow}{short_file}{lines}  {name}{test_marker}");
     }
     println!();
 }
