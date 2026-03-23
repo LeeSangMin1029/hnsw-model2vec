@@ -15,6 +15,7 @@ pub mod deps;
 pub mod dupe_analyze;
 pub mod flow_cmd;
 pub mod chunk_types;
+pub mod edge_resolve;
 pub mod graph;
 pub mod minhash;
 pub mod helpers;

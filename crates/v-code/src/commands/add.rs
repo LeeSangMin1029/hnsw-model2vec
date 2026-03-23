@@ -260,7 +260,7 @@ fn prebuild_caches(
 
     // Build graph.
     let t3 = std::time::Instant::now();
-    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
+    let graph = v_code_intel::graph::CallGraph::build(&chunks);
     eprintln!("    [cache] graph build: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());
 
     let t4 = std::time::Instant::now();

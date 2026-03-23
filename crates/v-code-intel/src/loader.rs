@@ -185,7 +185,7 @@ pub fn load_or_build_graph_with_chunks(
 
     let chunks = load_chunks(db)?;
 
-    let g = crate::graph::CallGraph::build_full(&chunks);
+    let g = crate::graph::CallGraph::build(&chunks);
 
     // Don't persist tree-sitter fallback when daemon is building —
     // daemon will save the accurate graph.bin when done.

@@ -2,6 +2,8 @@
 //!
 //! Provides `CallGraph` — a pre-built, bincode-cached graph that maps
 //! chunk indices to their callees and callers for fast BFS traversal.
+//!
+//! Edge resolution (how calls are connected) is handled by [`crate::edge_resolve`].
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,7 +11,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::index_tables::{self, strip_generics_from_key};
+use crate::edge_resolve::{self, ChunkIndex, ResolvedEdges};
+use crate::index_tables;
+use crate::mir_edges::MirEdgeMap;
 use crate::parse::ParsedChunk;
 
 /// Source hash — auto-computed by build.rs for cache invalidation.
@@ -66,279 +70,73 @@ pub struct CallGraph {
     #[expect(clippy::type_complexity, reason = "tuple layout mirrors string_args")]
     pub param_flows: Vec<Vec<(String, u8, String, u8, u32)>>,
     pub field_access_index: Vec<(String, Vec<u32>)>,
-    pub extern_calls: Vec<Vec<(String, String)>>,
-}
-
-// ── ChunkMeta ───────────────────────────────────────────────────────
-
-/// Shared chunk metadata collected during graph construction.
-struct ChunkMeta {
-    names: Vec<String>,
-    files: Vec<String>,
-    kinds: Vec<String>,
-    lines: Vec<Option<(usize, usize)>>,
-    signatures: Vec<Option<String>>,
-    is_test: Vec<bool>,
-    name_index: Vec<(String, u32)>,
-    exact: HashMap<String, u32>,
-    short: HashMap<String, u32>,
-}
-
-impl ChunkMeta {
-    fn collect(chunks: &[ParsedChunk]) -> Self {
-        let len = chunks.len();
-        let mut exact = HashMap::new();
-        let mut short = HashMap::new();
-        let (mut names, mut files, mut kinds) = (Vec::with_capacity(len), Vec::with_capacity(len), Vec::with_capacity(len));
-        let (mut lines, mut signatures, mut is_test) = (Vec::with_capacity(len), Vec::with_capacity(len), Vec::with_capacity(len));
-        let mut name_index = Vec::with_capacity(len);
-
-        for (i, c) in chunks.iter().enumerate() {
-            let idx = i as u32;
-            let lower = c.name.to_lowercase();
-
-            // Exact match + generic-stripped alias
-            exact.insert(lower.clone(), idx);
-            let stripped = strip_generics_from_key(&lower);
-            if stripped != lower { exact.entry(stripped).or_insert(idx); }
-
-            // Short name (last :: segment)
-            if let Some(s) = c.name.rsplit("::").next() {
-                short.entry(s.to_lowercase()).or_insert(idx);
-            }
-
-            // Owner::method alias for method_owners resolution
-            if let Some((prefix, method_name)) = lower.rsplit_once("::") {
-                if let Some(owner_leaf) = prefix.rsplit_once("::").map(|p| p.1) {
-                    let alias = format!("{owner_leaf}::{method_name}");
-                    if alias != lower { exact.entry(alias).or_insert(idx); }
-                }
-                // "impl Trait for Type::method" → "type::method" alias
-                if let Some(for_pos) = prefix.find(" for ") {
-                    let concrete = &prefix[for_pos + 5..];
-                    let leaf = concrete.rsplit("::").next().unwrap_or(concrete)
-                        .split('<').next().unwrap_or("");
-                    if !leaf.is_empty() {
-                        exact.entry(format!("{leaf}::{method_name}")).or_insert(idx);
-                    }
-                }
-            }
-
-            name_index.push((lower, idx));
-            names.push(c.name.clone());
-            files.push(c.file.clone());
-            kinds.push(c.kind.clone());
-            lines.push(c.lines);
-            signatures.push(c.signature.clone());
-            is_test.push(is_test_chunk(c));
-        }
-
-        name_index.sort_by(|a, b| a.0.cmp(&b.0));
-
-        Self { names, files, kinds, lines, signatures, is_test, name_index, exact, short }
-    }
-}
-
-// ── AdjState ────────────────────────────────────────────────────────
-
-/// Mutable adjacency state accumulated during edge resolution.
-struct AdjState {
-    callees: Vec<Vec<u32>>,
-    callers: Vec<Vec<u32>>,
-    call_sites: Vec<Vec<(u32, u32)>>,
-}
-
-impl AdjState {
-    fn new(len: usize) -> Self {
-        Self { callees: vec![Vec::new(); len], callers: vec![Vec::new(); len], call_sites: vec![Vec::new(); len] }
-    }
-
-    fn add_edge(&mut self, src: usize, tgt: u32, call_line: u32) {
-        let tgt_usize = tgt as usize;
-        if tgt_usize != src {
-            self.callees[src].push(tgt);
-            self.callers[tgt_usize].push(src as u32);
-            self.call_sites[src].push((tgt, call_line));
-        }
-    }
-
-    fn dedup(&mut self) {
-        for list in &mut self.callees { list.sort_unstable(); list.dedup(); }
-        for list in &mut self.callers { list.sort_unstable(); list.dedup(); }
-        for sites in &mut self.call_sites { sites.sort_by_key(|&(tgt, _)| tgt); sites.dedup_by_key(|e| e.0); }
-    }
 }
 
 // ── Build ───────────────────────────────────────────────────────────
 
 impl CallGraph {
-    pub fn build(chunks: &[ParsedChunk]) -> Self { Self::build_full(chunks) }
-
-    /// Build call graph using MIR-resolved edges for 100% accurate method resolution.
-    ///
-    /// Falls back to name matching for edges not found in the MIR map.
-    pub fn build_with_mir_edges(chunks: &[ParsedChunk], mir_edges: &crate::mir_edges::MirEdgeMap) -> Self {
-        let rss0 = current_rss_mb();
-        eprintln!("      [graph/mir] RSS baseline: {rss0:.1}MB");
-
+    /// Build call graph using name matching (legacy).
+    pub fn build(chunks: &[ParsedChunk]) -> Self {
         let t0 = std::time::Instant::now();
-        let meta = ChunkMeta::collect(chunks);
-        eprintln!("      [graph/mir] meta collect: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
-
-        let t1 = std::time::Instant::now();
-        let owner_field_types = index_tables::collect_owner_field_types(chunks);
-        let mut adj = AdjState::new(chunks.len());
-
-        // Build reverse map: chunk_name (lowercase, Type::method form) → chunk index
-        // MIR caller names look like `graph::CallGraph::build_full` or `<CallGraph>::build_full`
-        // Chunk names look like `CallGraph::build_full`
-        // Strategy: extract last `Type::method` segment from MIR name and match against meta.exact
-
-        let mut mir_resolved: usize = 0;
-        let mut name_fallback: usize = 0;
-        let mut unresolved: usize = 0;
-
-        for (src, chunk) in chunks.iter().enumerate() {
-            // Try to find this chunk's MIR caller entry
-            let chunk_lower = chunk.name.to_lowercase();
-
-            // Collect MIR-resolved callees for this caller (if any)
-            let mir_callees: Option<&[(String, usize)]> = find_mir_caller(mir_edges, &chunk_lower);
-
-            for (call_idx, call) in chunk.calls.iter().enumerate() {
-                let lower = call.to_lowercase();
-                let call_line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
-
-                // 1) Try MIR resolution: check if any MIR callee matches this call
-                let mir_tgt = mir_callees.and_then(|callees| {
-                    // Find a MIR callee whose name matches this call
-                    for (callee_name, _mir_line) in callees {
-                        let callee_lower = callee_name.to_lowercase();
-                        // Try exact match in meta
-                        if let Some(&idx) = meta.exact.get(&callee_lower) {
-                            // Verify the call name relates to this callee
-                            if callee_matches_call(&callee_lower, &lower) {
-                                return Some(idx);
-                            }
-                        }
-                        // Try extracting Type::method from MIR callee name
-                        let short_callee = extract_type_method(&callee_lower);
-                        if let Some(&idx) = meta.exact.get(short_callee) {
-                            if callee_matches_call(short_callee, &lower) {
-                                return Some(idx);
-                            }
-                        }
-                    }
-                    None
-                });
-
-                if let Some(tgt) = mir_tgt {
-                    mir_resolved += 1;
-                    adj.add_edge(src, tgt, call_line);
-                } else {
-                    // 2) Fallback: name matching (same as build_full)
-                    let tgt = meta.exact.get(&lower).copied()
-                        .or_else(|| {
-                            let short = lower.rsplit("::").next().unwrap_or(&lower);
-                            meta.short.get(short).copied()
-                        });
-                    if let Some(tgt) = tgt {
-                        name_fallback += 1;
-                        adj.add_edge(src, tgt, call_line);
-                    } else {
-                        unresolved += 1;
-                    }
-                }
-            }
-            // Type ref edges (same as build_full).
-            for ty in &chunk.types {
-                let lower = ty.to_lowercase();
-                if let Some(&tgt) = meta.exact.get(&lower).or_else(|| meta.short.get(&lower)) {
-                    if tgt as usize != src {
-                        adj.callees[src].push(tgt);
-                        adj.callers[tgt as usize].push(src as u32);
-                    }
-                }
-            }
-        }
-        eprintln!(
-            "      [graph/mir] resolve: {:.1}ms ({} chunks)  mir={mir_resolved} fallback={name_fallback} unresolved={unresolved}",
-            t1.elapsed().as_secs_f64() * 1000.0, chunks.len()
-        );
-
-        adj.dedup();
-        let extern_calls = vec![Vec::new(); chunks.len()];
-        Self::from_parts(meta, adj, extern_calls, chunks, &owner_field_types)
+        let index = ChunkIndex::build(chunks);
+        let adj = edge_resolve::resolve_by_name(chunks, &index);
+        eprintln!("      [graph] name-resolve: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
+        Self::assemble(chunks, &index, adj)
     }
 
-    /// Build the call graph from parsed chunks.
-    ///
-    /// Resolves calls by simple name matching (exact → short fallback).
-    /// Chunks should already contain accurate call data from RA via daemon.
-    pub fn build_full(chunks: &[ParsedChunk]) -> Self {
-        let rss0 = current_rss_mb();
-        eprintln!("      [graph] RSS baseline: {rss0:.1}MB");
-
+    /// Build call graph using MIR-resolved edges (100% accurate).
+    /// Falls back to name matching for edges not found in MIR.
+    pub fn build_with_mir(chunks: &[ParsedChunk], mir_edges: &MirEdgeMap) -> Self {
         let t0 = std::time::Instant::now();
-        let meta = ChunkMeta::collect(chunks);
-        eprintln!("      [graph] meta collect: {:.1}ms  RSS: {:.1}MB (+{:.1})", t0.elapsed().as_secs_f64() * 1000.0, current_rss_mb(), current_rss_mb() - rss0);
-
-        let t1 = std::time::Instant::now();
-        let owner_field_types = index_tables::collect_owner_field_types(chunks);
-        let mut adj = AdjState::new(chunks.len());
-
-        // Resolve calls by name matching: exact (lowercase) → short (last :: segment).
-        for (src, chunk) in chunks.iter().enumerate() {
-            for (call_idx, call) in chunk.calls.iter().enumerate() {
-                let lower = call.to_lowercase();
-                let tgt = meta.exact.get(&lower).copied()
-                    .or_else(|| {
-                        let short = lower.rsplit("::").next().unwrap_or(&lower);
-                        meta.short.get(short).copied()
-                    });
-                if let Some(tgt) = tgt {
-                    let line = chunk.call_lines.get(call_idx).copied().unwrap_or(0);
-                    adj.add_edge(src, tgt, line);
-                }
-            }
-            // Type ref edges.
-            for ty in &chunk.types {
-                let lower = ty.to_lowercase();
-                if let Some(&tgt) = meta.exact.get(&lower).or_else(|| meta.short.get(&lower)) {
-                    if tgt as usize != src {
-                        adj.callees[src].push(tgt);
-                        adj.callers[tgt as usize].push(src as u32);
-                    }
-                }
-            }
-        }
-        eprintln!("      [graph] resolve: {:.1}ms ({} chunks)  RSS: {:.1}MB (+{:.1})", t1.elapsed().as_secs_f64() * 1000.0, chunks.len(), current_rss_mb(), current_rss_mb() - rss0);
-
-        adj.dedup();
-        let extern_calls = vec![Vec::new(); chunks.len()];
-        Self::from_parts(meta, adj, extern_calls, chunks, &owner_field_types)
+        let index = ChunkIndex::build(chunks);
+        let adj = edge_resolve::resolve_with_mir(chunks, &index, mir_edges);
+        eprintln!("      [graph] mir-resolve: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
+        Self::assemble(chunks, &index, adj)
     }
 
-    fn from_parts(meta: ChunkMeta, adj: AdjState, extern_calls: Vec<Vec<(String, String)>>, chunks: &[ParsedChunk], owner_field_types: &HashMap<String, HashMap<String, String>>) -> Self {
+    /// Assemble CallGraph from resolved edges + chunk metadata.
+    fn assemble(chunks: &[ParsedChunk], index: &ChunkIndex, adj: ResolvedEdges, ) -> Self {
         let t = std::time::Instant::now();
+        let owner_field_types = index_tables::collect_owner_field_types(chunks);
+
+        let len = chunks.len();
+        let mut names = Vec::with_capacity(len);
+        let mut files = Vec::with_capacity(len);
+        let mut kinds = Vec::with_capacity(len);
+        let mut lines_vec = Vec::with_capacity(len);
+        let mut signatures = Vec::with_capacity(len);
+        let mut is_test = Vec::with_capacity(len);
+        let mut name_index = Vec::with_capacity(len);
+
+        for (i, c) in chunks.iter().enumerate() {
+            name_index.push((c.name.to_lowercase(), i as u32));
+            names.push(c.name.clone());
+            files.push(c.file.clone());
+            kinds.push(c.kind.clone());
+            lines_vec.push(c.lines);
+            signatures.push(c.signature.clone());
+            is_test.push(is_test_chunk(c));
+        }
+        name_index.sort_by(|a, b| a.0.cmp(&b.0));
+
         let (trait_impls, field_access_index) = rayon::join(
-            || index_tables::build_trait_impls(&meta.names, &meta.kinds, &meta.exact, &meta.short),
-            || index_tables::build_field_access_index(chunks, owner_field_types),
+            || index_tables::build_trait_impls(&names, &kinds, &index.exact, &index.short),
+            || index_tables::build_field_access_index(chunks, &owner_field_types),
         );
         let string_index = index_tables::build_string_index(chunks);
         let param_flows: Vec<Vec<(String, u8, String, u8, u32)>> = chunks.iter().map(|c| c.param_flows.clone()).collect();
         let string_args: Vec<Vec<(String, String, u32, u8)>> = chunks.iter().map(|c| c.string_args.clone()).collect();
-        eprintln!("      [graph] from_parts: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("      [graph] assemble: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+
         Self {
             version: GRAPH_SOURCE_HASH.to_owned(),
-            names: meta.names, files: meta.files, kinds: meta.kinds,
-            lines: meta.lines, signatures: meta.signatures,
-            name_index: meta.name_index,
+            names, files, kinds,
+            lines: lines_vec, signatures, name_index,
             callees: adj.callees, callers: adj.callers,
-            is_test: meta.is_test, trait_impls,
+            is_test, trait_impls,
             call_sites: adj.call_sites,
             string_args, string_index, param_flows,
-            field_access_index, extern_calls,
+            field_access_index,
         }
     }
 
@@ -381,6 +179,8 @@ impl CallGraph {
             .ok().map(|i| self.string_index[i].1.clone()).unwrap_or_default()
     }
 
+    // ── Persistence ─────────────────────────────────────────────────
+
     pub fn save(&self, db: &Path) -> Result<()> {
         let path = graph_cache_path(db);
         let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
@@ -409,72 +209,6 @@ impl CallGraph {
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
-
 fn graph_cache_path(db: &Path) -> std::path::PathBuf {
     db.join("cache").join("graph.bin")
 }
-
-/// Extract the last `Type::method` segment from a fully-qualified MIR name.
-///
-/// Examples:
-/// - `graph::callgraph::build_full` → `callgraph::build_full`
-/// - `<callgraph>::build_full` → `callgraph::build_full`
-/// - `callgraph::build_full` → `callgraph::build_full`
-fn extract_type_method(mir_name: &str) -> &str {
-    // Strip angle brackets: `<callgraph>` → `callgraph`
-    let cleaned = mir_name.trim_start_matches('<');
-    // Find the last two `::` segments (Type::method)
-    // e.g. `a::b::c::d` → find second-to-last `::` → `c::d`
-    let mut colons: Vec<usize> = Vec::new();
-    let bytes = cleaned.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b':' && bytes[i + 1] == b':' {
-            colons.push(i);
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    if colons.len() >= 2 {
-        let start = colons[colons.len() - 2] + 2;
-        &cleaned[start..]
-    } else {
-        // Already `Type::method` or just `name` — strip leading `>`
-        cleaned.trim_start_matches('>')
-    }
-}
-
-/// Check if a MIR callee name matches a call name from parsed chunks.
-///
-/// The call name from chunks is typically the short form (e.g. `Type::method`).
-/// The MIR callee is fully-qualified (e.g. `crate::module::Type::method`).
-fn callee_matches_call(callee: &str, call: &str) -> bool {
-    callee == call || callee.ends_with(&format!("::{call}"))
-        || extract_type_method(callee) == call
-}
-
-/// Find MIR caller entry that matches a chunk name.
-///
-/// MIR callers are fully-qualified (`graph::CallGraph::build_full`),
-/// chunk names are shorter (`CallGraph::build_full`).
-fn find_mir_caller<'a>(
-    mir_edges: &'a crate::mir_edges::MirEdgeMap,
-    chunk_name_lower: &str,
-) -> Option<&'a [(String, usize)]> {
-    // 1) Direct match
-    if let Some(v) = mir_edges.by_caller.get(chunk_name_lower) {
-        return Some(v.as_slice());
-    }
-    // 2) Search for a caller whose Type::method suffix matches
-    for (caller, edges) in &mir_edges.by_caller {
-        let caller_lower = caller.to_lowercase();
-        let suffix = extract_type_method(&caller_lower);
-        if suffix == chunk_name_lower || caller_lower.ends_with(&format!("::{chunk_name_lower}")) {
-            return Some(edges.as_slice());
-        }
-    }
-    None
-}
-

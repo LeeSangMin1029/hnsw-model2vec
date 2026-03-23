@@ -30,7 +30,7 @@ pub fn handle_graph_build(
         .unwrap_or_else(|_| db_path.clone());
 
     let chunks = v_code_intel::loader::load_chunks(&db)?;
-    let graph = v_code_intel::graph::CallGraph::build_full(&chunks);
+    let graph = v_code_intel::graph::CallGraph::build(&chunks);
     let _ = graph.save(&db);
 
     eprintln!(
