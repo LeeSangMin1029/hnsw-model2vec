@@ -1,14 +1,12 @@
 //! Code intelligence commands — structural queries on code-chunked databases.
 //!
-//! Provides `symbols`, `def`, `refs`, `impact`, and `trace`
+//! Provides `symbols`, `context`, `blast`, `jump`, and `trace`
 //! subcommands that parse the structured text field of code chunks
 //! (produced by `chunk_code`) and answer structural navigation queries.
 //!
 //! These commands are read-only and do not modify the database.
 
 mod commands;
-pub mod detail;
-
 #[cfg(test)]
 mod tests;
 
@@ -43,8 +41,6 @@ pub fn load_or_build_graph_with_chunks(
 pub use v_code_intel::parse::ParsedChunk;
 #[cfg(test)]
 pub use v_code_intel::parse;
-#[cfg(test)]
-pub use v_code_intel::reason;
 pub use v_code_intel::stats::build_stats;
 pub use v_code_intel::trace;
 

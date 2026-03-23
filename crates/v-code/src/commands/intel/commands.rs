@@ -155,7 +155,12 @@ pub fn run_context(
     source: bool,
     include_tests: bool,
     scope: Option<String>,
+    tree: bool,
 ) -> Result<()> {
+    if tree {
+        return run_context_tree(&db, &symbol, depth, include_tests);
+    }
+
     use v_code_intel::context_cmd;
 
     let chunks = load_chunks(&db)?;
@@ -321,17 +326,12 @@ pub fn run_blast(
     Ok(())
 }
 
-/// `v-code jump <db> <symbol> --depth N`
-pub fn run_jump(
-    db: PathBuf,
-    symbol: String,
-    depth: u32,
-    include_tests: bool,
-) -> Result<()> {
+/// Shared tree-mode implementation used by both `context --tree` and `jump`.
+fn run_context_tree(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result<()> {
     use v_code_intel::jump;
 
-    let graph = load_or_build_graph(&db)?;
-    let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
+    let graph = load_or_build_graph(db)?;
+    let Some(seeds) = resolve_symbol(&graph, symbol) else { return Ok(()) };
     let (alias_map, _legend) = graph.global_aliases();
 
     println!("=== jump: {symbol} ===\n");
@@ -340,6 +340,16 @@ pub fn run_jump(
     print!("{}", jump::render_tree(&graph, &tree, &alias_map));
 
     Ok(())
+}
+
+/// `v-code jump <db> <symbol> --depth N`
+pub fn run_jump(
+    db: PathBuf,
+    symbol: String,
+    depth: u32,
+    include_tests: bool,
+) -> Result<()> {
+    run_context_tree(&db, &symbol, depth, include_tests)
 }
 
 /// Resolve a symbol name to graph indices, printing a message if not found.

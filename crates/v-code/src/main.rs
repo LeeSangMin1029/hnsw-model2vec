@@ -49,8 +49,8 @@ fn run() -> anyhow::Result<()> {
         Commands::Symbols { db, name, kind, include_tests, limit, compact } => {
             intel::run_symbols(db, name, kind, include_tests, limit, compact || env_compact())
         }
-        Commands::Context { db, symbol, depth, source, include_tests, scope } => {
-            intel::run_context(db, symbol, depth, source, include_tests, scope)
+        Commands::Context { db, symbol, depth, source, include_tests, scope, tree } => {
+            intel::run_context(db, symbol, depth, source, include_tests, scope, tree)
         }
         Commands::Blast { db, symbol, depth, include_tests, scope } => {
             intel::run_blast(db, symbol, depth, include_tests, scope)
@@ -61,15 +61,6 @@ fn run() -> anyhow::Result<()> {
         Commands::Trace { db, from, to } => {
             intel::run_trace(db, from, to)
         }
-        Commands::Detail {
-            db, symbol, add, decision, why, constraint, rejected,
-            failure, fix, root_cause, reject_reason, reject_condition,
-            resolve, invalidate, all, delete, file_path, line_range, relate,
-        } => intel::detail::run_detail(intel::detail::DetailParams {
-            db, symbol, add, decision, why, constraint, rejected,
-            failure, fix, root_cause, reject_reason, reject_condition,
-            resolve, invalidate, show_all: all, delete, file_path, line_range, relate,
-        }),
         Commands::Dupes { db, threshold, exclude_tests, k, json, ast, all, min_lines, min_sub_lines, analyze } => {
             commands::dupes::run(commands::dupes::DupesConfig {
                 db, threshold, exclude_tests, k, json, ast_mode: ast, all_mode: all, min_lines, min_sub_lines, analyze,

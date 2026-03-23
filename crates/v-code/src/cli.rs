@@ -60,6 +60,9 @@ pub enum Commands {
         /// Filter results to symbols whose file path contains this prefix.
         #[arg(long)]
         scope: Option<String>,
+        /// Show DFS callee tree instead of grouped context (same as `jump`).
+        #[arg(long)]
+        tree: bool,
     },
     /// Show blast radius of changing a symbol (transitive callers + summary).
     #[command(visible_alias = "bl")]
@@ -87,65 +90,6 @@ pub enum Commands {
         from: String,
         /// Target symbol name.
         to: String,
-    },
-    /// View or manage reasoning (design decisions, history) for a symbol.
-    #[command(visible_alias = "dt")]
-    Detail {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Symbol name to manage reasoning for.
-        symbol: String,
-        /// Add a general note.
-        #[arg(long)]
-        add: Option<String>,
-        /// Set or update the design decision.
-        #[arg(long)]
-        decision: Option<String>,
-        /// Set or update the rationale (why).
-        #[arg(long)]
-        why: Option<String>,
-        /// Add a constraint.
-        #[arg(long)]
-        constraint: Option<String>,
-        /// Add a rejected alternative.
-        #[arg(long)]
-        rejected: Option<String>,
-        /// Record a failure.
-        #[arg(long)]
-        failure: Option<String>,
-        /// Record a fix (usually paired with --failure).
-        #[arg(long)]
-        fix: Option<String>,
-        /// Root cause symbol for a failure (used with --failure).
-        #[arg(long)]
-        root_cause: Option<String>,
-        /// Reason for rejecting an alternative (used with --rejected).
-        #[arg(long)]
-        reject_reason: Option<String>,
-        /// Condition under which the rejection applies (used with --rejected).
-        #[arg(long)]
-        reject_condition: Option<String>,
-        /// Mark the last failure as resolved.
-        #[arg(long)]
-        resolve: bool,
-        /// Invalidate the last failure with a reason.
-        #[arg(long)]
-        invalidate: Option<String>,
-        /// Show all history including resolved failures (default: hide resolved).
-        #[arg(long)]
-        all: bool,
-        /// Delete the reasoning entry.
-        #[arg(long)]
-        delete: bool,
-        /// Source file path for location tracking (rename resilience).
-        #[arg(long)]
-        file_path: Option<String>,
-        /// Line range "start:end" for location tracking.
-        #[arg(long)]
-        line_range: Option<String>,
-        /// Related symbol for cross-referencing.
-        #[arg(long)]
-        relate: Option<String>,
     },
     /// Show execution flow tree (DFS callee traversal).
     #[command(visible_alias = "j")]
