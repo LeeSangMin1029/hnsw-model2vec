@@ -72,27 +72,38 @@ fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<Sym
         .lines
         .context("Symbol has no line range in DB (re-index with `v-code add`)")?;
 
-    // Resolve absolute path: DB stores relative paths from the project root.
-    // The DB directory is typically at the project root.
+    // Resolve absolute path: prefer CWD over DB parent for worktree support.
+    // In worktrees, DB may point to main repo but CWD is the worktree.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let db_parent = db.parent().unwrap_or_else(|| Path::new("."));
     let db_parent = if db_parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         db_parent
     };
-    let project_root = db_parent
-        .canonicalize()
-        .unwrap_or_else(|_| db_parent.to_path_buf());
-    // Strip Windows UNC prefix (\\?\) that canonicalize() adds.
-    let project_root = v_hnsw_core::strip_unc_prefix_path(&project_root);
 
-    // chunk.file may be absolute (with UNC prefix) or relative.
+    // Try CWD first (worktree), then DB parent (main repo)
     let chunk_path = PathBuf::from(&chunk.file);
     let abs_path = if chunk_path.is_absolute() {
         v_hnsw_core::strip_unc_prefix_path(&chunk_path)
     } else {
-        project_root.join(&chunk.file)
+        let cwd_path = cwd.join(&chunk.file);
+        if cwd_path.exists() {
+            cwd_path
+        } else {
+            let db_root = db_parent
+                .canonicalize()
+                .unwrap_or_else(|_| db_parent.to_path_buf());
+            let db_root = v_hnsw_core::strip_unc_prefix_path(&db_root);
+            db_root.join(&chunk.file)
+        }
     };
+    let project_root = if cwd.join(&chunk.file).exists() {
+        cwd.clone()
+    } else {
+        db_parent.canonicalize().unwrap_or_else(|_| db_parent.to_path_buf())
+    };
+    let project_root = v_hnsw_core::strip_unc_prefix_path(&project_root);
     if !abs_path.exists() {
         bail!(
             "Source file not found: {} (resolved to {})",
@@ -321,8 +332,15 @@ fn print_numbered_range(lines: &[&str], start_1based: usize) {
 
 // ── Line-based editing ──────────────────────────────────────────────────
 
-/// Resolve a project-relative file path to an absolute path using the DB location.
+/// Resolve a project-relative file path — prefer CWD (worktree) over DB root.
 fn resolve_file_path(db: &Path, file: &str) -> Result<(PathBuf, String)> {
+    // Try CWD first (supports worktrees)
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd_path = cwd.join(file);
+    if cwd_path.exists() {
+        return Ok((cwd_path, file.to_string()));
+    }
+    // Fall back to DB-relative
     let root = find_project_root(db)
         .context("Cannot determine project root from DB path")?;
     let abs_path = root.join(file);
