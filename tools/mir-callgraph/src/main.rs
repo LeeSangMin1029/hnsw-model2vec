@@ -44,6 +44,8 @@ struct MirChunk {
 
 struct MirCallbacks {
     json: bool,
+    /// True if compiling with --test flag (all functions are test-related).
+    is_test_target: bool,
 }
 
 impl rustc_driver::Callbacks for MirCallbacks {
@@ -52,7 +54,7 @@ impl rustc_driver::Callbacks for MirCallbacks {
         _compiler: &rustc_interface::interface::Compiler,
         tcx: TyCtxt<'_>,
     ) -> rustc_driver::Compilation {
-        extract_all(tcx, self.json);
+        extract_all(tcx, self.json, self.is_test_target);
         rustc_driver::Compilation::Continue
     }
 }
@@ -103,7 +105,7 @@ fn extract_visibility(tcx: TyCtxt<'_>, def_id: rustc_span::def_id::DefId) -> Str
     }
 }
 
-fn extract_all(tcx: TyCtxt<'_>, json: bool) {
+fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
     let crate_name = tcx.crate_name(LOCAL_CRATE).to_string();
     let source_map = tcx.sess.source_map();
 
@@ -195,7 +197,8 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
 
             let vis = extract_visibility(tcx, def_id.to_def_id());
 
-            let is_test = caller_file.contains("/tests/")
+            let is_test = is_test_target
+                || caller_file.contains("/tests/")
                 || caller_file.contains("\\tests\\")
                 || caller_name.starts_with("test_")
                 || caller_name.contains("::test_")
@@ -332,7 +335,8 @@ fn main() {
             }
 
             let json = env::var("MIR_CALLGRAPH_JSON").is_ok();
-            let mut callbacks = MirCallbacks { json };
+            let is_test_target = rustc_args.iter().any(|a| a == "--test");
+            let mut callbacks = MirCallbacks { json, is_test_target };
             rustc_driver::run_compiler(&full_args, &mut callbacks);
         } else {
             let status = Command::new(&args[1])
