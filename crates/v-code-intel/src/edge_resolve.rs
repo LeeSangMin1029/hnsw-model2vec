@@ -149,16 +149,31 @@ pub(crate) fn resolve_with_mir(
     for (caller_name, callees) in &mir_edges.by_caller {
         let caller_lower = caller_name.to_lowercase();
         let src = resolve_mir_name(&caller_lower, &name_to_idx, index);
-        let Some(src) = src else { continue };
 
         for (callee_name, line) in callees {
             let callee_lower = callee_name.to_lowercase();
             let tgt = resolve_mir_name(&callee_lower, &name_to_idx, index);
-            if let Some(tgt) = tgt {
-                mir_resolved += 1;
-                adj.add_edge(src as usize, tgt, *line as u32);
-            } else {
-                mir_external += 1;
+
+            match (src, tgt) {
+                (Some(s), Some(t)) => {
+                    mir_resolved += 1;
+                    adj.add_edge(s as usize, t, *line as u32);
+                }
+                (None, Some(t)) => {
+                    // Caller not in chunks (e.g. integration test) but callee is.
+                    // Can't create edge without src, but count as partially resolved.
+                    mir_resolved += 1;
+                    // Find any test chunk that matches the caller pattern and add edge from there
+                    let caller_stripped = strip_closure_suffix(&caller_lower);
+                    if let Some(&test_src) = name_to_idx.get(caller_stripped)
+                        .or_else(|| caller_stripped.rsplit("::").next().and_then(|s| name_to_idx.get(s)))
+                    {
+                        adj.add_edge(test_src as usize, t, *line as u32);
+                    }
+                }
+                _ => {
+                    mir_external += 1;
+                }
             }
         }
     }

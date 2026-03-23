@@ -669,20 +669,21 @@ pub fn run_coverage(
     let n = graph.names.len();
 
     // For each function, count how many distinct test functions reach it via BFS callees.
+    // depth=0 means unlimited (full reachability).
     let mut test_counts = vec![0u32; n];
 
     for test_idx in 0..n {
         if !graph.is_test[test_idx] {
             continue;
         }
-        // BFS from this test, following callees.
+        // BFS from this test, following callees (unlimited depth if depth==0).
         let mut visited = vec![false; n];
         visited[test_idx] = true;
         let mut queue: VecDeque<(usize, u32)> = VecDeque::new();
         queue.push_back((test_idx, 0));
 
         while let Some((idx, d)) = queue.pop_front() {
-            if d >= depth {
+            if depth > 0 && d >= depth {
                 continue;
             }
             for &callee in &graph.callees[idx] {
@@ -731,7 +732,8 @@ pub fn run_coverage(
     }
 
     // Text output: per-crate summary table.
-    println!("=== coverage (BFS depth {depth}) ===\n");
+    let depth_str = if depth == 0 { "unlimited".to_owned() } else { format!("{depth}") };
+    println!("=== static reachability (depth {depth_str}) ===\n");
     println!(
         "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
         "crate", "prod_fn", "test_fn", "tested", "untested", "coverage"

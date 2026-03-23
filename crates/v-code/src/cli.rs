@@ -205,8 +205,8 @@ pub enum Commands {
     Coverage {
         /// Path to the database directory.
         db: PathBuf,
-        /// BFS depth from test functions (default: 2).
-        #[arg(long, default_value = "2")]
+        /// BFS depth from test functions (0 = unlimited).
+        #[arg(long, default_value = "0")]
         depth: u32,
         /// Filter by file path suffix (e.g. "add.rs" or "commands/intel").
         #[arg(long)]
