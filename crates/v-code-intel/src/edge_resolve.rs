@@ -134,65 +134,40 @@ pub(crate) fn resolve_with_mir(
     let mut mir_resolved: usize = 0;
     let mut mir_external: usize = 0;
 
-    // Build chunk name → index map.
-    //
-    // MIR edge callee names may differ from chunk names due to `pub use`
-    // re-exports. In test compilation, lib functions appear external and
-    // `def_path_str` uses the re-export visible path (skipping internal
-    // modules). For example:
-    //   chunk:  commands::intel::commands::run_blast  (definition path)
-    //   edge:   commands::intel::run_blast            (re-export path)
-    //
-    // We register both the full name and the re-export alias (derived from
-    // the file path: if file has `<parent>/commands.rs`, the `commands`
-    // module segment is an artifact of the file→module mapping).
-    let mut name_to_idx: HashMap<String, u32> = HashMap::new();
+    // Primary: (file, start_line) → chunk index.
+    // MIR provides exact callee definition location — no name ambiguity.
+    let mut loc_to_idx: HashMap<(&str, usize), u32> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
-        let lower = c.name.to_lowercase();
-        let idx = i as u32;
-        name_to_idx.insert(lower.clone(), idx);
-
-        // Derive re-export alias from file path.
-        // Files like `commands/intel/commands.rs` create a module segment
-        // matching the file stem (`commands`). When `mod.rs` does
-        // `pub use commands::run_blast`, the visible path skips this segment.
-        //
-        // We find the stem segment's position in the chunk name and remove it.
-        // e.g. chunk `commands::intel::commands::run_blast` with stem `commands`
-        //    → find `::commands::` after the module path → remove
-        //    → alias `commands::intel::run_blast`
-        if let Some(stem) = std::path::Path::new(&c.file)
-            .file_stem()
-            .and_then(|s| s.to_str())
-        {
-            if stem != "mod" && stem != "lib" && stem != "main" {
-                let needle = format!("::{stem}::");
-                let lower_needle = needle.to_lowercase();
-                // Find the LAST occurrence of `::stem::` — that's the file module
-                if let Some(pos) = lower.rfind(&lower_needle) {
-                    let alias = format!(
-                        "{}::{}",
-                        &lower[..pos],
-                        &lower[pos + lower_needle.len()..]
-                    );
-                    if !alias.is_empty() && alias != lower {
-                        name_to_idx.entry(alias).or_insert(idx);
-                    }
-                }
-            }
+        if let Some((start, _)) = c.lines {
+            loc_to_idx.insert((&c.file, start), i as u32);
         }
     }
 
-    for (caller_name, callees) in &mir_edges.by_caller {
-        let src = resolve_mir_name(&caller_name.to_lowercase(), &name_to_idx);
+    // Secondary: name → chunk index (fallback for edges without location).
+    let mut name_to_idx: HashMap<String, u32> = HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        name_to_idx.insert(c.name.to_lowercase(), i as u32);
+    }
 
-        for (callee_name, line) in callees {
-            let tgt = resolve_mir_name(&callee_name.to_lowercase(), &name_to_idx);
+    for (caller_name, callees) in &mir_edges.by_caller {
+        let src = resolve_by_loc_or_name(caller_name, &loc_to_idx, &name_to_idx, chunks);
+
+        for callee in callees {
+            let tgt = if !callee.file.is_empty() && callee.start_line > 0 {
+                // Primary: exact file + start_line match
+                resolve_by_location(&callee.file, callee.start_line, &loc_to_idx, chunks)
+            } else {
+                None
+            }.or_else(|| {
+                // Fallback: name match (for edges without callee location)
+                let lower = callee.name.to_lowercase();
+                resolve_mir_name(&lower, &name_to_idx)
+            });
 
             match (src, tgt) {
                 (Some(s), Some(t)) => {
                     mir_resolved += 1;
-                    adj.add_edge(s as usize, t, *line as u32);
+                    adj.add_edge(s as usize, t, callee.call_line as u32);
                 }
                 _ => {
                     mir_external += 1;
@@ -211,19 +186,67 @@ pub(crate) fn resolve_with_mir(
     adj
 }
 
-/// Resolve a MIR fully-qualified name to a chunk index.
+/// Resolve by file + start_line (exact location match).
 ///
-/// MIR names are exact — no fuzzy fallback. Only two strategies:
-/// 1. Direct match against chunk name
-/// 2. Strip crate prefix (MIR: `v_code_intel::graph::build`, chunk: `graph::build`)
+/// Normalizes the MIR file path to match chunk file paths, then looks up
+/// the chunk whose file and start_line match. If exact start_line doesn't
+/// match (off by one from span differences), checks ±1 range.
+fn resolve_by_location(
+    file: &str,
+    start_line: usize,
+    loc_to_idx: &HashMap<(&str, usize), u32>,
+    chunks: &[ParsedChunk],
+) -> Option<u32> {
+    // Find chunk whose file ends with the MIR file path (handles relative vs absolute)
+    for c in chunks {
+        if let Some((chunk_start, _)) = c.lines {
+            let file_match = c.file.ends_with(file)
+                || file.ends_with(&c.file)
+                || c.file == file;
+            if file_match && (chunk_start == start_line
+                || chunk_start + 1 == start_line
+                || (chunk_start > 0 && chunk_start - 1 == start_line))
+            {
+                // Found — look up index
+                return loc_to_idx.get(&(c.file.as_str(), chunk_start)).copied();
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a caller by location (from MIR caller_file in by_caller key)
+/// or by name fallback.
+fn resolve_by_loc_or_name(
+    caller_name: &str,
+    _loc_to_idx: &HashMap<(&str, usize), u32>,
+    name_to_idx: &HashMap<String, u32>,
+    chunks: &[ParsedChunk],
+) -> Option<u32> {
+    let lower = caller_name.to_lowercase();
+    // Name match first (callers are always from local crate, names are consistent)
+    resolve_mir_name(&lower, name_to_idx)
+        .or_else(|| {
+            // Fallback: find by name suffix in chunks
+            let stripped = strip_closure_suffix(&lower);
+            chunks.iter().enumerate().find_map(|(i, c)| {
+                let cl = c.name.to_lowercase();
+                if cl == stripped || cl.ends_with(&format!("::{stripped}")) {
+                    Some(i as u32)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Name-based fallback for edges without location data.
 fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>) -> Option<u32> {
     let name = strip_closure_suffix(name);
-
-    // 1. Direct match
     if let Some(&idx) = name_to_idx.get(name) {
         return Some(idx);
     }
-    // 2. Strip crate prefix
+    // Strip crate prefix
     if let Some((_, rest)) = name.split_once("::") {
         if let Some(&idx) = name_to_idx.get(rest) {
             return Some(idx);
@@ -256,24 +279,4 @@ fn resolve_type_refs(src: usize, chunk: &ParsedChunk, index: &ChunkIndex, adj: &
     }
 }
 
-/// Extract `Type::method` from a fully-qualified MIR name.
-fn extract_type_method(mir_name: &str) -> &str {
-    let cleaned = mir_name.trim_start_matches('<');
-    let mut colons: Vec<usize> = Vec::new();
-    let bytes = cleaned.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b':' && bytes[i + 1] == b':' {
-            colons.push(i);
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    if colons.len() >= 2 {
-        &cleaned[colons[colons.len() - 2] + 2..]
-    } else {
-        cleaned.trim_start_matches('>')
-    }
-}
 

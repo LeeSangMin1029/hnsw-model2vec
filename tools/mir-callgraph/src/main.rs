@@ -23,6 +23,8 @@ struct CallEdge {
     caller_file: String,
     caller_kind: String,
     callee: String,
+    callee_file: String,
+    callee_start_line: usize,
     line: usize,
     is_local: bool,
 }
@@ -238,11 +240,18 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
                     .lookup_char_pos(terminator.source_info.span.lo())
                     .line;
 
+                // Callee definition location — for exact file+line matching.
+                let callee_span = tcx.def_span(callee_def_id);
+                let callee_file_str = extract_filename(source_map, callee_span);
+                let callee_start = source_map.lookup_char_pos(callee_span.lo()).line;
+
                 edges.push(CallEdge {
                     caller: caller_name.clone(),
                     caller_file: caller_file.clone(),
                     caller_kind: caller_kind.to_string(),
                     callee: callee_name,
+                    callee_file: callee_file_str,
+                    callee_start_line: callee_start,
                     line: call_line,
                     is_local: callee_def_id.is_local(),
                 });

@@ -16,6 +16,10 @@ pub struct MirCallEdge {
     pub caller: String,
     pub caller_file: String,
     pub callee: String,
+    #[serde(default)]
+    pub callee_file: String,
+    #[serde(default)]
+    pub callee_start_line: usize,
     pub line: usize,
     #[serde(default)]
     pub is_local: bool,
@@ -26,10 +30,19 @@ pub struct MirCallEdge {
 pub struct MirEdgeMap {
     /// (caller_file_normalized, line) → Vec<callee_name>
     pub by_location: HashMap<(String, usize), Vec<String>>,
-    /// caller_name → Vec<(callee_name, line)>
-    pub by_caller: HashMap<String, Vec<(String, usize)>>,
+    /// caller_name → Vec<(callee_name, callee_file, callee_start_line, call_line)>
+    pub by_caller: HashMap<String, Vec<CalleeInfo>>,
     /// Total edge count
     pub total: usize,
+}
+
+/// Callee information from a MIR edge.
+#[derive(Debug, Clone)]
+pub struct CalleeInfo {
+    pub name: String,
+    pub file: String,
+    pub start_line: usize,
+    pub call_line: usize,
 }
 
 impl MirEdgeMap {
@@ -52,10 +65,16 @@ impl MirEdgeMap {
                 .or_default()
                 .push(edge.callee.clone());
 
+            let callee_file_normalized = normalize_path(&edge.callee_file);
             map.by_caller
                 .entry(edge.caller.clone())
                 .or_default()
-                .push((edge.callee, edge.line));
+                .push(CalleeInfo {
+                    name: edge.callee,
+                    file: callee_file_normalized,
+                    start_line: edge.callee_start_line,
+                    call_line: edge.line,
+                });
 
             map.total += 1;
         }
@@ -94,7 +113,7 @@ impl MirEdgeMap {
     }
 
     /// Get all callees for a given caller function name.
-    pub fn callees_of(&self, caller: &str) -> Option<&[(String, usize)]> {
+    pub fn callees_of(&self, caller: &str) -> Option<&[CalleeInfo]> {
         self.by_caller.get(caller).map(|v| v.as_slice())
     }
 }
