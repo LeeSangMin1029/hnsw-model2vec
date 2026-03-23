@@ -5287,6 +5287,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "notify 7.0.0",
  "rayon",
  "serde",
  "serde_json",

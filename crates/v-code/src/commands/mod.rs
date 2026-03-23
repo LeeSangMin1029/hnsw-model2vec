@@ -6,3 +6,4 @@ pub mod embed;
 pub mod ingest;
 pub mod intel;
 pub mod dupes;
+pub mod watch;

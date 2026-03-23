@@ -110,6 +110,7 @@ fn run() -> anyhow::Result<()> {
             let body = read_body(body, body_file)?;
             commands::edit::replace_lines(db, file, start, end, body)
         }
+        Commands::Watch { db, input } => commands::watch::run(db, input),
         Commands::CreateFile { db, file, body, body_file } => {
             let body = read_body(body, body_file)?;
             commands::edit::create_file(db, file, body)

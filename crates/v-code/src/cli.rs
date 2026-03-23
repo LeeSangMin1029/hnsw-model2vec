@@ -360,6 +360,13 @@ pub enum Commands {
         /// Path to the database directory.
         db: PathBuf,
     },
+    /// Watch for file changes and auto-update the code database
+    Watch {
+        /// Code database path
+        db: PathBuf,
+        /// Input directory to watch
+        input: PathBuf,
+    },
     /// Create a new file at a project-relative path.
     #[command(visible_alias = "cf")]
     CreateFile {
