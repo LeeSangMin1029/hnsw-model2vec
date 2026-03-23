@@ -14,8 +14,8 @@ struct Cli {
     #[arg(long)]
     db: Option<PathBuf>,
 
-    /// TCP port to listen on
-    #[arg(long, default_value_t = 19530)]
+    /// TCP port to listen on (0 = auto-assign)
+    #[arg(long, default_value_t = 0)]
     port: u16,
 
     /// Idle timeout in seconds (0 = persistent)

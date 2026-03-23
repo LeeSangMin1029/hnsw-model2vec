@@ -12,29 +12,54 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 /// Platform-aware path to the daemon port file.
+///
+/// Uses the current working directory's hash to isolate per-project daemon instances.
+/// Multiple projects can run independent daemons simultaneously.
 pub fn port_path() -> PathBuf {
+    port_path_for_project(&project_key())
+}
+
+/// Port path for a specific project key.
+pub fn port_path_for_project(key: &str) -> PathBuf {
+    let base = daemon_base_dir();
+    base.join(format!("v-daemon-{key}.port"))
+}
+
+/// Derive a short project key from the current directory.
+fn project_key() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let canonical = cwd.canonicalize().unwrap_or(cwd);
+    let hash = simple_hash(canonical.to_string_lossy().as_ref());
+    format!("{hash:016x}")
+}
+
+/// Simple non-cryptographic hash for path → key derivation.
+fn simple_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+fn daemon_base_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(local)
-                .join("v-hnsw")
-                .join("cache")
-                .join("v-daemon.port");
+            return PathBuf::from(local).join("v-hnsw").join("daemons");
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
         if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
-            return PathBuf::from(cache).join("v-hnsw").join("v-daemon.port");
+            return PathBuf::from(cache).join("v-hnsw").join("daemons");
         }
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join(".cache")
-                .join("v-hnsw")
-                .join("v-daemon.port");
+            return PathBuf::from(home).join(".cache").join("v-hnsw").join("daemons");
         }
     }
-    std::env::temp_dir().join("v-hnsw").join("v-daemon.port")
+    std::env::temp_dir().join("v-hnsw").join("daemons")
 }
 
 /// Read the daemon port from the port file.

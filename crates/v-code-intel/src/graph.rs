@@ -5,7 +5,6 @@
 //!
 //! Edge resolution (how calls are connected) is handled by [`crate::edge_resolve`].
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 

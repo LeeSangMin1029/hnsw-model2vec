@@ -192,17 +192,23 @@ fn port_dir() -> PathBuf {
 }
 
 fn write_daemon_files(port: u16) -> Result<()> {
+    // Write port to the project-specific port file
+    let port_file = crate::client::port_path();
+    if let Some(dir) = port_file.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    std::fs::write(&port_file, port.to_string())
+        .with_context(|| format!("Failed to write {}", port_file.display()))?;
+
+    // Write PID and mtime alongside port file
     let dir = port_dir();
-    std::fs::create_dir_all(&dir).ok();
     let write = |name: &str, val: &str| -> Result<()> {
         let p = dir.join(name);
         std::fs::write(&p, val)
             .with_context(|| format!("Failed to write {}", p.display()))
     };
     write("v-daemon.pid", &std::process::id().to_string())?;
-    write("v-daemon.port", &port.to_string())?;
 
-    // Store current exe mtime so clients can detect stale binaries.
     if let Ok(exe) = std::env::current_exe()
         && let Ok(meta) = exe.metadata()
             && let Ok(modified) = meta.modified()
@@ -214,8 +220,10 @@ fn write_daemon_files(port: u16) -> Result<()> {
 }
 
 fn cleanup_files() {
+    // Remove project-specific port file
+    let _ = std::fs::remove_file(crate::client::port_path());
     let dir = port_dir();
-    for name in ["v-daemon.pid", "v-daemon.port", "v-daemon.mtime", "v-daemon.lock"] {
+    for name in ["v-daemon.pid", "v-daemon.mtime", "v-daemon.lock"] {
         let _ = std::fs::remove_file(dir.join(name));
     }
 }
