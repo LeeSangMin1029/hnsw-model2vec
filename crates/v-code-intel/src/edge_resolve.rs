@@ -181,6 +181,9 @@ pub(crate) fn resolve_with_mir(
 /// 3. Type::method extract: `check_estop`
 /// 4. ChunkIndex name matching (exact → short fallback)
 fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>, index: &ChunkIndex) -> Option<u32> {
+    // Strip closure suffixes: `fn::{closure#0}` → `fn`
+    let name = strip_closure_suffix(name);
+
     // 1. Direct match
     if let Some(&idx) = name_to_idx.get(name) {
         return Some(idx);
@@ -204,6 +207,16 @@ fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>, index: &Chun
     }
     // 5. ChunkIndex fallback
     index.resolve_name(name)
+}
+
+/// Strip `{closure#N}` suffixes from async function MIR names.
+/// `daemon::run::{closure#0}` → `daemon::run`
+fn strip_closure_suffix(name: &str) -> &str {
+    if let Some(pos) = name.find("::{closure") {
+        &name[..pos]
+    } else {
+        name
+    }
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
