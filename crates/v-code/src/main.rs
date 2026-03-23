@@ -66,6 +66,7 @@ fn run() -> anyhow::Result<()> {
                 db, threshold, exclude_tests, k, json, ast_mode: ast, all_mode: all, min_lines, min_sub_lines, analyze,
             })
         }
+        Commands::Dead { db, include_pub, file } => intel::run_dead(db, include_pub, file),
         Commands::Stats { db } => intel::run_stats(db),
         Commands::Coverage { db, depth, file, refresh } => intel::run_coverage(db, depth, file, refresh),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),

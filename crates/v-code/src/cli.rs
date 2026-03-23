@@ -158,6 +158,17 @@ pub enum Commands {
         #[arg(long)]
         refresh: bool,
     },
+    /// Find dead code: functions with no callers (unreachable).
+    Dead {
+        /// Path to the database directory.
+        db: PathBuf,
+        /// Include pub functions (excluded by default — may be API entry points).
+        #[arg(long)]
+        include_pub: bool,
+        /// Filter by file path suffix.
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Add/update code files in the database (auto-incremental).
     Add {
         /// Path to the database directory.
