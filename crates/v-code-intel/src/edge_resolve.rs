@@ -144,9 +144,12 @@ pub(crate) fn resolve_with_mir(
     }
 
     // Secondary: name → chunk index (fallback for edges without location).
+    // Strip visibility prefixes (e.g. "pub(in foo) bar::baz" → "bar::baz")
+    // so MIR names like "bar::baz" match chunks whose name includes visibility.
     let mut name_to_idx: HashMap<String, u32> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
-        name_to_idx.insert(c.name.to_lowercase(), i as u32);
+        let clean = strip_visibility_prefix(&c.name);
+        name_to_idx.insert(clean.to_lowercase(), i as u32);
     }
 
     for (caller_name, callees) in &mir_edges.by_caller {
@@ -253,6 +256,22 @@ fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>) -> Option<u3
         }
     }
     None
+}
+
+/// Strip visibility prefix from chunk names.
+/// `pub(in fusion) fusion::convex::normalize` → `fusion::convex::normalize`
+/// `pub(crate) edge_resolve::resolve_with_mir` → `edge_resolve::resolve_with_mir`
+fn strip_visibility_prefix(name: &str) -> &str {
+    if let Some(rest) = name.strip_prefix("pub(") {
+        // Find closing `)` then skip the space after it
+        if let Some(close) = rest.find(") ") {
+            return &rest[close + 2..];
+        }
+    }
+    if let Some(rest) = name.strip_prefix("pub ") {
+        return rest;
+    }
+    name
 }
 
 /// Strip `{closure#N}` suffixes from async function MIR names.
