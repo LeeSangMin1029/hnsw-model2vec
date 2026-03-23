@@ -154,6 +154,7 @@ pub fn run_context(
     depth: u32,
     source: bool,
     include_tests: bool,
+    scope: Option<String>,
 ) -> Result<()> {
     use v_code_intel::context_cmd;
 
@@ -191,6 +192,16 @@ pub fn run_context(
         }
     }
 
+    // Apply scope filter: keep seeds (def) always, filter others by file path
+    if let Some(ref scope) = scope {
+        entries.retain(|e| {
+            e.tag == "def" || {
+                let file = &graph.files[e.idx as usize];
+                file.starts_with(scope.as_str()) || file.contains(scope.as_str())
+            }
+        });
+    }
+
     // Header with counts
     let counts = format!(
         "{} caller, {} callee, {} type, {} test",
@@ -198,7 +209,11 @@ pub fn run_context(
         result.types.len(), result.tests.len(),
     );
     let (alias_map, _) = graph.global_aliases();
-    println!("=== context: {symbol} ({counts}) ===\n");
+    if let Some(ref scope) = scope {
+        println!("=== context: {symbol} (scope: {scope}) ({counts}) ===\n");
+    } else {
+        println!("=== context: {symbol} ({counts}) ===\n");
+    }
     print_file_grouped(&graph, &entries, source, &alias_map);
 
     if !include_tests && !result.tests.is_empty() {
@@ -230,12 +245,13 @@ pub fn run_context(
     Ok(())
 }
 
-/// `v-code blast <db> <symbol> --depth N [--include-tests]`
+/// `v-code blast <db> <symbol> --depth N [--include-tests] [--scope <prefix>]`
 pub fn run_blast(
     db: PathBuf,
     symbol: String,
     depth: u32,
     include_tests: bool,
+    scope: Option<String>,
 ) -> Result<()> {
     use v_code_intel::blast;
 
@@ -255,7 +271,8 @@ pub fn run_blast(
         // BFS reverse from field-accessing chunks
         let all_entries = impact::bfs_reverse(&graph, &field_chunks, depth);
         let summary = blast::summarize_blast(&graph, &all_entries);
-        let entries = filter_test_entries(all_entries, include_tests);
+        let mut entries = filter_scope_entries(all_entries, &graph, &scope);
+        entries = filter_test_entries(entries, include_tests);
         let mut tagged: Vec<TaggedEntry> = Vec::new();
         for e in &entries {
             let tag = if field_chunks.contains(&e.idx) {
@@ -270,7 +287,8 @@ pub fn run_blast(
             };
             tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
         }
-        println!("=== blast: {symbol} ({} field accessors, {} affected, {} prod, {} test) ===\n",
+        let scope_label = scope.as_ref().map_or(String::new(), |s| format!(" (scope: {s})"));
+        println!("=== blast: {symbol}{scope_label} ({} field accessors, {} affected, {} prod, {} test) ===\n",
             field_chunks.len(), summary.total_affected, summary.prod_count, summary.test_count);
         print_file_grouped(&graph, &tagged, false, &alias_map);
         return Ok(());
@@ -280,7 +298,8 @@ pub fn run_blast(
 
     let all_entries = impact::bfs_reverse(&graph, &seeds, depth);
     let summary = blast::summarize_blast(&graph, &all_entries);
-    let entries = filter_test_entries(all_entries, include_tests);
+    let mut entries = filter_scope_entries(all_entries, &graph, &scope);
+    entries = filter_test_entries(entries, include_tests);
 
     // Build tagged entries with depth labels
     let mut tagged: Vec<TaggedEntry> = Vec::new();
@@ -294,7 +313,8 @@ pub fn run_blast(
         tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
     }
 
-    println!("=== blast: {symbol} ({} affected, {} prod, {} test) ===\n",
+    let scope_label = scope.as_ref().map_or(String::new(), |s| format!(" (scope: {s})"));
+    println!("=== blast: {symbol}{scope_label} ({} affected, {} prod, {} test) ===\n",
         summary.total_affected, summary.prod_count, summary.test_count);
     print_file_grouped(&graph, &tagged, false, &alias_map);
 
@@ -306,6 +326,7 @@ pub fn run_jump(
     db: PathBuf,
     symbol: String,
     depth: u32,
+    include_tests: bool,
 ) -> Result<()> {
     use v_code_intel::jump;
 
@@ -314,7 +335,8 @@ pub fn run_jump(
     let (alias_map, _legend) = graph.global_aliases();
 
     println!("=== jump: {symbol} ===\n");
-    let tree = jump::build_flow_tree(&graph, &seeds, depth);
+    let skip_test = !include_tests;
+    let tree = jump::build_flow_tree(&graph, &seeds, depth, skip_test);
     print!("{}", jump::render_tree(&graph, &tree, &alias_map));
 
     Ok(())
@@ -337,6 +359,24 @@ fn filter_test_entries(entries: Vec<impact::BfsEntry>, include_tests: bool) -> V
         entries
     } else {
         entries.into_iter().filter(|e| !e.is_test).collect()
+    }
+}
+
+fn filter_scope_entries(
+    entries: Vec<impact::BfsEntry>,
+    graph: &graph::CallGraph,
+    scope: &Option<String>,
+) -> Vec<impact::BfsEntry> {
+    if let Some(ref prefix) = *scope {
+        entries
+            .into_iter()
+            .filter(|e| {
+                let file = &graph.files[e.idx as usize];
+                file.starts_with(prefix.as_str()) || file.contains(prefix.as_str())
+            })
+            .collect()
+    } else {
+        entries
     }
 }
 
@@ -553,12 +593,14 @@ pub fn run_coverage(
     // BFS: for each function, count how many distinct test functions reach it.
     // depth=0 means unlimited (full reachability).
     let mut test_counts = vec![0u32; n];
+    let mut visited = vec![false; n];
 
     for test_idx in 0..n {
         if !graph.is_test[test_idx] {
             continue;
         }
-        let mut visited = vec![false; n];
+        // Clear visited (memset, no Vec reallocation)
+        visited.iter_mut().for_each(|v| *v = false);
         visited[test_idx] = true;
         let mut queue: VecDeque<(usize, u32)> = VecDeque::new();
         queue.push_back((test_idx, 0));

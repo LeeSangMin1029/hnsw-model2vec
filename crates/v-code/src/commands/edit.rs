@@ -28,15 +28,33 @@ struct SymbolLocation {
 
 /// Find a symbol in the DB and resolve its current location in the source file.
 ///
-/// `symbol` is matched against chunk names (substring match, same as `v-code symbols`).
+/// `symbol` is matched against chunk names (exact or `::suffix` match).
 /// `file_hint` narrows the search to chunks whose file path ends with the given suffix.
+///
+/// Uses a HashMap index for O(1) lookup instead of linear scan over all chunks.
 fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<SymbolLocation> {
     let chunks = load_chunks(db)?;
 
-    // Find matching chunks.
-    let candidates: Vec<&ParsedChunk> = chunks
-        .iter()
+    // Build name → indices map for fast lookup.
+    let mut name_index: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        // Index by full name
+        name_index.entry(&c.name).or_default().push(i);
+        // Index by last segment (after ::) for suffix matching
+        if let Some(suffix) = c.name.rsplit("::").next() {
+            name_index.entry(suffix).or_default().push(i);
+        }
+    }
+
+    // O(1) lookup by symbol name
+    let candidate_indices = name_index.get(symbol).cloned().unwrap_or_default();
+
+    let candidates: Vec<&ParsedChunk> = candidate_indices
+        .into_iter()
+        .map(|i| &chunks[i])
         .filter(|c| {
+            // Verify the match is exact or ::suffix (index may have collisions from last-segment)
             let name_match = c.name == symbol || c.name.ends_with(&format!("::{symbol}"));
             let file_match = file_hint.is_none_or(|f| c.file.ends_with(f));
             name_match && file_match

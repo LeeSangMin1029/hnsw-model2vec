@@ -12,7 +12,7 @@ use std::process::Command;
 
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::ty::TyCtxt;
-use rustc_span::def_id::LOCAL_CRATE;
+use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use serde::Serialize;
 
 // ── Output types ────────────────────────────────────────────────────
@@ -57,6 +57,18 @@ impl rustc_driver::Callbacks for MirCallbacks {
         extract_all(tcx, self.json, self.is_test_target);
         rustc_driver::Compilation::Continue
     }
+}
+
+// ── Naming ─────────────────────────────────────────────────────────
+
+/// Consistent name for a DefId.
+///
+/// Uses `def_path_str` (the standard rustc display name). For local items
+/// this gives the raw definition path; for external items it may use
+/// re-export visible paths, which edge_resolve handles via crate prefix
+/// stripping and suffix matching.
+fn canonical_name(tcx: TyCtxt<'_>, def_id: DefId) -> String {
+    tcx.def_path_str(def_id)
 }
 
 // ── Extraction ──────────────────────────────────────────────────────
@@ -130,12 +142,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
         let def_id = item.owner_id.def_id;
         let vis = extract_visibility(tcx, def_id.to_def_id());
 
-        // For impl blocks, build a more descriptive name
-        let name = if kind_str == "impl" {
-            tcx.def_path_str(def_id.to_def_id())
-        } else {
-            tcx.def_path_str(def_id.to_def_id())
-        };
+        let name = canonical_name(tcx, def_id.to_def_id());
 
         // Signature from source: everything before the first `{`
         let sig_str = source_map
@@ -173,7 +180,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
         }
 
         let body = tcx.optimized_mir(def_id);
-        let caller_name = tcx.def_path_str(def_id.to_def_id());
+        let caller_name = canonical_name(tcx, def_id.to_def_id());
         let caller_file = extract_filename(source_map, body.span);
         let caller_kind = match def_kind {
             rustc_hir::def::DefKind::Fn => "fn",
@@ -226,7 +233,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
                     _ => continue,
                 };
 
-                let callee_name = tcx.def_path_str(callee_def_id);
+                let callee_name = canonical_name(tcx, callee_def_id);
                 let call_line = source_map
                     .lookup_char_pos(terminator.source_info.span.lo())
                     .line;

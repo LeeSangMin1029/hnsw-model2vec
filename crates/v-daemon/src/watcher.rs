@@ -109,6 +109,7 @@ fn is_source_file(path: &Path) -> bool {
 }
 
 /// Check if a path is inside an ignored directory.
+/// NOTE: duplicated in v-code/commands/watch.rs — keep in sync.
 fn is_in_ignored_dir(path: &Path) -> bool {
     path.components().any(|c| {
         c.as_os_str()

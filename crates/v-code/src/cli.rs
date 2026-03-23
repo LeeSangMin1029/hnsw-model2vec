@@ -57,6 +57,9 @@ pub enum Commands {
         /// Show individual test entries (default: summary count only).
         #[arg(long)]
         include_tests: bool,
+        /// Filter results to symbols whose file path contains this prefix.
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Show blast radius of changing a symbol (transitive callers + summary).
     #[command(visible_alias = "bl")]
@@ -71,6 +74,9 @@ pub enum Commands {
         /// Include test symbols in results (hidden by default).
         #[arg(long)]
         include_tests: bool,
+        /// Filter results to symbols whose file path starts with (or contains) this prefix.
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Find shortest call path between two symbols.
     #[command(visible_alias = "tr")]
@@ -151,6 +157,9 @@ pub enum Commands {
         /// Max DFS depth (default: 2).
         #[arg(long, default_value = "2")]
         depth: u32,
+        /// Include test symbols in the flow tree (excluded by default).
+        #[arg(long)]
+        include_tests: bool,
     },
     /// Find duplicate code (token Jaccard default, --ast structural).
     #[command(visible_alias = "dup")]

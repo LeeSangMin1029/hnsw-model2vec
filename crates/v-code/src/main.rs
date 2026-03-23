@@ -49,14 +49,14 @@ fn run() -> anyhow::Result<()> {
         Commands::Symbols { db, name, kind, include_tests, limit, compact } => {
             intel::run_symbols(db, name, kind, include_tests, limit, compact || env_compact())
         }
-        Commands::Context { db, symbol, depth, source, include_tests } => {
-            intel::run_context(db, symbol, depth, source, include_tests)
+        Commands::Context { db, symbol, depth, source, include_tests, scope } => {
+            intel::run_context(db, symbol, depth, source, include_tests, scope)
         }
-        Commands::Blast { db, symbol, depth, include_tests } => {
-            intel::run_blast(db, symbol, depth, include_tests)
+        Commands::Blast { db, symbol, depth, include_tests, scope } => {
+            intel::run_blast(db, symbol, depth, include_tests, scope)
         }
-        Commands::Jump { db, symbol, depth } => {
-            intel::run_jump(db, symbol, depth)
+        Commands::Jump { db, symbol, depth, include_tests } => {
+            intel::run_jump(db, symbol, depth, include_tests)
         }
         Commands::Trace { db, from, to } => {
             intel::run_trace(db, from, to)

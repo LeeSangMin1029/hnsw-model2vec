@@ -218,8 +218,16 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         // Checkpoint + release exclusive lock before rebuilding caches.
         engine.checkpoint().ok();
         drop(engine);
+
+        // Build MirEdgeMap once — reuse in prebuild_caches (avoid 2nd parse).
+        let mir_edges = if mir_out_dir.exists() {
+            v_code_intel::mir_edges::MirEdgeMap::from_dir(&mir_out_dir).ok()
+        } else {
+            None
+        };
+
         let t_cache = std::time::Instant::now();
-        prebuild_caches(&db_path, &entries, &current_sources);
+        prebuild_caches(&db_path, &entries, &current_sources, mir_edges.as_ref());
         eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
     }
 
@@ -235,6 +243,7 @@ fn prebuild_caches(
     db_path: &std::path::Path,
     new_entries: &[CodeChunkEntry],
     current_sources: &std::collections::HashSet<String>,
+    mir_edges: Option<&v_code_intel::mir_edges::MirEdgeMap>,
 ) {
     use v_code_intel::parse::ParsedChunk;
 
@@ -273,10 +282,6 @@ fn prebuild_caches(
         if kept > 0 || replaced > 0 {
             eprintln!("    [merge] kept={kept}, replaced={replaced}");
         }
-        // Debug: show first changed source and first c.file for path comparison
-        if let Some(cs) = changed_sources.iter().next() {
-            eprintln!("    [debug] changed_source: {cs}");
-        }
     }
     eprintln!("    [cache] {} chunks ({} new + existing)", chunks.len(), new_entries.len());
 
@@ -288,29 +293,13 @@ fn prebuild_caches(
     }
     eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
-    // Build graph.
+    // Build + save graph via shared rebuild helper.
     let t3 = std::time::Instant::now();
-    let mir_edges_dir = db_path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."))
-        .join("target")
-        .join("mir-edges");
-    let graph = if mir_edges_dir.exists() {
-        match v_code_intel::mir_edges::MirEdgeMap::from_dir(&mir_edges_dir) {
-            Ok(mir) if mir.total > 0 => {
-                eprintln!("    [cache] MIR edges: {} total", mir.total);
-                v_code_intel::graph::CallGraph::build_with_mir(&chunks, &mir)
-            }
-            _ => v_code_intel::graph::CallGraph::build(&chunks),
-        }
-    } else {
-        v_code_intel::graph::CallGraph::build(&chunks)
-    };
-    eprintln!("    [cache] graph build: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());
-
-    let t4 = std::time::Instant::now();
-    let _ = graph.save(db_path);
-    eprintln!("    [cache] graph.bin save: {:.1}ms", t4.elapsed().as_secs_f64() * 1000.0);
+    if let Some(mir) = mir_edges {
+        eprintln!("    [cache] MIR edges: {} total", mir.total);
+    }
+    let _ = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, mir_edges);
+    eprintln!("    [cache] graph build+save: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());
     eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
 }
 
@@ -331,8 +320,9 @@ fn direct_bulk_write(
     let file_index_data = file_index::load_file_index(db_path)?;
     for (path, (_, _, new_ids)) in file_metadata_map {
         if let Some(existing) = file_index_data.get_file(path) {
+            let new_id_set: std::collections::HashSet<u64> = new_ids.iter().copied().collect();
             for &old_id in &existing.chunk_ids {
-                if !new_ids.contains(&old_id) {
+                if !new_id_set.contains(&old_id) {
                     let _ = engine.remove(old_id);
                 }
             }

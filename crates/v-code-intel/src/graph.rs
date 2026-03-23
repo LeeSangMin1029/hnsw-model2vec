@@ -164,6 +164,20 @@ impl CallGraph {
             .map(|(k, v)| (&k[prefix.len()..], v.as_slice())).collect()
     }
 
+    /// Build graph from chunks + optional MIR edges, then save to disk.
+    ///
+    /// Shared helper used by both `prebuild_caches` (add) and
+    /// `rebuild_graph_cache` (watch) to avoid duplicating the
+    /// build-dispatch + save logic.
+    pub fn rebuild(db: &Path, chunks: &[ParsedChunk], mir_edges: Option<&MirEdgeMap>) -> Result<Self> {
+        let graph = match mir_edges {
+            Some(mir) if mir.total > 0 => Self::build_with_mir(chunks, mir),
+            _ => Self::build(chunks),
+        };
+        graph.save(db)?;
+        Ok(graph)
+    }
+
     // ── Persistence ─────────────────────────────────────────────────
 
     pub fn save(&self, db: &Path) -> Result<()> {

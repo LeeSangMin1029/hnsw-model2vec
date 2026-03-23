@@ -134,42 +134,65 @@ pub(crate) fn resolve_with_mir(
     let mut mir_resolved: usize = 0;
     let mut mir_external: usize = 0;
 
-    // Build name → chunk_index map for fast lookup
+    // Build chunk name → index map.
+    //
+    // MIR edge callee names may differ from chunk names due to `pub use`
+    // re-exports. In test compilation, lib functions appear external and
+    // `def_path_str` uses the re-export visible path (skipping internal
+    // modules). For example:
+    //   chunk:  commands::intel::commands::run_blast  (definition path)
+    //   edge:   commands::intel::run_blast            (re-export path)
+    //
+    // We register both the full name and the re-export alias (derived from
+    // the file path: if file has `<parent>/commands.rs`, the `commands`
+    // module segment is an artifact of the file→module mapping).
     let mut name_to_idx: HashMap<String, u32> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
         let lower = c.name.to_lowercase();
-        name_to_idx.insert(lower.clone(), i as u32);
-        let short = extract_type_method(&lower);
-        if short != lower {
-            name_to_idx.entry(short.to_owned()).or_insert(i as u32);
+        let idx = i as u32;
+        name_to_idx.insert(lower.clone(), idx);
+
+        // Derive re-export alias from file path.
+        // Files like `commands/intel/commands.rs` create a module segment
+        // matching the file stem (`commands`). When `mod.rs` does
+        // `pub use commands::run_blast`, the visible path skips this segment.
+        //
+        // We find the stem segment's position in the chunk name and remove it.
+        // e.g. chunk `commands::intel::commands::run_blast` with stem `commands`
+        //    → find `::commands::` after the module path → remove
+        //    → alias `commands::intel::run_blast`
+        if let Some(stem) = std::path::Path::new(&c.file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            if stem != "mod" && stem != "lib" && stem != "main" {
+                let needle = format!("::{stem}::");
+                let lower_needle = needle.to_lowercase();
+                // Find the LAST occurrence of `::stem::` — that's the file module
+                if let Some(pos) = lower.rfind(&lower_needle) {
+                    let alias = format!(
+                        "{}::{}",
+                        &lower[..pos],
+                        &lower[pos + lower_needle.len()..]
+                    );
+                    if !alias.is_empty() && alias != lower {
+                        name_to_idx.entry(alias).or_insert(idx);
+                    }
+                }
+            }
         }
     }
 
-    // Resolve from MIR edge map directly
     for (caller_name, callees) in &mir_edges.by_caller {
-        let caller_lower = caller_name.to_lowercase();
-        let src = resolve_mir_name(&caller_lower, &name_to_idx, index);
+        let src = resolve_mir_name(&caller_name.to_lowercase(), &name_to_idx);
 
         for (callee_name, line) in callees {
-            let callee_lower = callee_name.to_lowercase();
-            let tgt = resolve_mir_name(&callee_lower, &name_to_idx, index);
+            let tgt = resolve_mir_name(&callee_name.to_lowercase(), &name_to_idx);
 
             match (src, tgt) {
                 (Some(s), Some(t)) => {
                     mir_resolved += 1;
                     adj.add_edge(s as usize, t, *line as u32);
-                }
-                (None, Some(t)) => {
-                    // Caller not in chunks (e.g. integration test) but callee is.
-                    // Can't create edge without src, but count as partially resolved.
-                    mir_resolved += 1;
-                    // Find any test chunk that matches the caller pattern and add edge from there
-                    let caller_stripped = strip_closure_suffix(&caller_lower);
-                    if let Some(&test_src) = name_to_idx.get(caller_stripped)
-                        .or_else(|| caller_stripped.rsplit("::").next().and_then(|s| name_to_idx.get(s)))
-                    {
-                        adj.add_edge(test_src as usize, t, *line as u32);
-                    }
                 }
                 _ => {
                     mir_external += 1;
@@ -190,38 +213,23 @@ pub(crate) fn resolve_with_mir(
 
 /// Resolve a MIR fully-qualified name to a chunk index.
 ///
-/// Tries progressively shorter name forms:
-/// 1. Full name: `onttothree_agent::daemon::check_estop`
-/// 2. Strip crate prefix: `daemon::check_estop`
-/// 3. Type::method extract: `check_estop`
-/// 4. ChunkIndex name matching (exact → short fallback)
-fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>, index: &ChunkIndex) -> Option<u32> {
-    // Strip closure suffixes: `fn::{closure#0}` → `fn`
+/// MIR names are exact — no fuzzy fallback. Only two strategies:
+/// 1. Direct match against chunk name
+/// 2. Strip crate prefix (MIR: `v_code_intel::graph::build`, chunk: `graph::build`)
+fn resolve_mir_name(name: &str, name_to_idx: &HashMap<String, u32>) -> Option<u32> {
     let name = strip_closure_suffix(name);
 
     // 1. Direct match
     if let Some(&idx) = name_to_idx.get(name) {
         return Some(idx);
     }
-    // 2. Strip crate prefix (first :: segment)
-    if let Some(rest) = name.split_once("::").map(|(_, r)| r) {
+    // 2. Strip crate prefix
+    if let Some((_, rest)) = name.split_once("::") {
         if let Some(&idx) = name_to_idx.get(rest) {
             return Some(idx);
         }
     }
-    // 3. Type::method (last two :: segments)
-    let short = extract_type_method(name);
-    if let Some(&idx) = name_to_idx.get(short) {
-        return Some(idx);
-    }
-    // 4. Just the last segment
-    if let Some(last) = name.rsplit("::").next() {
-        if let Some(&idx) = name_to_idx.get(last) {
-            return Some(idx);
-        }
-    }
-    // 5. ChunkIndex fallback
-    index.resolve_name(name)
+    None
 }
 
 /// Strip `{closure#N}` suffixes from async function MIR names.

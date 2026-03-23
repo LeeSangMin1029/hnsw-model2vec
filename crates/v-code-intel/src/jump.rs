@@ -20,13 +20,14 @@ pub struct FlowNode {
 ///
 /// Each seed becomes a root. A node already expanded elsewhere appears
 /// as a childless leaf with `backreference = true` (no re-expansion).
-pub fn build_flow_tree(graph: &CallGraph, seeds: &[u32], max_depth: u32) -> Vec<FlowNode> {
+/// When `skip_test` is true, test nodes are excluded from the tree.
+pub fn build_flow_tree(graph: &CallGraph, seeds: &[u32], max_depth: u32, skip_test: bool) -> Vec<FlowNode> {
     let mut expanded = HashSet::new();
     seeds
         .iter()
         .map(|&idx| {
             expanded.insert(idx);
-            build_subtree(graph, idx, max_depth, 0, &mut expanded)
+            build_subtree(graph, idx, max_depth, 0, &mut expanded, skip_test)
         })
         .collect()
 }
@@ -37,6 +38,7 @@ fn build_subtree(
     max_depth: u32,
     current_depth: u32,
     expanded: &mut HashSet<u32>,
+    skip_test: bool,
 ) -> FlowNode {
     if current_depth >= max_depth {
         return FlowNode { idx, children: Vec::new(), backreference: false };
@@ -45,12 +47,15 @@ fn build_subtree(
     let callees = graph.callees.get(idx as usize).map_or(&[][..], |v| v.as_slice());
     let children: Vec<FlowNode> = callees
         .iter()
+        .filter(|&&child_idx| {
+            !skip_test || !graph.is_test.get(child_idx as usize).copied().unwrap_or(false)
+        })
         .map(|&child_idx| {
             if expanded.contains(&child_idx) {
                 FlowNode { idx: child_idx, children: Vec::new(), backreference: true }
             } else {
                 expanded.insert(child_idx);
-                build_subtree(graph, child_idx, max_depth, current_depth + 1, expanded)
+                build_subtree(graph, child_idx, max_depth, current_depth + 1, expanded, skip_test)
             }
         })
         .collect();

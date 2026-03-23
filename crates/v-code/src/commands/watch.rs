@@ -184,6 +184,15 @@ fn update_db(
         .unwrap_or_default()
         .as_secs();
 
+    // Build per-file chunk count for accurate chunk_total.
+    let chunk_total_map: HashMap<&str, usize> = {
+        let mut m: HashMap<&str, usize> = HashMap::new();
+        for entry in entries {
+            *m.entry(entry.source.as_str()).or_default() += 1;
+        }
+        m
+    };
+
     for entry in entries {
         let chunk = &entry.chunk;
         let id = generate_id(&entry.source, chunk.chunk_index);
@@ -222,7 +231,7 @@ fn update_db(
             created_at: now,
             source_modified_at: entry.mtime,
             chunk_index: chunk.chunk_index as u32,
-            chunk_total: 1, // single-file update; approximate
+            chunk_total: chunk_total_map.get(entry.source.as_str()).copied().unwrap_or(1) as u32,
             custom,
         };
 
@@ -251,13 +260,7 @@ fn rebuild_graph_cache(
 ) -> Result<()> {
     let chunks = v_code_intel::loader::load_chunks(db_path)?;
 
-    let graph = if mir_edge_map.total > 0 {
-        v_code_intel::graph::CallGraph::build_with_mir(&chunks, mir_edge_map)
-    } else {
-        v_code_intel::graph::CallGraph::build(&chunks)
-    };
-
-    graph.save(db_path)?;
+    let graph = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, Some(mir_edge_map))?;
     eprintln!(
         "[watch] graph: {} nodes, {} edges",
         graph.len(),
@@ -277,6 +280,8 @@ fn is_rust_source(path: &Path) -> bool {
         .is_some_and(|ext| ext == "rs")
 }
 
+/// Check if a path is inside an ignored directory.
+/// NOTE: duplicated in v-daemon/watcher.rs — keep in sync.
 fn is_in_ignored_dir(path: &Path) -> bool {
     path.components().any(|c| {
         c.as_os_str()

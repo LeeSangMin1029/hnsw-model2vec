@@ -129,38 +129,14 @@ pub fn save_lsp_types_cache(db: &Path, types: &crate::lsp_client::LspTypes) {
     }
 }
 
-/// Result of a daemon graph build attempt.
-pub enum DaemonBuildResult {
-    /// Daemon returned a completed graph.
-    Ready(Box<crate::graph::CallGraph>),
-    /// Daemon is building asynchronously — don't cache the tree-sitter fallback.
-    Building,
-    /// Daemon not available.
-    Unavailable,
-}
-
-/// Optional daemon hooks for graph building.
+/// Load graph from cache or build from chunks + MIR edges.
 ///
-/// Callers that have access to `v-daemon` can provide these to enable
-/// daemon-assisted graph builds.
-pub struct DaemonHooks {
-    /// Try to build graph via running daemon.
-    pub try_graph_build: fn(&Path) -> DaemonBuildResult,
-    /// Spawn daemon in background for next invocation.
-    pub spawn: fn(&Path),
-}
-
-/// Load graph from cache or build from chunks.
-///
-/// Resolution strategy (in order):
+/// Resolution strategy:
 /// 1. Graph cache hit → return immediately
-/// 2. Daemon running → delegate `graph/build`
-/// 3. Tree-sitter + lightweight type inference fallback
-pub fn load_or_build_graph(
-    db: &Path,
-    daemon: Option<&DaemonHooks>,
-) -> Result<crate::graph::CallGraph> {
-    let (g, _) = load_or_build_graph_with_chunks(db, daemon)?;
+/// 2. MIR edges available → 100% accurate graph
+/// 3. Name-resolve fallback
+pub fn load_or_build_graph(db: &Path) -> Result<crate::graph::CallGraph> {
+    let (g, _) = load_or_build_graph_with_chunks(db)?;
     Ok(g)
 }
 
@@ -168,33 +144,38 @@ pub fn load_or_build_graph(
 ///
 /// Returns `(graph, Some(chunks))` when chunks were loaded for graph building,
 /// or `(graph, None)` when the graph was loaded from cache (chunks not needed).
-/// Callers that need both graph and chunks can avoid double-loading.
 pub fn load_or_build_graph_with_chunks(
     db: &Path,
-    daemon: Option<&DaemonHooks>,
 ) -> Result<(crate::graph::CallGraph, Option<Vec<ParsedChunk>>)> {
     if let Some(g) = crate::graph::CallGraph::load(db) {
         return Ok((g, None));
     }
 
-    // Try daemon first.
-    let mut daemon_building = false;
-    if let Some(hooks) = daemon {
-        match (hooks.try_graph_build)(db) {
-            DaemonBuildResult::Ready(g) => return Ok((*g, None)),
-            DaemonBuildResult::Building => daemon_building = true,
-            DaemonBuildResult::Unavailable => (hooks.spawn)(db),
-        }
-    }
-
     let chunks = load_chunks(db)?;
 
-    let g = crate::graph::CallGraph::build(&chunks);
+    // Try MIR edges first (100% accurate), fall back to name-resolve.
+    let mir_edges_dir = db.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .join("target")
+        .join("mir-edges");
+    let mir_edges = if mir_edges_dir.exists() {
+        crate::mir_edges::MirEdgeMap::from_dir(&mir_edges_dir).ok()
+    } else {
+        None
+    };
 
-    // Don't persist tree-sitter fallback when daemon is building —
-    // daemon will save the accurate graph.bin when done.
-    if !daemon_building {
-        let _ = g.save(db);
-    }
+    let g = match mir_edges.as_ref() {
+        Some(mir) if mir.total > 0 => {
+            eprintln!("[graph] Rebuilding with MIR edges ({} total)...", mir.total);
+            crate::graph::CallGraph::build_with_mir(&chunks, mir)
+        }
+        _ => {
+            eprintln!("[graph] Building graph (name-resolve fallback)...");
+            crate::graph::CallGraph::build(&chunks)
+        }
+    };
+
+    let _ = g.save(db);
     Ok((g, Some(chunks)))
 }

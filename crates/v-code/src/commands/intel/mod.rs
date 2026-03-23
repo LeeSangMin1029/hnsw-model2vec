@@ -26,77 +26,18 @@ pub use v_code_intel::graph;
 pub use v_code_intel::helpers::{format_lines_opt, format_lines_str_opt, relative_path};
 pub use v_code_intel::impact;
 pub use v_code_intel::loader::load_chunks;
-use v_code_intel::loader::{DaemonBuildResult, DaemonHooks};
-
-/// Load or build call graph with daemon support.
+/// Load or build call graph (MIR edges → name-resolve fallback).
 pub fn load_or_build_graph(
     db: &std::path::Path,
 ) -> anyhow::Result<v_code_intel::graph::CallGraph> {
-    let hooks = DaemonHooks {
-        try_graph_build: daemon_try_graph_build,
-        spawn: daemon_spawn_and_wait,
-    };
-    v_code_intel::loader::load_or_build_graph(db, Some(&hooks))
+    v_code_intel::loader::load_or_build_graph(db)
 }
 
 /// Load or build call graph, also returning chunks if they were loaded.
-///
-/// Avoids double-loading chunks when the caller also needs them.
 pub fn load_or_build_graph_with_chunks(
     db: &std::path::Path,
 ) -> anyhow::Result<(v_code_intel::graph::CallGraph, Option<Vec<v_code_intel::parse::ParsedChunk>>)> {
-    let hooks = DaemonHooks {
-        try_graph_build: daemon_try_graph_build,
-        spawn: daemon_spawn_and_wait,
-    };
-    v_code_intel::loader::load_or_build_graph_with_chunks(db, Some(&hooks))
-}
-
-fn daemon_try_graph_build(db: &std::path::Path) -> DaemonBuildResult {
-    let Some(canonical) = db.canonicalize().ok() else {
-        return DaemonBuildResult::Unavailable;
-    };
-
-    // If daemon already built the graph (cached), use it immediately.
-    if let Some(g) = v_code_intel::graph::CallGraph::load(&canonical) {
-        return DaemonBuildResult::Ready(Box::new(g));
-    }
-
-    // Auto-start daemon if not running.
-    if !v_hnsw_storage::daemon_client::is_running() {
-        eprintln!("[graph] Daemon not running, starting...");
-        if !v_hnsw_storage::daemon_client::spawn_daemon_and_wait(&canonical) {
-            return DaemonBuildResult::Unavailable;
-        }
-        eprintln!("[graph] Daemon started");
-    }
-
-    // Blocking RPC — wait for daemon to build the graph (RA-based).
-    let Some(db_str) = canonical.to_str() else {
-        return DaemonBuildResult::Unavailable;
-    };
-    let params = serde_json::json!({"db": db_str});
-    eprintln!("[graph] Building graph via daemon (RA)...");
-    match v_hnsw_storage::daemon_client::daemon_rpc("graph/build", params, 300) {
-        Ok(_) => {
-            // Daemon saved graph.bin — load it.
-            if let Some(g) = v_code_intel::graph::CallGraph::load(&canonical) {
-                return DaemonBuildResult::Ready(Box::new(g));
-            }
-            DaemonBuildResult::Unavailable
-        }
-        Err(e) => {
-            eprintln!("[graph] Daemon graph/build failed: {e}");
-            DaemonBuildResult::Unavailable
-        }
-    }
-}
-
-fn daemon_spawn_and_wait(db: &std::path::Path) {
-    if !v_hnsw_storage::daemon_client::is_running() {
-        eprintln!("[graph] Starting daemon...");
-        v_hnsw_storage::daemon_client::spawn_daemon_and_wait(db);
-    }
+    v_code_intel::loader::load_or_build_graph_with_chunks(db)
 }
 
 pub use v_code_intel::parse::ParsedChunk;
