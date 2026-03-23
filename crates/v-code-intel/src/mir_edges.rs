@@ -125,6 +125,23 @@ pub fn run_mir_callgraph_for(
     crates: &[&str],
 ) -> Result<MirEdgeMap> {
     let out_dir = project_root.join("target").join("mir-edges");
+    // Clear existing output files before run (append mode in mir-callgraph)
+    if out_dir.exists() {
+        for entry in std::fs::read_dir(&out_dir).into_iter().flatten().flatten() {
+            let p = entry.path();
+            let name = p.to_string_lossy();
+            if name.ends_with(".edges.jsonl") || name.ends_with(".chunks.jsonl") {
+                // Only clear files for crates we're about to re-analyze
+                let should_clear = crates.is_empty() || crates.iter().any(|c| {
+                    let crate_underscore = c.replace('-', "_");
+                    name.contains(&crate_underscore)
+                });
+                if should_clear {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create MIR edge dir: {}", out_dir.display()))?;
 
@@ -199,6 +216,8 @@ pub struct MirChunk {
     pub signature: Option<String>,
     #[serde(default)]
     pub visibility: Option<String>,
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 /// Load MIR chunks from a JSONL file.

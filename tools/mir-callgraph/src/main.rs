@@ -37,6 +37,7 @@ struct MirChunk {
     end_line: usize,
     signature: Option<String>,
     visibility: String,
+    is_test: bool,
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────
@@ -150,6 +151,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
             end_line: end.line,
             signature: sig_str,
             visibility: vis,
+            is_test: false,
         });
     }
 
@@ -193,6 +195,12 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
 
             let vis = extract_visibility(tcx, def_id.to_def_id());
 
+            let is_test = caller_file.contains("/tests/")
+                || caller_file.contains("\\tests\\")
+                || caller_name.starts_with("test_")
+                || caller_name.contains("::test_")
+                || tcx.has_attr(def_id.to_def_id(), rustc_span::Symbol::intern("test"));
+
             chunks.push(MirChunk {
                 name: caller_name.clone(),
                 file: caller_file.clone(),
@@ -201,6 +209,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
                 end_line: end.line,
                 signature: sig_str,
                 visibility: vis,
+                is_test,
             });
         }
 
@@ -237,9 +246,9 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
     if let Some(dir) = &out_dir {
         use std::io::Write;
 
-        // Write edges
+        // Write edges — append mode so lib + test results merge
         let edge_path = format!("{dir}/{crate_name}.edges.jsonl");
-        if let Ok(file) = std::fs::File::create(&edge_path) {
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&edge_path) {
             let mut w = std::io::BufWriter::new(file);
             for edge in &edges {
                 if let Ok(s) = serde_json::to_string(edge) {
@@ -248,9 +257,9 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool) {
             }
         }
 
-        // Write chunks
+        // Write chunks — append mode
         let chunk_path = format!("{dir}/{crate_name}.chunks.jsonl");
-        if let Ok(file) = std::fs::File::create(&chunk_path) {
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&chunk_path) {
             let mut w = std::io::BufWriter::new(file);
             for chunk in &chunks {
                 if let Ok(s) = serde_json::to_string(chunk) {
@@ -308,6 +317,10 @@ fn main() {
             let mut full_args = vec![args[1].clone()];
             full_args.extend(rustc_args.iter().cloned());
 
+            // Enable parallel frontend for faster type checking
+            full_args.push("-Z".to_string());
+            full_args.push("threads=8".to_string());
+
             if !full_args.iter().any(|a| a.starts_with("--sysroot")) {
                 if let Ok(output) = Command::new(&args[1]).arg("--print").arg("sysroot").output() {
                     let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -339,6 +352,7 @@ fn main() {
     let mut cmd = Command::new("cargo");
     cmd.arg("+nightly")
         .arg("check")
+        .arg("--tests")
         .env("RUSTC_WRAPPER", &exe);
     if keep_going {
         cmd.arg("--keep-going");

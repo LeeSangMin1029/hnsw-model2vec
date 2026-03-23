@@ -512,7 +512,9 @@ pub fn chunk_from_mir(
                 let_call_bindings: Vec::new(),
                 field_accesses: Vec::new(),
                 enum_variants,
-                is_test: mc.name.starts_with("test_")
+                is_test: mc.is_test
+                    || mc.file.contains("/tests/") || mc.file.contains("\\tests\\")
+                    || mc.name.contains("::test_") || mc.name.starts_with("test_")
                     || chunk_lines
                         .first()
                         .is_some_and(|l| l.contains("#[test]") || l.contains("#[cfg(test)]")),
