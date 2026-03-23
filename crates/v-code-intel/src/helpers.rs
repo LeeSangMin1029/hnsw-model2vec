@@ -176,8 +176,9 @@ pub fn lines_str(c: &ParsedChunk) -> String {
 
 /// Extract crate name from file path: `crates/foo-bar/src/...` -> `foo-bar`.
 pub fn extract_crate_name(path: &str) -> String {
-    if let Some(start) = path.find("crates/") {
-        let rest = &path[start + 7..];
+    let normalized = path.replace('\\', "/");
+    if let Some(start) = normalized.find("crates/") {
+        let rest = &normalized[start + 7..];
         if let Some(slash) = rest.find('/') {
             return rest[..slash].to_owned();
         }
