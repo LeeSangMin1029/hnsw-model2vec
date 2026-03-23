@@ -121,14 +121,14 @@ impl<D: DistanceMetric> DistanceComputer for StoreDc<'_, D> {
 /// Top-level HNSW search using the graph's internal vector store.
 ///
 /// Returns up to `k` nearest neighbors sorted by ascending distance.
+/// Delegates to [`search_ext`] with the graph's own store.
 pub(crate) fn search<D: DistanceMetric>(
     graph: &HnswGraph<D>,
     query: &[f32],
     k: usize,
     ef: usize,
 ) -> v_hnsw_core::Result<Vec<(PointId, f32)>> {
-    search_with_store(&graph.nodes, &graph.store, &graph.distance, &graph.config,
-        graph.entry_point, graph.max_layer, query, k, ef)
+    search_ext(graph, &graph.store, query, k, ef)
 }
 
 /// Top-level HNSW search using an external vector store.

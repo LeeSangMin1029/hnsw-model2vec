@@ -270,7 +270,7 @@ fn label(pstore: &impl PayloadStore, id: u64) -> String {
 
 // ── Path alias helpers ───────────────────────────────────────────────────
 
-use v_code_intel::helpers::{apply_alias, build_path_aliases, print_legend};
+use v_code_intel::helpers::{apply_alias, build_path_aliases};
 use v_code_intel::parse::normalize_path;
 
 // ── File grouping ────────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ fn get_or_insert_idx<T>(
 fn group_by_file(
     ids: &[(u64, u64)],
     pstore: &impl PayloadStore,
-) -> (Vec<(String, Vec<GroupEntry>)>, Vec<(String, String)>) {
+) -> Vec<(String, Vec<GroupEntry>)> {
     let labels: Vec<(ChunkLabel, ChunkLabel)> = ids
         .iter()
         .map(|&(a, b)| (parse_label(pstore, a), parse_label(pstore, b)))
@@ -307,7 +307,7 @@ fn group_by_file(
         .collect();
 
     let refs: Vec<&str> = all_files.iter().map(String::as_str).collect();
-    let (alias_map, legend) = build_path_aliases(&refs);
+    let (alias_map, _) = build_path_aliases(&refs);
 
     let aliased: Vec<(String, String)> = all_files
         .chunks_exact(2)
@@ -333,7 +333,7 @@ fn group_by_file(
     }
 
     by_file.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-    (by_file, legend)
+    by_file
 }
 
 // ── Pair output (text / JSON) ────────────────────────────────────────────
@@ -350,7 +350,7 @@ fn print_pairs_text(
     println!("{} duplicate pairs found:\n", pairs.len());
 
     let ids: Vec<(u64, u64)> = pairs.iter().map(|p| (p.id_a(), p.id_b())).collect();
-    let (groups, legend) = group_by_file(&ids, pstore);
+    let groups = group_by_file(&ids, pstore);
 
     for (file, entries) in &groups {
         println!("  {file} ({} pairs)", entries.len());
@@ -370,8 +370,6 @@ fn print_pairs_text(
         }
         println!();
     }
-
-    print_legend(&legend);
 
     let db_name = db.file_name().and_then(|n| n.to_str()).unwrap_or("db");
     eprintln!("Tip: v-code context {db_name} <symbol>  to inspect.");
@@ -427,7 +425,7 @@ fn print_groups_text(groups: &[(u64, Vec<u64>)], pstore: &impl PayloadStore, db:
         .collect();
 
     let refs: Vec<&str> = all_files.iter().map(String::as_str).collect();
-    let (alias_map, legend) = build_path_aliases(&refs);
+    let (alias_map, _) = build_path_aliases(&refs);
 
     type FileGroup = (String, Vec<(usize, u64, String)>);
     let mut by_file: Vec<FileGroup> = Vec::new();
@@ -455,8 +453,6 @@ fn print_groups_text(groups: &[(u64, Vec<u64>)], pstore: &impl PayloadStore, db:
         }
         println!();
     }
-
-    print_legend(&legend);
 
     let db_name = db.file_name().and_then(|n| n.to_str()).unwrap_or("db");
     eprintln!("Tip: v-code context {db_name} <symbol>  to inspect.");
@@ -487,7 +483,7 @@ fn print_sub_block_text(clones: &[SubBlockClone], pstore: &impl PayloadStore) {
         .flat_map(|(a, b)| [normalize_path(&a.file), normalize_path(&b.file)])
         .collect();
     let refs: Vec<&str> = all_files.iter().map(String::as_str).collect();
-    let (alias_map, legend) = build_path_aliases(&refs);
+    let (alias_map, _) = build_path_aliases(&refs);
 
     for (i, c) in clones.iter().enumerate() {
         let file_a = apply_alias(&all_files[i * 2], &alias_map);
@@ -500,8 +496,6 @@ fn print_sub_block_text(clones: &[SubBlockClone], pstore: &impl PayloadStore) {
         println!("    {name_a}  ({file_a} {lines_a}) \u{2194} {name_b}  ({file_b} {lines_b}){body_tag}");
     }
     println!();
-
-    print_legend(&legend);
 }
 
 fn print_sub_block_json(clones: &[SubBlockClone], pstore: &impl PayloadStore) {

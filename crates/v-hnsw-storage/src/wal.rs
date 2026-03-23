@@ -92,30 +92,11 @@ impl Wal {
         })
     }
 
-    /// Append a record to the WAL.
+    /// Append a single record to the WAL.
     ///
-    /// Format: `[crc32:4][length:4][bincode_data:length]`
+    /// Delegates to [`Self::append_batch`] with a one-element slice.
     pub fn append(&mut self, record: &WalRecord) -> Result<()> {
-        let config = bincode::config::standard();
-        let data = bincode::encode_to_vec(record, config)
-            .map_err(|e| VhnswError::Wal(format!("bincode encode failed: {e}")))?;
-
-        let crc = crc32fast::hash(&data);
-        let length = data.len() as u32;
-
-        // Write CRC32, length, and data
-        self.writer
-            .write_all(&crc.to_le_bytes())
-            .map_err(|e| VhnswError::Wal(format!("failed to write CRC: {e}")))?;
-        self.writer
-            .write_all(&length.to_le_bytes())
-            .map_err(|e| VhnswError::Wal(format!("failed to write length: {e}")))?;
-        self.writer
-            .write_all(&data)
-            .map_err(|e| VhnswError::Wal(format!("failed to write data: {e}")))?;
-
-        self.records_since_checkpoint += 1;
-        Ok(())
+        self.append_batch(std::slice::from_ref(record))
     }
 
     /// Append multiple records in a single buffered write.

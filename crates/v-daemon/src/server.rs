@@ -44,9 +44,9 @@ pub fn run(
     // Keep `_lock_file` alive so the lock persists until shutdown.
     let _lock_file = lock_file;
 
-    // On Windows, create a Job Object so that all child processes (rust-analyzer,
-    // proc-macro-server) are automatically killed when the daemon exits — even
-    // on crashes where Drop destructors don't run.
+    // On Windows, create a Job Object so that all child processes are
+    // automatically killed when the daemon exits — even on crashes where
+    // Drop destructors don't run.
     #[cfg(windows)]
     let _job = setup_job_object();
 
@@ -57,9 +57,7 @@ pub fn run(
         .context("Database not found")?;
     let mut state = DaemonState::new(initial.as_deref())?;
 
-    // Bind port FIRST — OS backlog accepts connections while RA loads.
-    // Client connect() succeeds immediately, request waits in socket buffer.
-    // After RA loads, daemon accept()s and processes queued requests.
+    // Bind port — OS backlog accepts connections immediately.
     let listener = match TcpListener::bind(format!("127.0.0.1:{port}")) {
         Ok(l) => l,
         Err(_) if crate::client::is_running() => {
@@ -80,19 +78,6 @@ pub fn run(
         eprintln!("[daemon] Persistent mode (no idle timeout)");
     } else {
         eprintln!("[daemon] Idle timeout: {timeout_secs}s");
-    }
-
-    // Load RA (blocks, but client connections queue in OS backlog).
-    #[cfg(feature = "ra")]
-    {
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match v_lsp::instance::RaInstance::spawn(&workspace_root) {
-            Ok(ra) => {
-                eprintln!("[daemon] RA instance loaded");
-                state.ra = Some(ra);
-            }
-            Err(e) => eprintln!("[daemon] RA spawn failed: {e}"),
-        }
     }
 
     eprintln!("[daemon] Ready");
@@ -123,33 +108,11 @@ pub fn run(
         state.maybe_unload_model();
         state.maybe_evict_databases();
 
-        // Poll file watcher for source changes → update RA + invalidate graph cache.
+        // Poll file watcher for source changes → invalidate graph cache.
         if let Some(ref mut w) = watcher {
             let changed = w.poll_changes();
             if !changed.is_empty() {
                 eprintln!("[watcher] {} file(s) changed", changed.len());
-                #[cfg(feature = "ra")]
-                if let Some(ref mut ra) = state.ra {
-                    let updates: Vec<(String, String)> = changed.iter()
-                        .filter_map(|path| {
-                            let content = std::fs::read_to_string(path).ok()?;
-                            let abs = path.canonicalize().unwrap_or_else(|_| path.clone());
-                            let abs_str = v_hnsw_core::strip_unc_prefix(&abs.to_string_lossy())
-                                .replace('\\', "/");
-                            let root = ra.workspace_root().to_string_lossy().replace('\\', "/");
-                            let root = v_hnsw_core::strip_unc_prefix(&root);
-                            let rel = abs_str.strip_prefix(root)
-                                .and_then(|s| s.strip_prefix('/'))
-                                .unwrap_or(&abs_str);
-                            Some((rel.to_owned(), content))
-                        })
-                        .collect();
-                    if !updates.is_empty() {
-                        eprintln!("[watcher] updating {} file(s) in RA...", updates.len());
-                        let n = ra.update_files(&updates);
-                        eprintln!("[watcher] RA update done ({n} files)");
-                    }
-                }
                 w.invalidate_graph_cache();
             }
         }
@@ -269,7 +232,7 @@ fn spawn_background(db_path: Option<&Path>, port: u16, timeout_secs: u64) -> Res
 
 /// Create a Windows Job Object with `KILL_ON_JOB_CLOSE` and assign the
 /// current process to it. When the daemon exits (including crashes), the
-/// OS automatically terminates all child processes (rust-analyzer, etc.).
+/// OS automatically terminates all child processes.
 ///
 /// Returns the job handle wrapped in a struct that closes it on drop.
 /// If Job Object creation fails, returns `None` — the daemon still runs,

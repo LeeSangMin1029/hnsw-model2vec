@@ -74,12 +74,6 @@ zstd = "0.13"
 clap = { version = "4", features = ["derive"] }
 
 
-# rust-analyzer as library (in-process type inference in v-lsp)
-ra_ap_ide = "0.0.324"
-ra_ap_load-cargo = "0.0.324"
-ra_ap_vfs = "0.0.324"
-ra_ap_project_model = "0.0.324"
-
 # Dev dependencies
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }

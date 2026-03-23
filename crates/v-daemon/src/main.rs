@@ -1,7 +1,7 @@
 //! v-daemon — Unified daemon for document search (v-hnsw) and code intelligence (v-code).
 //!
 //! Runs a single persistent daemon that handles both document and code requests,
-//! keeping the embedding model and LSP server (rust-analyzer) resident in memory.
+//! keeping the embedding model resident in memory.
 
 use std::path::PathBuf;
 

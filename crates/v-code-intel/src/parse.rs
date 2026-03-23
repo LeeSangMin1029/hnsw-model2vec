@@ -292,9 +292,18 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
     })
 }
 
-/// Normalize Windows backslashes and strip leading `.\` for display.
+/// Normalize Windows backslashes, strip leading `.\`, and reduce absolute
+/// paths to project-relative form (anchored at `crates/` or `src/`).
 pub fn normalize_path(p: &str) -> String {
     let s = p.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
-    s.to_owned()
+    // Strip absolute prefix (e.g. `//?/D:/hnsw-model2vec/`) by finding the
+    // project-relative anchor.
+    if let Some(idx) = s.find("crates/") {
+        s[idx..].to_owned()
+    } else if let Some(idx) = s.find("src/") {
+        s[idx..].to_owned()
+    } else {
+        s.to_owned()
+    }
 }

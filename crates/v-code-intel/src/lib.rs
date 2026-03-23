@@ -24,11 +24,7 @@ pub mod loader;
 pub mod parse;
 pub mod reason;
 pub mod stats;
-#[cfg(feature = "ra")]
-pub mod lsp_client;
 pub mod mir_edges;
-#[cfg(feature = "ra")]
-pub mod ra_direct;
 pub mod trace;
 
 #[cfg(test)]

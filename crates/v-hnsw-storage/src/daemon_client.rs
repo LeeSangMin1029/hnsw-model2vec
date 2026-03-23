@@ -152,12 +152,9 @@ pub fn notify_reload(db_path: &Path) -> Result<()> {
     }
 }
 
-/// Spawn daemon and wait until ready (max 10s).
+/// Spawn daemon if not running and wait until ready.
 ///
 /// Returns `true` if the daemon became reachable within the deadline.
-/// Spawn daemon in background. Port opens immediately, RA loads async.
-/// Spawn daemon if not running. Returns immediately.
-/// Daemon loads RA then opens port — `daemon_rpc` will wait for connection.
 pub fn spawn_daemon_and_wait(db: &Path) -> bool {
     if is_running() { return true; }
     spawn_daemon(db);
