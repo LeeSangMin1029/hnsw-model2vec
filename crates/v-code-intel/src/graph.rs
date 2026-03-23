@@ -64,10 +64,6 @@ pub struct CallGraph {
     pub is_test: Vec<bool>,
     pub trait_impls: Vec<Vec<u32>>,
     pub call_sites: Vec<Vec<(u32, u32)>>,
-    pub string_args: Vec<Vec<(String, String, u32, u8)>>,
-    pub string_index: Vec<(String, Vec<(u32, u32)>)>,
-    #[expect(clippy::type_complexity, reason = "tuple layout mirrors string_args")]
-    pub param_flows: Vec<Vec<(String, u8, String, u8, u32)>>,
     pub field_access_index: Vec<(String, Vec<u32>)>,
 }
 
@@ -122,9 +118,6 @@ impl CallGraph {
             || index_tables::build_trait_impls(&names, &kinds, &index.exact, &index.short),
             || index_tables::build_field_access_index(chunks, &owner_field_types),
         );
-        let string_index = index_tables::build_string_index(chunks);
-        let param_flows: Vec<Vec<(String, u8, String, u8, u32)>> = chunks.iter().map(|c| c.param_flows.clone()).collect();
-        let string_args: Vec<Vec<(String, String, u32, u8)>> = chunks.iter().map(|c| c.string_args.clone()).collect();
         eprintln!("      [graph] assemble: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
 
         Self {
@@ -134,7 +127,6 @@ impl CallGraph {
             callees: adj.callees, callers: adj.callers,
             is_test, trait_impls,
             call_sites: adj.call_sites,
-            string_args, string_index, param_flows,
             field_access_index,
         }
     }
@@ -170,12 +162,6 @@ impl CallGraph {
         self.field_access_index[start..].iter()
             .take_while(|(k, _)| k.starts_with(&prefix))
             .map(|(k, v)| (&k[prefix.len()..], v.as_slice())).collect()
-    }
-
-    pub fn find_string(&self, value: &str) -> Vec<(u32, u32)> {
-        let lower = value.to_lowercase();
-        self.string_index.binary_search_by_key(&&*lower, |(k, _)| k.as_str())
-            .ok().map(|i| self.string_index[i].1.clone()).unwrap_or_default()
     }
 
     // ── Persistence ─────────────────────────────────────────────────

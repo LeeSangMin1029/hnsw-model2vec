@@ -18,18 +18,7 @@ pub(crate) fn collect_owner_field_types(chunks: &[ParsedChunk]) -> HashMap<Strin
     result
 }
 
-// ── String / field access indexes ───────────────────────────────────
-
-/// Build sorted index: lowercase string value → [(chunk_idx, line)].
-pub(crate) fn build_string_index(chunks: &[ParsedChunk]) -> Vec<(String, Vec<(u32, u32)>)> {
-    let mut map: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
-    for (idx, c) in chunks.iter().enumerate() {
-        for (_, value, line, _) in &c.string_args {
-            map.entry(value.to_lowercase()).or_default().push((idx as u32, *line));
-        }
-    }
-    map.into_iter().collect()
-}
+// ── Field access index ──────────────────────────────────────────────
 
 /// Build field access index: `type::field` → chunk indices.
 pub(crate) fn build_field_access_index(

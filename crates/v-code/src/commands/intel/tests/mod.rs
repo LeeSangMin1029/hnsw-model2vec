@@ -1,5 +1,4 @@
 mod helpers;
-mod deps;
 mod detail;
 mod graph;
 mod impact;

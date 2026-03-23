@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::index_tables::{self, strip_generics_from_key};
+use crate::index_tables::strip_generics_from_key;
 use crate::mir_edges::MirEdgeMap;
 use crate::parse::ParsedChunk;
 
@@ -269,24 +269,3 @@ fn extract_type_method(mir_name: &str) -> &str {
     }
 }
 
-fn callee_matches_call(callee: &str, call: &str) -> bool {
-    callee == call || callee.ends_with(&format!("::{call}"))
-        || extract_type_method(callee) == call
-}
-
-fn find_mir_caller<'a>(
-    mir_edges: &'a MirEdgeMap,
-    chunk_name_lower: &str,
-) -> Option<&'a [(String, usize)]> {
-    if let Some(v) = mir_edges.by_caller.get(chunk_name_lower) {
-        return Some(v.as_slice());
-    }
-    for (caller, edges) in &mir_edges.by_caller {
-        let caller_lower = caller.to_lowercase();
-        let suffix = extract_type_method(&caller_lower);
-        if suffix == chunk_name_lower || caller_lower.ends_with(&format!("::{chunk_name_lower}")) {
-            return Some(edges.as_slice());
-        }
-    }
-    None
-}

@@ -7,7 +7,6 @@
 //! These commands are read-only and do not modify the database.
 
 mod commands;
-pub mod deps;
 pub mod detail;
 
 #[cfg(test)]
@@ -17,7 +16,7 @@ use std::collections::BTreeMap;
 
 // ── Re-exports: CLI command handlers ─────────────────────────────────────
 
-pub use commands::{run_aliases, run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_strings, run_flow, run_coverage};
+pub use commands::{run_aliases, run_stats, run_symbols, run_context, run_blast, run_jump, run_trace, run_coverage};
 
 // ── Re-exports: library types for submodules and external consumers ──────
 

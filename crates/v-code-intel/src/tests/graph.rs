@@ -288,23 +288,6 @@ fn resolve_nonexistent_returns_empty() {
     assert!(g.resolve("nonexistent").is_empty());
 }
 
-// ── find_string ──────────────────────────────────────────────────────
-
-#[test]
-fn find_string_matches_literal() {
-    let mut c = chunk("process", "src/lib.rs", &[]);
-    c.string_args = vec![("callee".to_owned(), "hello".to_owned(), 5, 0)];
-    let g = CallGraph::build(&[c]);
-    let results = g.find_string("hello");
-    assert!(!results.is_empty());
-}
-
-#[test]
-fn find_string_no_match() {
-    let g = CallGraph::build(&[chunk("foo", "src/lib.rs", &[])]);
-    assert!(g.find_string("nonexistent").is_empty());
-}
-
 // ── Utility tests ────────────────────────────────────────────────────
 
 use crate::index_tables::{extract_leaf_type, extract_generic_bounds, owning_type, is_test_path};

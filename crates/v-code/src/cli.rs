@@ -58,16 +58,6 @@ pub enum Commands {
         #[arg(long)]
         include_tests: bool,
     },
-    /// Show file-level dependency graph from code chunks.
-    Deps {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Show dependencies for a specific file only (suffix match).
-        file: Option<String>,
-        /// Transitive dependency depth (default: 1 = direct only).
-        #[arg(long, default_value = "1")]
-        depth: usize,
-    },
     /// Show blast radius of changing a symbol (transitive callers + summary).
     #[command(visible_alias = "bl")]
     Blast {
@@ -211,28 +201,6 @@ pub enum Commands {
         /// Filter by file path suffix (e.g. "add.rs" or "commands/intel").
         #[arg(long)]
         file: Option<String>,
-    },
-    /// Search string literal arguments across all chunks.
-    #[command(visible_alias = "str")]
-    Strings {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// String value to search (substring match, case-insensitive).
-        query: String,
-        /// Filter by callee function name (substring match).
-        #[arg(long)]
-        callee: Option<String>,
-    },
-    /// Trace interprocedural string flow through wrapper functions.
-    #[command(visible_alias = "fl")]
-    Flow {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// String value to trace (substring match, case-insensitive).
-        query: String,
-        /// Max depth to follow parameter flows (default: 3).
-        #[arg(long, default_value = "3")]
-        depth: u32,
     },
     /// Add/update code files in the database (auto-incremental).
     Add {

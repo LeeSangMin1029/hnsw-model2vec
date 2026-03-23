@@ -52,9 +52,6 @@ fn run() -> anyhow::Result<()> {
         Commands::Context { db, symbol, depth, source, include_tests } => {
             intel::run_context(db, symbol, depth, source, include_tests)
         }
-        Commands::Deps { db, file, depth } => {
-            intel::deps::run_deps(db, file, depth)
-        }
         Commands::Blast { db, symbol, depth, include_tests } => {
             intel::run_blast(db, symbol, depth, include_tests)
         }
@@ -80,8 +77,6 @@ fn run() -> anyhow::Result<()> {
         }
         Commands::Stats { db } => intel::run_stats(db),
         Commands::Coverage { db, depth, file } => intel::run_coverage(db, depth, file),
-        Commands::Strings { db, query, callee } => intel::run_strings(db, query, callee),
-        Commands::Flow { db, query, depth } => intel::run_flow(db, query, depth),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
         Commands::Embed { db } => commands::embed::run(db),
         Commands::Replace { db, symbol, file, body, body_file } => {
