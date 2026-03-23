@@ -325,6 +325,109 @@ pub fn load_all_mir_chunks(dir: &Path) -> Result<Vec<MirChunk>> {
     Ok(all)
 }
 
+/// Detect workspace crates whose `.edges.jsonl` files are missing from the MIR output dir.
+///
+/// Reads the root `Cargo.toml` `[workspace] members` list, extracts each member's
+/// package name, then checks if `target/mir-edges/{crate_name}.edges.jsonl` exists.
+/// Returns the names of crates with missing edge files.
+pub fn detect_missing_edge_crates(project_root: &Path) -> Vec<String> {
+    let edge_dir = project_root.join("target").join("mir-edges");
+    let workspace_toml = project_root.join("Cargo.toml");
+
+    let content = match std::fs::read_to_string(&workspace_toml) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    // Parse workspace members from root Cargo.toml
+    let member_dirs = parse_workspace_members(&content);
+
+    let mut missing = Vec::new();
+    for member_dir in &member_dirs {
+        let member_toml = project_root.join(member_dir).join("Cargo.toml");
+        let pkg_name = match std::fs::read_to_string(&member_toml) {
+            Ok(c) => extract_package_name(&c),
+            Err(_) => continue,
+        };
+        let Some(name) = pkg_name else { continue };
+
+        // Check if this crate has any .rs source files (skip non-Rust crates)
+        let src_dir = project_root.join(member_dir).join("src");
+        if !src_dir.exists() {
+            continue;
+        }
+
+        // Edge file uses underscores (crate name convention)
+        let edge_file = edge_dir.join(format!("{}.edges.jsonl", name.replace('-', "_")));
+        if !edge_file.exists() {
+            missing.push(name);
+        }
+    }
+    missing
+}
+
+/// Parse `[workspace] members = [...]` from a Cargo.toml string.
+fn parse_workspace_members(content: &str) -> Vec<String> {
+    let mut members = Vec::new();
+    let mut in_members = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("members") && trimmed.contains('[') {
+            in_members = true;
+            // Handle inline items on the same line as `members = [`
+            for part in trimmed.split('[').nth(1).into_iter() {
+                for item in part.split(']').next().into_iter() {
+                    for entry in item.split(',') {
+                        let entry = entry.trim().trim_matches('"').trim();
+                        if !entry.is_empty() {
+                            members.push(entry.to_owned());
+                        }
+                    }
+                }
+            }
+            if trimmed.contains(']') {
+                in_members = false;
+            }
+            continue;
+        }
+        if in_members {
+            if trimmed.contains(']') {
+                // Last line of the array
+                let before_bracket = trimmed.split(']').next().unwrap_or("");
+                let entry = before_bracket.trim().trim_matches(',').trim().trim_matches('"').trim();
+                if !entry.is_empty() {
+                    members.push(entry.to_owned());
+                }
+                in_members = false;
+                continue;
+            }
+            // Strip comments
+            let no_comment = trimmed.split('#').next().unwrap_or(trimmed);
+            let entry = no_comment.trim().trim_matches(',').trim().trim_matches('"').trim();
+            if !entry.is_empty() {
+                members.push(entry.to_owned());
+            }
+        }
+    }
+    members
+}
+
+/// Extract `name = "..."` from the `[package]` section of a Cargo.toml.
+fn extract_package_name(content: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if in_package && trimmed.starts_with("name") {
+            return trimmed.split('"').nth(1).map(|s| s.to_owned());
+        }
+    }
+    None
+}
+
 /// Normalize a file path for consistent lookup.
 fn normalize_path(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()

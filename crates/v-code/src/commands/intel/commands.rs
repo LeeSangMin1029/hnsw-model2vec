@@ -593,6 +593,7 @@ pub fn run_coverage(
     db: PathBuf,
     depth: u32,
     file_filter: Option<String>,
+    refresh: bool,
 ) -> Result<()> {
     use std::collections::BTreeMap;
     use v_code_intel::bfs::test_reachability_counts;
@@ -605,46 +606,92 @@ pub fn run_coverage(
     let test_counts = test_reachability_counts(&graph, depth);
 
     // Try llvm-cov first (actual execution-based coverage)
-    let llvm_cov_result = run_llvm_cov(&db);
+    let llvm_cov_result = run_llvm_cov(&db, refresh);
 
     if let Some(cov) = llvm_cov_result {
-        // ── llvm-cov succeeded: show actual coverage + unreached functions ──
+        // ── llvm-cov succeeded: show per-crate summary + totals ──
         println!("=== test coverage (cargo llvm-cov) ===\n");
-        println!("  functions: {}/{} ({:.1}%)", cov.fn_covered, cov.fn_total, cov.fn_percent);
-        println!("  lines:     {}/{} ({:.1}%)", cov.line_covered, cov.line_total, cov.line_percent);
+
+        // Aggregate file-level data into per-crate buckets
+        let mut crate_cov: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
+        for fc in &cov.files {
+            let crate_name = extract_crate_name(&fc.filename);
+            let entry = crate_cov.entry(crate_name).or_default();
+            entry.0 += fc.fn_total;
+            entry.1 += fc.fn_covered;
+            entry.2 += fc.line_total;
+            entry.3 += fc.line_covered;
+        }
+
+        println!(
+            "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
+            "crate", "prod_fn", "covered", "fn_cov", "lines", "ln_cov", "ln_%"
+        );
+        println!("{}", "-".repeat(84));
+
+        for (name, (fn_t, fn_c, ln_t, ln_c)) in &crate_cov {
+            let fn_pct = if *fn_t > 0 {
+                format!("{:.1}%", *fn_c as f64 / *fn_t as f64 * 100.0)
+            } else {
+                "N/A".to_owned()
+            };
+            let ln_pct = if *ln_t > 0 {
+                format!("{:.1}%", *ln_c as f64 / *ln_t as f64 * 100.0)
+            } else {
+                "N/A".to_owned()
+            };
+            println!(
+                "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
+                name, fn_t, fn_c, fn_pct, ln_t, ln_c, ln_pct
+            );
+        }
+
+        println!("{}", "-".repeat(84));
+        println!(
+            "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
+            "total",
+            cov.fn_total,
+            cov.fn_covered,
+            format!("{:.1}%", cov.fn_percent),
+            cov.line_total,
+            cov.line_covered,
+            format!("{:.1}%", cov.line_percent),
+        );
         println!();
 
-        // Show functions with no test call path from static analysis
-        let unreached: Vec<usize> = (0..n)
-            .filter(|&i| {
-                if graph.is_test[i] || graph.kinds[i] != "function" {
-                    return false;
-                }
-                if is_derive_generated(&graph.names[i]) {
-                    return false;
-                }
-                if let Some(ref filter) = file_filter {
-                    if !graph.files[i].contains(filter.as_str()) {
+        // Show untested functions only when --file filter is active
+        if file_filter.is_some() {
+            let unreached: Vec<usize> = (0..n)
+                .filter(|&i| {
+                    if graph.is_test[i] || graph.kinds[i] != "function" {
                         return false;
                     }
-                }
-                test_counts[i] == 0
-            })
-            .collect();
+                    if is_derive_generated(&graph.names[i]) {
+                        return false;
+                    }
+                    if let Some(ref filter) = file_filter {
+                        if !graph.files[i].contains(filter.as_str()) {
+                            return false;
+                        }
+                    }
+                    test_counts[i] == 0
+                })
+                .collect();
 
-        if !unreached.is_empty() {
-            let (alias_map, _) = graph.global_aliases();
-            println!("--- {} functions with no test call path ---\n", unreached.len());
-            for &i in unreached.iter().take(30) {
-                let loc = format_lines_opt(graph.lines[i]);
-                let rel = super::relative_path(&graph.files[i]);
-                let short = v_code_intel::helpers::apply_alias(rel, &alias_map);
-                println!("  {short}{loc}  {}", graph.names[i]);
+            if !unreached.is_empty() {
+                let (alias_map, _) = graph.global_aliases();
+                println!("--- {} functions with no test call path ---\n", unreached.len());
+                for &i in unreached.iter().take(30) {
+                    let loc = format_lines_opt(graph.lines[i]);
+                    let rel = super::relative_path(&graph.files[i]);
+                    let short = v_code_intel::helpers::apply_alias(rel, &alias_map);
+                    println!("  {short}{loc}  {}", graph.names[i]);
+                }
+                if unreached.len() > 30 {
+                    println!("  ... and {} more", unreached.len() - 30);
+                }
+                println!();
             }
-            if unreached.len() > 30 {
-                println!("  ... and {} more", unreached.len() - 30);
-            }
-            println!();
         }
     } else {
         // ── Fallback: static reachability (no llvm-cov available) ──
@@ -757,31 +804,83 @@ struct LlvmCovResult {
     line_total: usize,
     line_covered: usize,
     line_percent: f64,
+    /// Per-file coverage data extracted from llvm-cov JSON.
+    files: Vec<LlvmFileCov>,
+}
+
+struct LlvmFileCov {
+    filename: String,
+    fn_total: usize,
+    fn_covered: usize,
+    line_total: usize,
+    line_covered: usize,
 }
 
 /// Run `cargo llvm-cov --json --ignore-run-fail` and parse totals.
+/// Results are cached to `<db>/cache/llvm_cov.json`; use `refresh` to force re-run.
 /// Returns `None` if the tool is not installed or the command fails.
-fn run_llvm_cov(db: &Path) -> Option<LlvmCovResult> {
-    let project_root = db.parent()?;
+fn run_llvm_cov(db: &Path, refresh: bool) -> Option<LlvmCovResult> {
+    let cache_path = db.join("cache").join("llvm_cov.json");
 
-    let output = std::process::Command::new("cargo")
-        .arg("llvm-cov")
-        .arg("--json")
-        .arg("--ignore-run-fail")
-        .current_dir(project_root)
-        .output()
-        .ok()?;
+    let raw_json: serde_json::Value = if !refresh && cache_path.exists() {
+        eprintln!("  [coverage] using cached {}", cache_path.display());
+        let bytes = std::fs::read(&cache_path).ok()?;
+        serde_json::from_slice(&bytes).ok()?
+    } else {
+        let project_root = db.parent()?;
+        eprintln!("  [coverage] running cargo llvm-cov --json ...");
 
-    if !output.status.success() {
-        return None;
-    }
+        let output = std::process::Command::new("cargo")
+            .arg("llvm-cov")
+            .arg("--json")
+            .arg("--ignore-run-fail")
+            .current_dir(project_root)
+            .output()
+            .ok()?;
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+
+        // Cache the raw JSON
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&cache_path, &output.stdout);
+        eprintln!("  [coverage] cached to {}", cache_path.display());
+
+        json
+    };
+
+    parse_llvm_cov_json(&raw_json)
+}
+
+/// Parse the llvm-cov JSON into our result type (totals + per-file).
+fn parse_llvm_cov_json(json: &serde_json::Value) -> Option<LlvmCovResult> {
     let data = json.get("data")?.get(0)?;
     let totals = data.get("totals")?;
 
     let functions = totals.get("functions")?;
     let lines = totals.get("lines")?;
+
+    let mut files = Vec::new();
+    if let Some(file_array) = data.get("files").and_then(|f| f.as_array()) {
+        for entry in file_array {
+            let filename = entry.get("filename")?.as_str()?.to_owned();
+            let summary = entry.get("summary")?;
+            let f = summary.get("functions")?;
+            let l = summary.get("lines")?;
+            files.push(LlvmFileCov {
+                filename,
+                fn_total: f.get("count")?.as_u64()? as usize,
+                fn_covered: f.get("covered")?.as_u64()? as usize,
+                line_total: l.get("count")?.as_u64()? as usize,
+                line_covered: l.get("covered")?.as_u64()? as usize,
+            });
+        }
+    }
 
     Some(LlvmCovResult {
         fn_total: functions.get("count")?.as_u64()? as usize,
@@ -790,6 +889,7 @@ fn run_llvm_cov(db: &Path) -> Option<LlvmCovResult> {
         line_total: lines.get("count")?.as_u64()? as usize,
         line_covered: lines.get("covered")?.as_u64()? as usize,
         line_percent: lines.get("percent")?.as_f64()?,
+        files,
     })
 }
 

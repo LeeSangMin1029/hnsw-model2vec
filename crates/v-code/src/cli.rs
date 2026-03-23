@@ -154,6 +154,9 @@ pub enum Commands {
         /// Filter by file path suffix (e.g. "add.rs" or "commands/intel").
         #[arg(long)]
         file: Option<String>,
+        /// Force re-run llvm-cov (ignore cache).
+        #[arg(long)]
+        refresh: bool,
     },
     /// Add/update code files in the database (auto-incremental).
     Add {

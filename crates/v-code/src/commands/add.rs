@@ -135,7 +135,19 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
                 file_idx.get_file(&source).is_some()
             })
             .collect();
-        let changed_crates = v_code_intel::mir_edges::detect_changed_crates(&input_path, &rust_changed);
+        let mut changed_crates = v_code_intel::mir_edges::detect_changed_crates(&input_path, &rust_changed);
+
+        // Integrity check: add crates whose edge files are missing
+        let missing = v_code_intel::mir_edges::detect_missing_edge_crates(&input_path);
+        if !missing.is_empty() {
+            eprintln!("  [mir] missing edge files for: {}", missing.join(", "));
+            for m in missing {
+                if !changed_crates.contains(&m) {
+                    changed_crates.push(m);
+                }
+            }
+        }
+
         if !changed_crates.is_empty() {
             let crate_refs: Vec<&str> = changed_crates.iter().map(|s| s.as_str()).collect();
             eprintln!("  [mir] incremental: {} crate(s) — {}", crate_refs.len(), crate_refs.join(", "));
