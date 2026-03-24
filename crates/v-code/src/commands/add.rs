@@ -295,6 +295,12 @@ fn prebuild_caches(
                 kept += 1;
             }
         }
+        // Sort by (file, start_line) for deterministic chunk order.
+        // Edge caches use chunk indices — unstable order breaks cached edges.
+        chunks.sort_by(|a, b| {
+            a.file.cmp(&b.file).then_with(|| a.lines.cmp(&b.lines))
+        });
+
         if kept > 0 || replaced > 0 {
             eprintln!("    [merge] kept={kept}, replaced={replaced}");
         }
