@@ -306,7 +306,13 @@ pub fn run_mir_callgraph_for(
                 // Only clear files for crates we're about to re-analyze
                 let should_clear = crates.is_empty() || crates.iter().any(|c| {
                     let crate_underscore = c.replace('-', "_");
-                    name.contains(&crate_underscore)
+                    // Match exact crate name in filename: "{crate}.edges.jsonl"
+                    // Avoid substring match (e.g. "v_code" matching "v_code_intel")
+                    let file_stem = p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.strip_suffix(".edges").or_else(|| s.strip_suffix(".chunks")))
+                        .unwrap_or("");
+                    file_stem == crate_underscore
                 });
                 if should_clear {
                     let _ = std::fs::remove_file(&p);
@@ -380,24 +386,37 @@ pub fn run_mir_direct(
         }
     }
 
-    // If any crate is missing from cache, fall back entirely
+    // If some crates are missing from cache, run them via cargo; run the rest direct.
     if !missing_crates.is_empty() {
         eprintln!(
-            "  [mir] missing rustc-args for: {} — falling back to cargo",
+            "  [mir] missing rustc-args for: {} — running via cargo",
             missing_crates.join(", ")
         );
-        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+        run_mir_callgraph_for(project_root, mir_callgraph_bin, &missing_crates)?;
     }
 
-    // Clear existing output files for the crates we're about to re-analyze
+    // Direct mode for crates with cached args
+    if args_files.is_empty() {
+        return MirEdgeMap::from_dir(&out_dir);
+    }
+
+    // Clear existing output files for the crates we're about to re-analyze (direct)
+    let direct_crates: Vec<&str> = crates.iter()
+        .filter(|c| !missing_crates.contains(c))
+        .copied()
+        .collect();
     if out_dir.exists() {
         for entry in std::fs::read_dir(&out_dir).into_iter().flatten().flatten() {
             let p = entry.path();
-            let name = p.to_string_lossy();
-            if name.ends_with(".edges.jsonl") || name.ends_with(".chunks.jsonl") {
-                let should_clear = crates.iter().any(|c| {
+            let fname = p.to_string_lossy();
+            if fname.ends_with(".edges.jsonl") || fname.ends_with(".chunks.jsonl") {
+                let should_clear = direct_crates.iter().any(|c| {
                     let crate_underscore = c.replace('-', "_");
-                    name.contains(&crate_underscore)
+                    let file_stem = p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.strip_suffix(".edges").or_else(|| s.strip_suffix(".chunks")))
+                        .unwrap_or("");
+                    file_stem == crate_underscore
                 });
                 if should_clear {
                     let _ = std::fs::remove_file(&p);
@@ -423,7 +442,7 @@ pub fn run_mir_direct(
 
     if !status.success() {
         eprintln!("  [mir] mir-callgraph --direct exited with {status}, falling back to cargo");
-        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+        return run_mir_callgraph_for(project_root, mir_callgraph_bin, &direct_crates);
     }
 
     // Run language-specific extractors (Python, TypeScript)

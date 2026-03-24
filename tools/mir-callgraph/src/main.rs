@@ -463,6 +463,22 @@ fn main() {
 
             eprintln!("[mir-callgraph] direct: compiling crate '{}'", cached.crate_name);
 
+            // Set CARGO_PKG_* env vars that cargo normally provides.
+            // Without these, proc macros like clap's `#[command(author)]` fail.
+            for (key, default) in [
+                ("CARGO_PKG_AUTHORS", ""),
+                ("CARGO_PKG_NAME", cached.crate_name.as_str()),
+                ("CARGO_PKG_VERSION", "0.0.0"),
+                ("CARGO_PKG_DESCRIPTION", ""),
+                ("CARGO_PKG_HOMEPAGE", ""),
+                ("CARGO_PKG_REPOSITORY", ""),
+            ] {
+                if env::var(key).is_err() {
+                    // SAFETY: single-threaded at this point (before rustc_driver).
+                    unsafe { env::set_var(key, default); }
+                }
+            }
+
             let is_test_target = cached.args.iter().any(|a| a == "--test");
             let mut callbacks = MirCallbacks { json, is_test_target };
             rustc_driver::run_compiler(&cached.args, &mut callbacks);
