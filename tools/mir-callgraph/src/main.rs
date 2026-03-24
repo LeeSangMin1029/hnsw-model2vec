@@ -307,8 +307,7 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
         // Write edges: truncate on lib build (first), append on test build (second).
         // This way only crates actually rebuilt get fresh files; skipped crates keep their files.
         let edge_path = format!("{dir}/{crate_name}.edges.jsonl");
-        let is_test_build = args.iter().any(|a| a == "--test")
-            || rustc_args.iter().any(|a| a == "--test");
+        let is_test_build = is_test_target;
         let file_result = if is_test_build {
             std::fs::OpenOptions::new().create(true).append(true).open(&edge_path)
         } else {

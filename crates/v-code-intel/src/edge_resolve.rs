@@ -125,14 +125,17 @@ pub(crate) struct EdgeCacheBundle {
     pub crates: Vec<(String, CrateEdgeCache)>,
 }
 
-/// Compute a fingerprint of chunk ordering.
+/// Compute a fingerprint of chunk identity (file + name).
+///
+/// Excludes `lines` so that body-only edits (which shift line numbers)
+/// don't invalidate the cache. Only function add/remove/rename changes the hash.
 fn compute_chunks_hash(chunks: &[ParsedChunk]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     chunks.len().hash(&mut hasher);
     for c in chunks {
         c.file.hash(&mut hasher);
-        c.lines.hash(&mut hasher);
+        c.name.hash(&mut hasher);
     }
     hasher.finish()
 }

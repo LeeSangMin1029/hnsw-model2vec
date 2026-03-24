@@ -195,8 +195,24 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         t1.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
 
-    // === Remove chunks from deleted files ===
+    // === Record mtime for scanned files with 0 chunks (avoid re-detection) ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
+    for f in &code_files {
+        let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
+        if !file_metadata_map.contains_key(&source) {
+            if let Some(mtime) = get_file_mtime(f) {
+                let size = file_index::get_file_size(f).unwrap_or(0);
+                let existing_chunk_ids = file_idx
+                    .get_file(&source)
+                    .map(|e| e.chunk_ids.clone())
+                    .unwrap_or_default();
+                file_idx.update_file(source, mtime, size, existing_chunk_ids);
+            }
+        }
+    }
+    file_index::save_file_index(&db_path, &file_idx)?;
+
+    // === Remove chunks from deleted files ===
     let deleted: Vec<String> = file_idx.files.keys()
         .filter(|p| !current_sources.contains(p.as_str()))
         .cloned()
@@ -297,7 +313,8 @@ fn prebuild_caches(
         .collect();
 
     // Merge: keep existing chunks from unchanged files, skip deleted files.
-    if let Ok(existing) = v_code_intel::loader::load_chunks(db_path) {
+    // Use cache-only load (no mtime check) to avoid DB reload after direct_bulk_write.
+    if let Some(existing) = v_code_intel::loader::load_chunks_from_cache(db_path) {
         let mut kept = 0;
         let mut replaced = 0;
         for c in existing {

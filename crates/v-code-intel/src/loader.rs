@@ -88,6 +88,22 @@ pub fn save_chunks_cache(path: &Path, chunks: &[ParsedChunk]) {
     }
 }
 
+/// Load chunks directly from the bincode cache file, bypassing mtime checks.
+///
+/// Used by `prebuild_caches` where we know the cache is valid (we just saved it
+/// or are about to merge into it). Returns `None` if the file doesn't exist or
+/// decoding fails.
+pub fn load_chunks_from_cache(db: &Path) -> Option<Vec<ParsedChunk>> {
+    let cache = cache_path(db);
+    let bytes = fs::read(&cache).ok()?;
+    if bytes.first() != Some(&CHUNKS_CACHE_VERSION) {
+        return None;
+    }
+    let config = bincode::config::standard();
+    let (chunks, _) = bincode::decode_from_slice::<Vec<ParsedChunk>, _>(&bytes[1..], config).ok()?;
+    Some(chunks)
+}
+
 /// Path to the chunks.bin cache file for a given database.
 pub fn cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("chunks.bin")
