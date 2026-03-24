@@ -532,7 +532,9 @@ fn is_args_cache_stale(project_root: &Path, args_dir: &Path) -> bool {
         }
     }
 
-    // Check all workspace member Cargo.toml files (feature flag changes, dep edits)
+    // Check all workspace member Cargo.toml files (feature flag changes, dep edits).
+    // For single-crate projects, parse_workspace_members returns empty — the root
+    // Cargo.toml is already checked above.
     if let Ok(root_content) = std::fs::read_to_string(&cargo_toml) {
         for member_dir in parse_workspace_members(&root_content) {
             let member_toml = project_root.join(&member_dir).join("Cargo.toml");
@@ -541,6 +543,18 @@ fn is_args_cache_stale(project_root: &Path, args_dir: &Path) -> bool {
                     if mtime > cache_mtime {
                         return true;
                     }
+                }
+            }
+        }
+    }
+
+    // Check .cargo/config.toml (target changes, rustflags, etc.)
+    for config_name in [".cargo/config.toml", ".cargo/config"] {
+        let config_path = project_root.join(config_name);
+        if let Ok(meta) = std::fs::metadata(&config_path) {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > cache_mtime {
+                    return true;
                 }
             }
         }
@@ -733,25 +747,32 @@ pub fn detect_missing_edge_crates(project_root: &Path) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    // Parse workspace members from root Cargo.toml
+    // Parse workspace members; for single-crate (non-workspace) projects,
+    // treat the project root as the sole member.
     let member_dirs = parse_workspace_members(&content);
+    let is_single_crate = member_dirs.is_empty();
+
+    let check_list: Vec<(std::path::PathBuf, std::path::PathBuf)> = if is_single_crate {
+        // Single crate: root Cargo.toml + root src/
+        vec![(workspace_toml.clone(), project_root.join("src"))]
+    } else {
+        member_dirs.iter()
+            .map(|d| (project_root.join(d).join("Cargo.toml"), project_root.join(d).join("src")))
+            .collect()
+    };
 
     let mut missing = Vec::new();
-    for member_dir in &member_dirs {
-        let member_toml = project_root.join(member_dir).join("Cargo.toml");
-        let pkg_name = match std::fs::read_to_string(&member_toml) {
+    for (toml_path, src_dir) in &check_list {
+        let pkg_name = match std::fs::read_to_string(toml_path) {
             Ok(c) => extract_package_name(&c),
             Err(_) => continue,
         };
         let Some(name) = pkg_name else { continue };
 
-        // Check if this crate has any .rs source files (skip non-Rust crates)
-        let src_dir = project_root.join(member_dir).join("src");
         if !src_dir.exists() {
             continue;
         }
 
-        // Edge file uses underscores (crate name convention)
         let edge_file = edge_dir.join(format!("{}.edges.jsonl", name.replace('-', "_")));
         if !edge_file.exists() {
             missing.push(name);
