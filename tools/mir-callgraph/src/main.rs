@@ -414,8 +414,9 @@ fn main() {
                     // JSON size reasonable (~5KB instead of ~20KB).
                     let env_snapshot: Vec<(String, String)> = env::vars()
                         .filter(|(k, _)| {
-                            !matches!(k.as_str(), "PATH" | "PSModulePath" | "PATHEXT")
-                                && !k.starts_with("MIR_CALLGRAPH_")
+                            !matches!(k.as_str(),
+                                "PATH" | "PSModulePath" | "PATHEXT" | "CARGO_MAKEFLAGS"
+                            ) && !k.starts_with("MIR_CALLGRAPH_")
                         })
                         .collect();
                     let cached = RustcArgs {
