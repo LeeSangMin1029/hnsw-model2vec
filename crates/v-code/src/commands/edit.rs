@@ -3,10 +3,19 @@
 //! Uses the v-code index DB to locate symbols, then edits the source file directly.
 //! Doc comments and attributes above the symbol are automatically included in the range.
 //! Also provides line-based editing: `insert_at`, `delete_lines`, `replace_lines`, and `create_file`.
+//!
+//! ## Concurrency
+//!
+//! All edit operations acquire an exclusive file lock (`fs2::lock_exclusive`) on the
+//! target source file for the entire read-modify-write cycle. This prevents data loss
+//! when multiple agents edit the same file concurrently. The lock is released
+//! automatically when the guard is dropped.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 
 use v_code_intel::loader::load_chunks;
 use v_code_intel::helpers::find_project_root;
@@ -195,54 +204,73 @@ fn locate_symbol(db: &Path, symbol: &str, file_hint: Option<&str>) -> Result<Sym
 /// Locate a symbol and load the source file in one step.
 ///
 /// Returns lines and metadata needed by all symbol-editing commands.
-fn load_symbol_edit(db: &Path, symbol: &str, file: Option<&str>) -> Result<(String, SymbolLocation)> {
-    let loc = locate_symbol(db, symbol, file)?;
-    let content = std::fs::read_to_string(&loc.abs_path)
-        .with_context(|| format!("Failed to read {}", loc.abs_path.display()))?;
-    Ok((content, loc))
-}
 
 /// Write lines back to a file, preserving the original trailing-newline style.
-fn write_lines(path: &Path, lines: &[&str], trailing_nl: bool) -> Result<()> {
-    let output = if trailing_nl {
+fn join_lines(lines: &[&str], trailing_nl: bool) -> String {
+    if trailing_nl {
         lines.join("\n") + "\n"
     } else {
         lines.join("\n")
-    };
-    std::fs::write(path, output)?;
+    }
+}
+
+/// Perform an exclusive-locked read-modify-write on a source file.
+///
+/// Uses a `.lock` sidecar file for mutual exclusion (works on Windows where
+/// `lock_exclusive` on a file blocks other handles from opening it).
+/// The lock file is created next to the target and cleaned up afterward.
+fn locked_edit<F>(path: &Path, transform: F) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<String>,
+{
+    let lock_path = path.with_extension("lock");
+    let lock_file = File::create(&lock_path)
+        .with_context(|| format!("Failed to create lock file {}", lock_path.display()))?;
+    lock_file.lock_exclusive()
+        .with_context(|| format!("Failed to acquire file lock on {}", lock_path.display()))?;
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let output = transform(&content)?;
+    std::fs::write(path, output)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    lock_file.unlock()
+        .with_context(|| format!("Failed to release file lock on {}", lock_path.display()))?;
+    drop(lock_file);
+    let _ = std::fs::remove_file(&lock_path);
     Ok(())
 }
 
 /// Replace the body of a symbol with new content.
 pub fn replace(db: PathBuf, symbol: String, file: Option<String>, body: String) -> Result<()> {
-    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
-    let lines: Vec<&str> = content.lines().collect();
+    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
+    let body = body.trim_end().to_owned();
 
-    let body = body.trim_end();
-    let body_lines: Vec<&str> = body.lines().collect();
+    locked_edit(&loc.abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
+        let body_lines: Vec<&str> = body.lines().collect();
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len());
-    result.extend_from_slice(&lines[..loc.start_line]);
-    result.extend_from_slice(&body_lines);
-    if loc.end_line + 1 < lines.len() {
-        result.extend_from_slice(&lines[loc.end_line + 1..]);
-    }
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len());
+        result.extend_from_slice(&lines[..loc.start_line]);
+        result.extend_from_slice(&body_lines);
+        if loc.end_line + 1 < lines.len() {
+            result.extend_from_slice(&lines[loc.end_line + 1..]);
+        }
 
-    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
-
-    let new_end = loc.start_line + body_lines.len();
-    eprintln!(
-        "Replaced {} (L{}-{} → L{}-{}) in {}",
-        symbol,
-        loc.start_line + 1,
-        loc.end_line + 1,
-        loc.start_line + 1,
-        new_end,
-        loc.rel_path
-    );
-    // Print replaced content so agents can verify without a separate Read.
-    print_numbered_range(&body_lines, loc.start_line + 1);
-    Ok(())
+        let new_end = loc.start_line + body_lines.len();
+        eprintln!(
+            "Replaced {} (L{}-{} → L{}-{}) in {}",
+            symbol,
+            loc.start_line + 1,
+            loc.end_line + 1,
+            loc.start_line + 1,
+            new_end,
+            loc.rel_path
+        );
+        print_numbered_range(&body_lines, loc.start_line + 1);
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 /// Insert content after a symbol.
@@ -252,31 +280,31 @@ pub fn insert_after(
     file: Option<String>,
     body: String,
 ) -> Result<()> {
-    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
-    let lines: Vec<&str> = content.lines().collect();
+    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
+    let body = body.trim_end().to_owned();
 
-    let body = body.trim_end();
-    let body_lines: Vec<&str> = body.lines().collect();
+    locked_edit(&loc.abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
+        let body_lines: Vec<&str> = body.lines().collect();
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len() + 1);
-    result.extend_from_slice(&lines[..=loc.end_line]);
-    result.push("");
-    result.extend_from_slice(&body_lines);
-    if loc.end_line + 1 < lines.len() {
-        result.extend_from_slice(&lines[loc.end_line + 1..]);
-    }
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len() + 1);
+        result.extend_from_slice(&lines[..=loc.end_line]);
+        result.push("");
+        result.extend_from_slice(&body_lines);
+        if loc.end_line + 1 < lines.len() {
+            result.extend_from_slice(&lines[loc.end_line + 1..]);
+        }
 
-    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
-
-    let insert_start = loc.end_line + 2; // after blank line
-    eprintln!(
-        "Inserted after {} (after L{}) in {}",
-        symbol,
-        loc.end_line + 1,
-        loc.rel_path
-    );
-    print_numbered_range(&body_lines, insert_start);
-    Ok(())
+        let insert_start = loc.end_line + 2;
+        eprintln!(
+            "Inserted after {} (after L{}) in {}",
+            symbol,
+            loc.end_line + 1,
+            loc.rel_path
+        );
+        print_numbered_range(&body_lines, insert_start);
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 /// Insert content before a symbol.
@@ -286,57 +314,58 @@ pub fn insert_before(
     file: Option<String>,
     body: String,
 ) -> Result<()> {
-    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
-    let lines: Vec<&str> = content.lines().collect();
+    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
+    let body = body.trim_end().to_owned();
 
-    let body = body.trim_end();
-    let body_lines: Vec<&str> = body.lines().collect();
+    locked_edit(&loc.abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
+        let body_lines: Vec<&str> = body.lines().collect();
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len() + 1);
-    result.extend_from_slice(&lines[..loc.start_line]);
-    result.extend_from_slice(&body_lines);
-    result.push("");
-    result.extend_from_slice(&lines[loc.start_line..]);
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len() + 1);
+        result.extend_from_slice(&lines[..loc.start_line]);
+        result.extend_from_slice(&body_lines);
+        result.push("");
+        result.extend_from_slice(&lines[loc.start_line..]);
 
-    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
-
-    eprintln!(
-        "Inserted before {} (before L{}) in {}",
-        symbol,
-        loc.start_line + 1,
-        loc.rel_path
-    );
-    print_numbered_range(&body_lines, loc.start_line + 1);
-    Ok(())
+        eprintln!(
+            "Inserted before {} (before L{}) in {}",
+            symbol,
+            loc.start_line + 1,
+            loc.rel_path
+        );
+        print_numbered_range(&body_lines, loc.start_line + 1);
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 /// Delete a symbol from the source file.
 pub fn delete_symbol(db: PathBuf, symbol: String, file: Option<String>) -> Result<()> {
-    let (content, loc) = load_symbol_edit(&db, &symbol, file.as_deref())?;
-    let lines: Vec<&str> = content.lines().collect();
+    let loc = locate_symbol(&db, &symbol, file.as_deref())?;
 
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len());
-    result.extend_from_slice(&lines[..loc.start_line]);
+    locked_edit(&loc.abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
 
-    // Skip blank lines immediately after the deleted symbol to avoid double-spacing.
-    let mut after = loc.end_line + 1;
-    while after < lines.len() && lines[after].trim().is_empty() {
-        after += 1;
-    }
-    if after < lines.len() {
-        result.extend_from_slice(&lines[after..]);
-    }
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len());
+        result.extend_from_slice(&lines[..loc.start_line]);
 
-    write_lines(&loc.abs_path, &result, content.ends_with('\n'))?;
+        // Skip blank lines immediately after the deleted symbol to avoid double-spacing.
+        let mut after = loc.end_line + 1;
+        while after < lines.len() && lines[after].trim().is_empty() {
+            after += 1;
+        }
+        if after < lines.len() {
+            result.extend_from_slice(&lines[after..]);
+        }
 
-    eprintln!(
-        "Deleted {} (L{}-{}) from {}",
-        symbol,
-        loc.start_line + 1,
-        loc.end_line + 1,
-        loc.rel_path
-    );
-    Ok(())
+        eprintln!(
+            "Deleted {} (L{}-{}) from {}",
+            symbol,
+            loc.start_line + 1,
+            loc.end_line + 1,
+            loc.rel_path
+        );
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -375,41 +404,37 @@ pub fn insert_at(db: PathBuf, file: String, line: usize, body: String) -> Result
     }
 
     let (abs_path, rel_path) = resolve_file_path(&db, &file)?;
-    let content = std::fs::read_to_string(&abs_path)?;
-    let trailing_nl = content.ends_with('\n');
-    let lines: Vec<&str> = content.lines().collect();
+    let body = body.trim_end().to_owned();
 
-    // line is 1-based; convert to 0-based insertion index.
-    // Allow inserting at line == len+1 (appending at end).
-    let idx = line - 1;
-    if idx > lines.len() {
-        bail!(
-            "--line {} is past end of file ({} lines)",
+    locked_edit(&abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
+        let idx = line - 1;
+        if idx > lines.len() {
+            bail!(
+                "--line {} is past end of file ({} lines)",
+                line,
+                lines.len()
+            );
+        }
+
+        let body_lines: Vec<&str> = body.lines().collect();
+
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len());
+        result.extend_from_slice(&lines[..idx]);
+        result.extend_from_slice(&body_lines);
+        if idx < lines.len() {
+            result.extend_from_slice(&lines[idx..]);
+        }
+
+        eprintln!(
+            "Inserted {} line(s) at L{} in {}",
+            body_lines.len(),
             line,
-            lines.len()
+            rel_path,
         );
-    }
-
-    let body = body.trim_end();
-    let body_lines: Vec<&str> = body.lines().collect();
-
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len());
-    result.extend_from_slice(&lines[..idx]);
-    result.extend_from_slice(&body_lines);
-    if idx < lines.len() {
-        result.extend_from_slice(&lines[idx..]);
-    }
-
-    write_lines(&abs_path, &result, trailing_nl)?;
-
-    eprintln!(
-        "Inserted {} line(s) at L{} in {}",
-        body_lines.len(),
-        line,
-        rel_path,
-    );
-    print_numbered_range(&body_lines, line);
-    Ok(())
+        print_numbered_range(&body_lines, line);
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 /// Delete a range of lines (1-based, inclusive) from a file.
@@ -422,43 +447,41 @@ pub fn delete_lines(db: PathBuf, file: String, start: usize, end: usize) -> Resu
     }
 
     let (abs_path, rel_path) = resolve_file_path(&db, &file)?;
-    let content = std::fs::read_to_string(&abs_path)?;
-    let trailing_nl = content.ends_with('\n');
-    let lines: Vec<&str> = content.lines().collect();
 
-    if end > lines.len() {
-        bail!(
-            "--end {} is past end of file ({} lines)",
+    locked_edit(&abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
+
+        if end > lines.len() {
+            bail!(
+                "--end {} is past end of file ({} lines)",
+                end,
+                lines.len()
+            );
+        }
+
+        let start_idx = start - 1;
+        let end_idx = end;
+
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len());
+        result.extend_from_slice(&lines[..start_idx]);
+
+        let mut after = end_idx;
+        while after < lines.len() && lines[after].trim().is_empty() {
+            after += 1;
+        }
+        if after < lines.len() {
+            result.extend_from_slice(&lines[after..]);
+        }
+
+        eprintln!(
+            "Deleted L{}-{} ({} line(s)) from {}",
+            start,
             end,
-            lines.len()
+            end - start + 1,
+            rel_path,
         );
-    }
-
-    let start_idx = start - 1; // 0-based inclusive
-    let end_idx = end; // 0-based exclusive (end is inclusive, so +1)
-
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len());
-    result.extend_from_slice(&lines[..start_idx]);
-
-    // Skip trailing blank lines after deleted range (same pattern as delete_symbol).
-    let mut after = end_idx;
-    while after < lines.len() && lines[after].trim().is_empty() {
-        after += 1;
-    }
-    if after < lines.len() {
-        result.extend_from_slice(&lines[after..]);
-    }
-
-    write_lines(&abs_path, &result, trailing_nl)?;
-
-    eprintln!(
-        "Deleted L{}-{} ({} line(s)) from {}",
-        start,
-        end,
-        end - start + 1,
-        rel_path,
-    );
-    Ok(())
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 /// Replace a range of lines (1-based, inclusive) with new content.
@@ -477,45 +500,43 @@ pub fn replace_lines(
     }
 
     let (abs_path, rel_path) = resolve_file_path(&db, &file)?;
-    let content = std::fs::read_to_string(&abs_path)?;
-    let trailing_nl = content.ends_with('\n');
-    let lines: Vec<&str> = content.lines().collect();
+    let body = body.trim_end().to_owned();
 
-    if end > lines.len() {
-        bail!(
-            "--end {} is past end of file ({} lines)",
+    locked_edit(&abs_path, |content| {
+        let lines: Vec<&str> = content.lines().collect();
+
+        if end > lines.len() {
+            bail!(
+                "--end {} is past end of file ({} lines)",
+                end,
+                lines.len()
+            );
+        }
+
+        let start_idx = start - 1;
+        let end_idx = end;
+        let body_lines: Vec<&str> = body.lines().collect();
+
+        let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len());
+        result.extend_from_slice(&lines[..start_idx]);
+        result.extend_from_slice(&body_lines);
+        if end_idx < lines.len() {
+            result.extend_from_slice(&lines[end_idx..]);
+        }
+
+        let new_end = start + body_lines.len().saturating_sub(1);
+        eprintln!(
+            "Replaced L{}-{} -> L{}-{} ({} line(s)) in {}",
+            start,
             end,
-            lines.len()
+            start,
+            new_end,
+            body_lines.len(),
+            rel_path,
         );
-    }
-
-    let start_idx = start - 1; // 0-based inclusive
-    let end_idx = end; // 0-based exclusive
-
-    let body = body.trim_end();
-    let body_lines: Vec<&str> = body.lines().collect();
-
-    let mut result: Vec<&str> = Vec::with_capacity(lines.len() + body_lines.len());
-    result.extend_from_slice(&lines[..start_idx]);
-    result.extend_from_slice(&body_lines);
-    if end_idx < lines.len() {
-        result.extend_from_slice(&lines[end_idx..]);
-    }
-
-    write_lines(&abs_path, &result, trailing_nl)?;
-
-    let new_end = start + body_lines.len().saturating_sub(1);
-    eprintln!(
-        "Replaced L{}-{} -> L{}-{} ({} line(s)) in {}",
-        start,
-        end,
-        start,
-        new_end,
-        body_lines.len(),
-        rel_path,
-    );
-    print_numbered_range(&body_lines, start);
-    Ok(())
+        print_numbered_range(&body_lines, start);
+        Ok(join_lines(&result, content.ends_with('\n')))
+    })
 }
 
 /// Create a new file at a project-relative path.

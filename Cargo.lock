@@ -3157,6 +3157,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "fs2",
  "notify",
  "rayon",
  "serde",
@@ -3179,6 +3180,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "fs2",
  "rayon",
  "serde",
  "serde_json",
