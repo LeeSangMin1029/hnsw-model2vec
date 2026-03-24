@@ -393,8 +393,17 @@ pub fn run_mir_direct(
         let lib_file = args_dir.join(format!("{crate_underscore}.lib.rustc-args.json"));
         let test_file = args_dir.join(format!("{crate_underscore}.test.rustc-args.json"));
         if lib_file.exists() || test_file.exists() {
-            if lib_file.exists() { args_files.push(lib_file); }
-            if test_file.exists() { args_files.push(test_file); }
+            // Validate --extern artifact paths exist (proc-macro .dll/.so etc.)
+            let files_valid = [&lib_file, &test_file].iter()
+                .filter(|f| f.exists())
+                .all(|f| validate_extern_paths(f));
+            if files_valid {
+                if lib_file.exists() { args_files.push(lib_file); }
+                if test_file.exists() { args_files.push(test_file); }
+            } else {
+                eprintln!("  [mir] stale --extern paths for {krate}, falling back to cargo");
+                missing_crates.push(*krate);
+            }
         } else {
             missing_crates.push(*krate);
         }
@@ -470,6 +479,32 @@ pub fn run_mir_direct(
 /// Stale conditions:
 /// 1. Cargo.toml or Cargo.lock modified after the cache directory
 /// 2. Nightly rustc version changed
+/// Check if --extern artifact paths in a cached args file still exist.
+/// If any .rlib/.rmeta/.dll/.so is missing, direct mode will fail.
+fn validate_extern_paths(args_file: &Path) -> bool {
+    let content = match std::fs::read_to_string(args_file) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // Quick scan for --extern values without full JSON parse
+    for line in content.lines() {
+        // Match patterns like "target/mir-check/debug/deps/libfoo-xxx.rlib"
+        let trimmed = line.trim().trim_matches('"').trim_end_matches(',');
+        if (trimmed.ends_with(".rlib") || trimmed.ends_with(".rmeta")
+            || trimmed.ends_with(".dll") || trimmed.ends_with(".so")
+            || trimmed.ends_with(".dylib"))
+            && trimmed.contains("target")
+        {
+            // Extract the path after "=" if it's an extern spec like "name=path"
+            let path_str = trimmed.rsplit('=').next().unwrap_or(trimmed);
+            if !std::path::Path::new(path_str).exists() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn is_args_cache_stale(project_root: &Path, args_dir: &Path) -> bool {
     // Get the oldest cache file mtime as reference
     let cache_mtime = match args_dir_oldest_mtime(args_dir) {
@@ -487,12 +522,26 @@ fn is_args_cache_stale(project_root: &Path, args_dir: &Path) -> bool {
         }
     }
 
-    // Check Cargo.lock
+    // Check Cargo.lock (dependency changes, feature changes via lock update)
     let cargo_lock = project_root.join("Cargo.lock");
     if let Ok(meta) = std::fs::metadata(&cargo_lock) {
         if let Ok(mtime) = meta.modified() {
             if mtime > cache_mtime {
                 return true;
+            }
+        }
+    }
+
+    // Check all workspace member Cargo.toml files (feature flag changes, dep edits)
+    if let Ok(root_content) = std::fs::read_to_string(&cargo_toml) {
+        for member_dir in parse_workspace_members(&root_content) {
+            let member_toml = project_root.join(&member_dir).join("Cargo.toml");
+            if let Ok(meta) = std::fs::metadata(&member_toml) {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime > cache_mtime {
+                        return true;
+                    }
+                }
             }
         }
     }

@@ -384,13 +384,10 @@ fn direct_bulk_write(
             let chunk_total = chunk_total_map.get(entry.source.as_str()).copied().unwrap_or(1);
             let called_by_refs = super::ingest::lookup_called_by(&reverse_index, &chunk.name);
 
-            let is_test = v_code_intel::graph::is_test_path(&entry.source)
-                || chunk.name.starts_with("test_");
 
             let mut tags = Vec::with_capacity(4 + called_by_refs.len());
             tags.push(format!("kind:{}", chunk.kind.as_str()));
             tags.push(format!("lang:{}", entry.lang));
-            tags.push(format!("role:{}", if is_test { "test" } else { "prod" }));
             if !chunk.visibility.is_empty() {
                 tags.push(format!("vis:{}", chunk.visibility));
             }

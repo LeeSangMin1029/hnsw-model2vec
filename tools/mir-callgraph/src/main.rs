@@ -49,6 +49,9 @@ struct RustcArgs {
     args: Vec<String>,
     crate_name: String,
     sysroot: String,
+    /// Environment variables set by cargo/build.rs (CARGO_*, DEP_*, OUT_DIR, custom).
+    #[serde(default)]
+    env: Vec<(String, String)>,
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────
@@ -401,10 +404,25 @@ fn main() {
                 if !crate_name.is_empty() {
                     let args_dir = format!("{out_dir}/rustc-args");
                     let _ = std::fs::create_dir_all(&args_dir);
+                    // Snapshot env vars from cargo/build.rs for direct mode.
+                    // Strategy: save ALL env vars at RUSTC_WRAPPER invocation time,
+                    // then in direct mode restore them. This guarantees build.rs
+                    // custom env vars (via `cargo::rustc-env=K=V`) are preserved
+                    // without needing to know their names in advance.
+                    //
+                    // We exclude only a few large/irrelevant vars to keep the
+                    // JSON size reasonable (~5KB instead of ~20KB).
+                    let env_snapshot: Vec<(String, String)> = env::vars()
+                        .filter(|(k, _)| {
+                            !matches!(k.as_str(), "PATH" | "PSModulePath" | "PATHEXT")
+                                && !k.starts_with("MIR_CALLGRAPH_")
+                        })
+                        .collect();
                     let cached = RustcArgs {
                         args: full_args.clone(),
                         crate_name: crate_name.clone(),
                         sysroot,
+                        env: env_snapshot,
                     };
                     // Save per target: lib and test get separate files
                     let is_test = rustc_args.iter().any(|a| a == "--test");
@@ -466,24 +484,11 @@ fn main() {
 
             eprintln!("[mir-callgraph] direct: compiling crate '{}'", cached.crate_name);
 
-            // Set env vars that cargo/build.rs normally provides.
-            // Without these, compile-time env!() macros and proc macros fail.
-            for (key, default) in [
-                ("CARGO_PKG_AUTHORS", ""),
-                ("CARGO_PKG_NAME", cached.crate_name.as_str()),
-                ("CARGO_PKG_VERSION", "0.0.0"),
-                ("CARGO_PKG_DESCRIPTION", ""),
-                ("CARGO_PKG_HOMEPAGE", ""),
-                ("CARGO_PKG_REPOSITORY", ""),
-                ("CARGO_PKG_LICENSE", ""),
-                ("CARGO_PKG_RUST_VERSION", ""),
-                // build.rs generated env vars (dummy values for MIR extraction)
-                ("GRAPH_SOURCE_HASH", "0000000000000000"),
-            ] {
-                if env::var(key).is_err() {
-                    // SAFETY: single-threaded at this point (before rustc_driver).
-                    unsafe { env::set_var(key, default); }
-                }
+            // Restore env vars captured from cargo/build.rs during RUSTC_WRAPPER run.
+            // This ensures env!() macros and proc macros work identically to cargo mode.
+            for (key, value) in &cached.env {
+                // SAFETY: single-threaded at this point (before rustc_driver).
+                unsafe { env::set_var(key, value); }
             }
 
             let is_test_target = cached.args.iter().any(|a| a == "--test");
