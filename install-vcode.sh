@@ -9,15 +9,21 @@ case "$OS" in
     *) EXT="" ;;
 esac
 
-# Download
-echo "[v-code] Downloading v-code${EXT}..."
-curl -sLO "https://github.com/LeeSangMin1029/hnsw-model2vec/releases/latest/download/v-code${EXT}"
-chmod +x "v-code${EXT}" 2>/dev/null || true
-
 # Install to PATH
+REPO="LeeSangMin1029/hnsw-model2vec"
 DEST="${HOME}/.cargo/bin/v-code${EXT}"
 mkdir -p "$(dirname "$DEST")"
-mv "v-code${EXT}" "$DEST"
+
+if command -v gh &>/dev/null; then
+    echo "[v-code] Downloading via gh..."
+    gh release download --repo "$REPO" --pattern "v-code${EXT}" --dir /tmp --clobber 2>/dev/null
+    mv "/tmp/v-code${EXT}" "$DEST"
+else
+    echo "[v-code] Downloading via curl..."
+    curl -sLo "$DEST" "https://github.com/${REPO}/releases/latest/download/v-code${EXT}"
+fi
+
+chmod +x "$DEST" 2>/dev/null || true
 echo "[v-code] Installed to $DEST"
 
 # Install nightly
