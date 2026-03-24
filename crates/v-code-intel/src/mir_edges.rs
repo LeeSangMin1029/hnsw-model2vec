@@ -34,6 +34,8 @@ pub struct MirEdgeMap {
     pub by_caller: HashMap<String, Vec<CalleeInfo>>,
     /// Total edge count
     pub total: usize,
+    /// caller_name → crate_name (tracks which crate each caller belongs to)
+    pub caller_crate: HashMap<String, String>,
 }
 
 /// Callee information from a MIR edge.
@@ -91,10 +93,23 @@ impl MirEdgeMap {
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            if path.to_string_lossy().ends_with(".edges.jsonl") {
+            let name = path.to_string_lossy();
+            if name.ends_with(".edges.jsonl") {
+                // Extract crate name from filename: e.g. "v_hnsw_cli.edges.jsonl" → "v_hnsw_cli"
+                let crate_name = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_suffix(".edges"))
+                    .unwrap_or("")
+                    .to_owned();
+
                 let partial = Self::from_jsonl(&path)?;
                 for (k, v) in partial.by_location {
                     combined.by_location.entry(k).or_default().extend(v);
+                }
+                for (k, _v) in &partial.by_caller {
+                    if !crate_name.is_empty() {
+                        combined.caller_crate.insert(k.clone(), crate_name.clone());
+                    }
                 }
                 for (k, v) in partial.by_caller {
                     combined.by_caller.entry(k).or_default().extend(v);
@@ -115,6 +130,19 @@ impl MirEdgeMap {
     /// Get all callees for a given caller function name.
     pub fn callees_of(&self, caller: &str) -> Option<&[CalleeInfo]> {
         self.by_caller.get(caller).map(|v| v.as_slice())
+    }
+
+    /// Get the set of all unique crate names present in this edge map.
+    pub fn crate_names(&self) -> std::collections::HashSet<&str> {
+        self.caller_crate.values().map(String::as_str).collect()
+    }
+
+    /// Get callers belonging to a specific crate.
+    pub fn callers_for_crate<'a>(&'a self, crate_name: &str) -> Vec<&'a str> {
+        self.caller_crate.iter()
+            .filter(|(_, v)| v.as_str() == crate_name)
+            .map(|(k, _)| k.as_str())
+            .collect()
     }
 }
 
@@ -312,6 +340,165 @@ pub fn run_mir_callgraph_for(
     run_language_extractors(project_root, &out_dir);
 
     MirEdgeMap::from_dir(&out_dir)
+}
+
+/// Run mir-callgraph in direct mode, bypassing cargo entirely.
+///
+/// Uses cached `rustc-args.json` files from a previous RUSTC_WRAPPER run.
+/// Falls back to `run_mir_callgraph_for` if the cache is stale or missing.
+pub fn run_mir_direct(
+    project_root: &Path,
+    mir_callgraph_bin: Option<&Path>,
+    crates: &[&str],
+) -> Result<MirEdgeMap> {
+    let out_dir = project_root.join("target").join("mir-edges");
+    let args_dir = out_dir.join("rustc-args");
+
+    // Check if cache exists at all
+    if !args_dir.exists() {
+        eprintln!("  [mir] no rustc-args cache, falling back to cargo");
+        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+    }
+
+    // Check staleness: Cargo.toml or Cargo.lock newer than cache?
+    if is_args_cache_stale(project_root, &args_dir) {
+        eprintln!("  [mir] rustc-args cache is stale, falling back to cargo");
+        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+    }
+
+    // Collect args files for the requested crates
+    let mut args_files = Vec::new();
+    let mut missing_crates = Vec::new();
+
+    for krate in crates {
+        let crate_underscore = krate.replace('-', "_");
+        let args_file = args_dir.join(format!("{crate_underscore}.rustc-args.json"));
+        if args_file.exists() {
+            args_files.push(args_file);
+        } else {
+            missing_crates.push(*krate);
+        }
+    }
+
+    // If any crate is missing from cache, fall back entirely
+    if !missing_crates.is_empty() {
+        eprintln!(
+            "  [mir] missing rustc-args for: {} — falling back to cargo",
+            missing_crates.join(", ")
+        );
+        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+    }
+
+    // Clear existing output files for the crates we're about to re-analyze
+    if out_dir.exists() {
+        for entry in std::fs::read_dir(&out_dir).into_iter().flatten().flatten() {
+            let p = entry.path();
+            let name = p.to_string_lossy();
+            if name.ends_with(".edges.jsonl") || name.ends_with(".chunks.jsonl") {
+                let should_clear = crates.iter().any(|c| {
+                    let crate_underscore = c.replace('-', "_");
+                    name.contains(&crate_underscore)
+                });
+                if should_clear {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
+    let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
+
+    let mut cmd = Command::new(&bin);
+    cmd.current_dir(project_root)
+        .arg("--direct")
+        .env("MIR_CALLGRAPH_OUT", &out_dir)
+        .env("MIR_CALLGRAPH_JSON", "1");
+
+    for args_file in &args_files {
+        cmd.arg("--args-file").arg(args_file);
+    }
+
+    let status = cmd.status()
+        .with_context(|| format!("failed to run mir-callgraph --direct: {}", bin.display()))?;
+
+    if !status.success() {
+        eprintln!("  [mir] mir-callgraph --direct exited with {status}, falling back to cargo");
+        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+    }
+
+    // Run language-specific extractors (Python, TypeScript)
+    run_language_extractors(project_root, &out_dir);
+
+    MirEdgeMap::from_dir(&out_dir)
+}
+
+/// Check if the rustc-args cache is stale.
+///
+/// Stale conditions:
+/// 1. Cargo.toml or Cargo.lock modified after the cache directory
+/// 2. Nightly rustc version changed
+fn is_args_cache_stale(project_root: &Path, args_dir: &Path) -> bool {
+    // Get the oldest cache file mtime as reference
+    let cache_mtime = match args_dir_oldest_mtime(args_dir) {
+        Some(t) => t,
+        None => return true, // no cache files
+    };
+
+    // Check Cargo.toml
+    let cargo_toml = project_root.join("Cargo.toml");
+    if let Ok(meta) = std::fs::metadata(&cargo_toml) {
+        if let Ok(mtime) = meta.modified() {
+            if mtime > cache_mtime {
+                return true;
+            }
+        }
+    }
+
+    // Check Cargo.lock
+    let cargo_lock = project_root.join("Cargo.lock");
+    if let Ok(meta) = std::fs::metadata(&cargo_lock) {
+        if let Ok(mtime) = meta.modified() {
+            if mtime > cache_mtime {
+                return true;
+            }
+        }
+    }
+
+    // Check nightly version
+    let version_file = args_dir.join(".nightly-version");
+    if let Some(current_ver) = nightly_rustc_version() {
+        match std::fs::read_to_string(&version_file) {
+            Ok(saved) if saved.trim() == current_ver => {}
+            _ => {
+                // Save current version for next check
+                let _ = std::fs::write(&version_file, &current_ver);
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Get the oldest modification time among `.rustc-args.json` files in a directory.
+fn args_dir_oldest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let mut oldest: Option<std::time::SystemTime> = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.to_string_lossy().ends_with(".rustc-args.json") {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = meta.modified() {
+                        oldest = Some(match oldest {
+                            Some(prev) if prev < mtime => prev,
+                            _ => mtime,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    oldest
 }
 
 /// Run Python and TypeScript call graph extractors if available.

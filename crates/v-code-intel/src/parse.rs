@@ -294,16 +294,56 @@ pub fn parse_chunk(text: &str) -> Option<ParsedChunk> {
 
 /// Normalize Windows backslashes, strip leading `.\`, and reduce absolute
 /// paths to project-relative form (anchored at `crates/` or `src/`).
+/// Convert an absolute or mixed-slash path to a project-relative path.
+///
+/// Uses `PROJECT_ROOT` (set once via [`set_project_root`]) to strip the prefix.
+/// Falls back to heuristic anchor detection when no root is set.
 pub fn normalize_path(p: &str) -> String {
     let s = p.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
-    // Strip absolute prefix (e.g. `//?/D:/hnsw-model2vec/`) by finding the
-    // project-relative anchor.
-    if let Some(idx) = s.find("crates/") {
-        s[idx..].to_owned()
-    } else if let Some(idx) = s.find("src/") {
-        s[idx..].to_owned()
-    } else {
-        s.to_owned()
+
+    // Strip UNC prefix (`//?/` or `\\?\`)
+    let s = s.strip_prefix("//?/").unwrap_or(s);
+
+    // Try stripping the project root prefix.
+    if let Some(root) = PROJECT_ROOT.get() {
+        if let Some(rel) = s.strip_prefix(root.as_str()) {
+            let rel = rel.strip_prefix('/').unwrap_or(rel);
+            if !rel.is_empty() {
+                return rel.to_owned();
+            }
+        }
+        // Also try case-insensitive match (Windows drive letters)
+        let s_lower = s.to_lowercase();
+        let root_lower = root.to_lowercase();
+        if let Some(rel) = s_lower.strip_prefix(root_lower.as_str()) {
+            let rel = rel.strip_prefix('/').unwrap_or(rel);
+            if !rel.is_empty() {
+                // Use original casing from `s`
+                return s[s.len() - rel.len()..].to_owned();
+            }
+        }
     }
+
+    s.to_owned()
+}
+
+use std::sync::OnceLock;
+
+static PROJECT_ROOT: OnceLock<String> = OnceLock::new();
+
+/// Set the project root for path normalization. Should be called once at startup.
+/// The root is stored as a forward-slash normalized path without trailing slash.
+pub fn set_project_root(root: &std::path::Path) {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut s = canonical.to_string_lossy().replace('\\', "/");
+    // Strip UNC prefix
+    if let Some(stripped) = s.strip_prefix("//?/") {
+        s = stripped.to_owned();
+    }
+    // Remove trailing slash
+    while s.ends_with('/') {
+        s.pop();
+    }
+    let _ = PROJECT_ROOT.set(s);
 }

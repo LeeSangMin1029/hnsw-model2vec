@@ -1,11 +1,15 @@
 //! Edge resolution strategies for call graph construction.
 //!
 //! Separates "how to connect edges" from the graph data structure itself.
-//! Two resolvers:
+//! Three resolvers:
 //! - `resolve_by_name`: legacy name matching (exact → short fallback)
 //! - `resolve_with_mir`: MIR-first, 100% accurate, name fallback for unmatched
+//! - `resolve_incremental`: per-crate caching, only re-resolves changed crates
 
 use std::collections::HashMap;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 
 use crate::index_tables::strip_generics_from_key;
 use crate::mir_edges::MirEdgeMap;
@@ -85,7 +89,7 @@ impl ResolvedEdges {
 
     fn add_edge(&mut self, src: usize, tgt: u32, call_line: u32) {
         let tgt_usize = tgt as usize;
-        if tgt_usize != src {
+        if tgt_usize != src && src < self.callees.len() && tgt_usize < self.callers.len() {
             self.callees[src].push(tgt);
             self.callers[tgt_usize].push(src as u32);
             self.call_sites[src].push((tgt, call_line));
@@ -97,6 +101,201 @@ impl ResolvedEdges {
         for list in &mut self.callers { list.sort_unstable(); list.dedup(); }
         for sites in &mut self.call_sites { sites.sort_by_key(|&(tgt, _)| tgt); sites.dedup_by_key(|e| e.0); }
     }
+}
+
+// ── Per-crate resolved edge cache ───────────────────────────────────
+
+/// Cached resolved edges for a single crate.
+///
+/// Stores `(src_chunk_idx, tgt_chunk_idx, call_line)` triples.
+/// The `total_chunks` field is used to detect index invalidation
+/// (e.g. when files are added/removed causing chunk re-indexing).
+#[derive(bincode::Encode, bincode::Decode)]
+pub(crate) struct CrateEdgeCache {
+    /// Total chunk count at cache creation time (for invalidation).
+    pub total_chunks: u32,
+    /// Resolved edge triples: (src, tgt, call_line).
+    pub edges: Vec<(u32, u32, u32)>,
+}
+
+/// Directory for per-crate edge caches.
+fn edge_cache_dir(db_path: &Path) -> std::path::PathBuf {
+    db_path.join("cache").join("graph-edges")
+}
+
+/// Path to a specific crate's edge cache file.
+fn crate_cache_path(db_path: &Path, crate_name: &str) -> std::path::PathBuf {
+    edge_cache_dir(db_path).join(format!("{crate_name}.bin"))
+}
+
+/// Save per-crate resolved edges to cache.
+fn save_crate_cache(db_path: &Path, crate_name: &str, cache: &CrateEdgeCache) -> Result<()> {
+    let dir = edge_cache_dir(db_path);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create edge cache dir: {}", dir.display()))?;
+    let path = crate_cache_path(db_path, crate_name);
+    let bytes = bincode::encode_to_vec(cache, bincode::config::standard())
+        .context("failed to encode crate edge cache")?;
+    std::fs::write(&path, bytes)
+        .with_context(|| format!("failed to write edge cache: {}", path.display()))
+}
+
+/// Load per-crate resolved edges from cache.
+fn load_crate_cache(db_path: &Path, crate_name: &str) -> Option<CrateEdgeCache> {
+    let path = crate_cache_path(db_path, crate_name);
+    let bytes = std::fs::read(&path).ok()?;
+    let (cache, _): (CrateEdgeCache, _) =
+        bincode::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
+    Some(cache)
+}
+
+/// Check if a crate's edge cache is stale by comparing mtime of
+/// the edge JSONL source file against the cache file.
+fn is_crate_cache_stale(db_path: &Path, mir_edge_dir: &Path, crate_name: &str) -> bool {
+    let cache_path = crate_cache_path(db_path, crate_name);
+    let edge_file = mir_edge_dir.join(format!("{crate_name}.edges.jsonl"));
+
+    let cache_mtime = match std::fs::metadata(&cache_path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return true, // no cache file → stale
+    };
+
+    let edge_mtime = match std::fs::metadata(&edge_file).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false, // no edge file → cache is still valid (crate wasn't re-analyzed)
+    };
+
+    edge_mtime > cache_mtime
+}
+
+/// Resolve edges for a single crate's callers and return the edge triples.
+fn resolve_crate_edges(
+    crate_name: &str,
+    mir_edges: &MirEdgeMap,
+    loc_to_idx: &HashMap<(&str, usize), u32>,
+    name_to_idx: &HashMap<String, u32>,
+    chunks: &[ParsedChunk],
+) -> Vec<(u32, u32, u32)> {
+    let mut edges = Vec::new();
+    let callers = mir_edges.callers_for_crate(crate_name);
+
+    for caller_name in &callers {
+        let src = resolve_by_loc_or_name(caller_name, loc_to_idx, name_to_idx, chunks);
+        let Some(callees) = mir_edges.by_caller.get(*caller_name) else { continue };
+
+        for callee in callees {
+            let tgt = if !callee.file.is_empty() && callee.start_line > 0 {
+                resolve_by_location(&callee.file, callee.start_line, loc_to_idx, chunks)
+            } else {
+                None
+            }.or_else(|| {
+                let lower = callee.name.to_lowercase();
+                resolve_mir_name(&lower, name_to_idx)
+            });
+
+            if let (Some(s), Some(t)) = (src, tgt) {
+                edges.push((s, t, callee.call_line as u32));
+            }
+        }
+    }
+    edges
+}
+
+/// Incremental MIR edge resolve with per-crate caching.
+///
+/// Only re-resolves edges for `changed_crates` (or stale crates).
+/// Loads cached results for unchanged crates, then merges everything.
+pub(crate) fn resolve_incremental(
+    chunks: &[ParsedChunk],
+    index: &ChunkIndex,
+    mir_edges: &MirEdgeMap,
+    changed_crates: &[String],
+    db_path: &Path,
+    mir_edge_dir: &Path,
+) -> ResolvedEdges {
+    let total_chunks = chunks.len() as u32;
+    let mut adj = ResolvedEdges::new(chunks.len());
+    let mut mir_resolved: usize = 0;
+    let mut cache_loaded: usize = 0;
+    let mut re_resolved_crates: usize = 0;
+
+    // Build lookup tables (same as resolve_with_mir)
+    let mut loc_to_idx: HashMap<(&str, usize), u32> = HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        if let Some((start, _)) = c.lines {
+            loc_to_idx.insert((&c.file, start), i as u32);
+        }
+    }
+    let mut name_to_idx: HashMap<String, u32> = HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        let clean = strip_visibility_prefix(&c.name);
+        name_to_idx.insert(clean.to_lowercase(), i as u32);
+    }
+
+    // Collect all crate names from MIR edges
+    let all_crate_names = mir_edges.crate_names();
+    let changed_set: std::collections::HashSet<&str> =
+        changed_crates.iter().map(String::as_str).collect();
+
+    for crate_name in &all_crate_names {
+        let needs_resolve = changed_set.contains(crate_name)
+            || is_crate_cache_stale(db_path, mir_edge_dir, crate_name);
+
+        if needs_resolve {
+            // Re-resolve this crate's edges
+            let edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
+            re_resolved_crates += 1;
+            mir_resolved += edges.len();
+
+            // Save to cache
+            let cache = CrateEdgeCache {
+                total_chunks,
+                edges: edges.clone(),
+            };
+            let _ = save_crate_cache(db_path, crate_name, &cache);
+
+            // Apply edges
+            for &(s, t, line) in &edges {
+                adj.add_edge(s as usize, t, line);
+            }
+        } else {
+            // Try loading from cache
+            match load_crate_cache(db_path, crate_name) {
+                Some(cache) if cache.total_chunks == total_chunks => {
+                    cache_loaded += cache.edges.len();
+                    for &(s, t, line) in &cache.edges {
+                        adj.add_edge(s as usize, t, line);
+                    }
+                }
+                _ => {
+                    // Cache invalid (chunk count changed) — re-resolve
+                    let edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
+                    re_resolved_crates += 1;
+                    mir_resolved += edges.len();
+                    let cache = CrateEdgeCache {
+                        total_chunks,
+                        edges: edges.clone(),
+                    };
+                    let _ = save_crate_cache(db_path, crate_name, &cache);
+                    for &(s, t, line) in &edges {
+                        adj.add_edge(s as usize, t, line);
+                    }
+                }
+            }
+        }
+    }
+
+    // Type ref edges from chunks (always re-resolved, cheap)
+    for (src, chunk) in chunks.iter().enumerate() {
+        resolve_type_refs(src, chunk, index, &mut adj);
+    }
+
+    eprintln!(
+        "      [edge-resolve] incremental: resolved={mir_resolved} cached={cache_loaded} re-resolved_crates={re_resolved_crates}/{}",
+        all_crate_names.len()
+    );
+    adj.dedup();
+    adj
 }
 
 // ── Name-based resolver (legacy) ────────────────────────────────────

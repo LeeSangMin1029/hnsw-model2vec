@@ -27,6 +27,9 @@ const TEXT_ONLY_MODEL: &str = "text-only";
 pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<()> {
     use v_hnsw_cli::commands::file_utils::get_file_mtime;
 
+    // Set project root for path normalization (absolute → relative).
+    v_code_intel::parse::set_project_root(&input_path);
+
     println!("Indexing code: {}", input_path.display());
     println!("Database:      {}", db_path.display());
 
@@ -151,7 +154,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         if !changed_crates.is_empty() {
             let crate_refs: Vec<&str> = changed_crates.iter().map(|s| s.as_str()).collect();
             eprintln!("  [mir] incremental: {} crate(s) — {}", crate_refs.len(), crate_refs.join(", "));
-            v_code_intel::mir_edges::run_mir_callgraph_for(&input_path, None, &crate_refs)
+            v_code_intel::mir_edges::run_mir_direct(&input_path, None, &crate_refs)
                 .context("mir-callgraph incremental failed")?;
         }
     } else {
@@ -239,7 +242,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         };
 
         let t_cache = std::time::Instant::now();
-        prebuild_caches(&db_path, &entries, &current_sources, mir_edges.as_ref());
+        prebuild_caches(&db_path, &entries, &current_sources, mir_edges.as_ref(), &mir_out_dir);
         eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
     }
 
@@ -256,6 +259,7 @@ fn prebuild_caches(
     new_entries: &[CodeChunkEntry],
     current_sources: &std::collections::HashSet<String>,
     mir_edges: Option<&v_code_intel::mir_edges::MirEdgeMap>,
+    mir_edge_dir: &std::path::Path,
 ) {
     use v_code_intel::parse::ParsedChunk;
 
@@ -310,7 +314,13 @@ fn prebuild_caches(
     if let Some(mir) = mir_edges {
         eprintln!("    [cache] MIR edges: {} total", mir.total);
     }
-    let _ = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, mir_edges);
+    // Use incremental edge resolve: changed crates are determined by
+    // per-crate cache staleness (edge file mtime vs cache mtime).
+    let incremental = mir_edges.map(|_| v_code_intel::graph::IncrementalArgs {
+        changed_crates: &[],  // empty → staleness-based detection
+        mir_edge_dir,
+    });
+    let _ = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, mir_edges, incremental);
     eprintln!("    [cache] graph build+save: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());
     eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
 }

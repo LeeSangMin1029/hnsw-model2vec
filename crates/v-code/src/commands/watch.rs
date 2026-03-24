@@ -18,6 +18,9 @@ const IGNORED_DIRS: &[&str] = &[".git", "target", "node_modules", "__pycache__"]
 
 /// Run watch mode — blocks indefinitely, updating DB on file changes.
 pub fn run(db_path: PathBuf, input_path: PathBuf) -> Result<()> {
+    // Set project root for path normalization (absolute → relative).
+    v_code_intel::parse::set_project_root(&input_path);
+
     println!("[watch] Watching {} for changes...", input_path.display());
     println!("[watch] DB: {}", db_path.display());
     println!("[watch] Press Ctrl+C to stop\n");
@@ -108,7 +111,7 @@ fn process_changes(changed: &[PathBuf], db_path: &Path, input_path: &Path) {
     // 2. Run mir-callgraph for changed crates only
     let crate_refs: Vec<&str> = crates.iter().map(|s| s.as_str()).collect();
     let mir_edge_map =
-        match v_code_intel::mir_edges::run_mir_callgraph_for(input_path, None, &crate_refs) {
+        match v_code_intel::mir_edges::run_mir_direct(input_path, None, &crate_refs) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("[watch] mir-callgraph failed: {e}");
@@ -156,8 +159,8 @@ fn process_changes(changed: &[PathBuf], db_path: &Path, input_path: &Path) {
         return;
     }
 
-    // 7. Rebuild graph cache
-    if let Err(e) = rebuild_graph_cache(db_path, &mir_out_dir, &mir_edge_map) {
+    // 7. Rebuild graph cache (incremental: only re-resolve changed crates)
+    if let Err(e) = rebuild_graph_cache(db_path, &mir_out_dir, &mir_edge_map, &crates) {
         eprintln!("[watch] graph rebuild failed: {e}");
         return;
     }
@@ -255,12 +258,19 @@ fn update_db(
 /// Rebuild graph.bin cache from current chunks + MIR edges.
 fn rebuild_graph_cache(
     db_path: &Path,
-    _mir_out_dir: &Path,
+    mir_out_dir: &Path,
     mir_edge_map: &v_code_intel::mir_edges::MirEdgeMap,
+    changed_crates: &[String],
 ) -> Result<()> {
     let chunks = v_code_intel::loader::load_chunks(db_path)?;
 
-    let graph = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, Some(mir_edge_map))?;
+    let incremental = v_code_intel::graph::IncrementalArgs {
+        changed_crates,
+        mir_edge_dir: mir_out_dir,
+    };
+    let graph = v_code_intel::graph::CallGraph::rebuild(
+        db_path, &chunks, Some(mir_edge_map), Some(incremental),
+    )?;
     eprintln!(
         "[watch] graph: {} nodes, {} edges",
         graph.len(),

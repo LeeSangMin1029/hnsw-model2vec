@@ -47,6 +47,14 @@ pub fn current_rss_mb() -> f64 {
 // Re-export for external consumers (used by v-code, stats, clones).
 pub use crate::index_tables::{is_test_path, is_test_chunk};
 
+/// Arguments for incremental edge resolution.
+pub struct IncrementalArgs<'a> {
+    /// Crate names that changed and need re-resolution.
+    pub changed_crates: &'a [String],
+    /// Directory containing per-crate `.edges.jsonl` files.
+    pub mir_edge_dir: &'a Path,
+}
+
 // ── CallGraph struct ────────────────────────────────────────────────
 
 /// Pre-built call graph with bidirectional adjacency lists.
@@ -90,6 +98,27 @@ impl CallGraph {
         let index = ChunkIndex::build(chunks);
         let adj = edge_resolve::resolve_with_mir(chunks, &index, mir_edges);
         eprintln!("      [graph] mir-resolve: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
+        Self::assemble(chunks, &index, adj)
+    }
+
+    /// Build call graph with incremental MIR edge resolve.
+    ///
+    /// Only re-resolves edges for `changed_crates`; loads cached results
+    /// for unchanged crates. Falls back to full resolve if
+    /// `changed_crates` is empty.
+    pub fn build_with_mir_incremental(
+        chunks: &[ParsedChunk],
+        mir_edges: &MirEdgeMap,
+        changed_crates: &[String],
+        db_path: &Path,
+        mir_edge_dir: &Path,
+    ) -> Self {
+        let t0 = std::time::Instant::now();
+        let index = ChunkIndex::build(chunks);
+        let adj = edge_resolve::resolve_incremental(
+            chunks, &index, mir_edges, changed_crates, db_path, mir_edge_dir,
+        );
+        eprintln!("      [graph] mir-incremental: {:.1}ms ({} chunks)", t0.elapsed().as_secs_f64() * 1000.0, chunks.len());
         Self::assemble(chunks, &index, adj)
     }
 
@@ -181,9 +210,20 @@ impl CallGraph {
     /// Shared helper used by both `prebuild_caches` (add) and
     /// `rebuild_graph_cache` (watch) to avoid duplicating the
     /// build-dispatch + save logic.
-    pub fn rebuild(db: &Path, chunks: &[ParsedChunk], mir_edges: Option<&MirEdgeMap>) -> Result<Self> {
-        let graph = match mir_edges {
-            Some(mir) if mir.total > 0 => Self::build_with_mir(chunks, mir),
+    ///
+    /// When `incremental` is provided, uses per-crate edge caching for
+    /// faster rebuild. Falls back to full resolve otherwise.
+    pub fn rebuild(
+        db: &Path,
+        chunks: &[ParsedChunk],
+        mir_edges: Option<&MirEdgeMap>,
+        incremental: Option<IncrementalArgs<'_>>,
+    ) -> Result<Self> {
+        let graph = match (mir_edges, incremental) {
+            (Some(mir), Some(inc)) if mir.total > 0 => {
+                Self::build_with_mir_incremental(chunks, mir, inc.changed_crates, db, inc.mir_edge_dir)
+            }
+            (Some(mir), _) if mir.total > 0 => Self::build_with_mir(chunks, mir),
             _ => Self::build(chunks),
         };
         graph.save(db)?;

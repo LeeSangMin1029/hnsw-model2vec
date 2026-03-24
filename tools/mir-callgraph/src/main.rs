@@ -13,7 +13,7 @@ use std::process::Command;
 use rustc_middle::mir::TerminatorKind;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ── Output types ────────────────────────────────────────────────────
 
@@ -40,6 +40,15 @@ struct MirChunk {
     signature: Option<String>,
     visibility: String,
     is_test: bool,
+}
+
+// ── Cached rustc args for direct mode ───────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct RustcArgs {
+    args: Vec<String>,
+    crate_name: String,
+    sysroot: String,
 }
 
 // ── Callbacks ───────────────────────────────────────────────────────
@@ -377,6 +386,33 @@ fn main() {
                 }
             }
 
+            // Cache rustc args for direct mode (bypass cargo on subsequent runs)
+            if let Ok(out_dir) = env::var("MIR_CALLGRAPH_OUT") {
+                let crate_name = rustc_args.iter()
+                    .position(|a| a == "--crate-name")
+                    .and_then(|i| rustc_args.get(i + 1))
+                    .cloned()
+                    .unwrap_or_default();
+                let sysroot = full_args.iter()
+                    .position(|a| a == "--sysroot")
+                    .and_then(|i| full_args.get(i + 1))
+                    .cloned()
+                    .unwrap_or_default();
+                if !crate_name.is_empty() {
+                    let args_dir = format!("{out_dir}/rustc-args");
+                    let _ = std::fs::create_dir_all(&args_dir);
+                    let cached = RustcArgs {
+                        args: full_args.clone(),
+                        crate_name: crate_name.clone(),
+                        sysroot,
+                    };
+                    if let Ok(json_str) = serde_json::to_string_pretty(&cached) {
+                        let path = format!("{args_dir}/{crate_name}.rustc-args.json");
+                        let _ = std::fs::write(&path, json_str);
+                    }
+                }
+            }
+
             let json = env::var("MIR_CALLGRAPH_JSON").is_ok();
             let is_test_target = rustc_args.iter().any(|a| a == "--test");
             let mut callbacks = MirCallbacks { json, is_test_target };
@@ -391,7 +427,54 @@ fn main() {
         return;
     }
 
-    // Mode 2: CLI mode
+    // Mode 2: Direct mode — use cached rustc args, bypass cargo entirely
+    if args.iter().any(|a| a == "--direct") {
+        let args_files: Vec<&String> = args.iter()
+            .skip_while(|a| *a != "--args-file")
+            .skip(1)
+            .take_while(|a| !a.starts_with("--"))
+            .collect();
+
+        if args_files.is_empty() {
+            eprintln!("[mir-callgraph] --direct requires at least one --args-file <path>");
+            std::process::exit(1);
+        }
+
+        let json = env::var("MIR_CALLGRAPH_JSON").is_ok();
+        let mut had_error = false;
+
+        for args_file in &args_files {
+            let content = match std::fs::read_to_string(args_file) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[mir-callgraph] failed to read {args_file}: {e}");
+                    had_error = true;
+                    continue;
+                }
+            };
+            let cached: RustcArgs = match serde_json::from_str(&content) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[mir-callgraph] failed to parse {args_file}: {e}");
+                    had_error = true;
+                    continue;
+                }
+            };
+
+            eprintln!("[mir-callgraph] direct: compiling crate '{}'", cached.crate_name);
+
+            let is_test_target = cached.args.iter().any(|a| a == "--test");
+            let mut callbacks = MirCallbacks { json, is_test_target };
+            rustc_driver::run_compiler(&cached.args, &mut callbacks);
+        }
+
+        if had_error {
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Mode 3: CLI mode (cargo wrapper)
     let json = args.iter().any(|a| a == "--json");
     let exe = env::current_exe().unwrap_or_default();
 

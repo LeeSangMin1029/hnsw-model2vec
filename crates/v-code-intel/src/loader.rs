@@ -14,6 +14,9 @@ const CHUNKS_CACHE_VERSION: u8 = 1;
 
 /// Load all code chunks from the database, using a bincode cache.
 pub fn load_chunks(path: &Path) -> Result<Vec<ParsedChunk>> {
+    // Ensure project root is set for path normalization (idempotent).
+    ensure_project_root(path);
+
     let cache = cache_path(path);
     // Use payload.dat mtime (not directory mtime) — directory mtime
     // doesn't update on Windows when files inside are modified.
@@ -88,6 +91,16 @@ pub fn save_chunks_cache(path: &Path, chunks: &[ParsedChunk]) {
 /// Path to the chunks.bin cache file for a given database.
 pub fn cache_path(db: &Path) -> PathBuf {
     db.join("cache").join("chunks.bin")
+}
+
+/// Set project root from DB config's `input_path` if not already set.
+fn ensure_project_root(db: &Path) {
+    use v_hnsw_storage::db_config::DbConfig;
+    if let Ok(config) = DbConfig::load(db) {
+        if let Some(ref input_path) = config.input_path {
+            parse::set_project_root(std::path::Path::new(input_path));
+        }
+    }
 }
 
 
