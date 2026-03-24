@@ -63,23 +63,9 @@ pub enum Commands {
         /// Show DFS callee tree instead of grouped context.
         #[arg(long)]
         tree: bool,
-    },
-    /// Show blast radius of changing a symbol (transitive callers + summary).
-    #[command(visible_alias = "bl")]
-    Blast {
-        /// Path to the database directory.
-        db: PathBuf,
-        /// Symbol name to analyse.
-        symbol: String,
-        /// Max BFS depth (default: 2).
-        #[arg(long, default_value = "2")]
-        depth: u32,
-        /// Include test symbols in results (hidden by default).
+        /// Show blast radius (callers only with depth tags + summary).
         #[arg(long)]
-        include_tests: bool,
-        /// Filter results to symbols whose file path starts with (or contains) this prefix.
-        #[arg(long)]
-        scope: Option<String>,
+        blast: bool,
     },
     /// Find shortest call path between two symbols.
     #[command(visible_alias = "tr")]

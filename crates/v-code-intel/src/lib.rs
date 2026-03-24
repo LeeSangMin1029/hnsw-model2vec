@@ -7,7 +7,6 @@
 //! the pure analysis logic.
 
 pub mod bfs;
-pub mod blast;
 pub mod clones;
 pub mod context;
 pub mod context_cmd;

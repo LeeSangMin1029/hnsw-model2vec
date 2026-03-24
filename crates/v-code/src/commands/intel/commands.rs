@@ -156,9 +156,83 @@ pub fn run_context(
     include_tests: bool,
     scope: Option<String>,
     tree: bool,
+    blast: bool,
 ) -> Result<()> {
     if tree {
         return run_context_tree(&db, &symbol, depth, include_tests);
+    }
+
+    if blast {
+        let effective_depth = if depth == 1 { 2 } else { depth };
+
+        let graph = load_or_build_graph(&db)?;
+        let (alias_map, _) = graph.global_aliases();
+
+        // Field-level blast: "Type.field" notation
+        if let Some(dot) = symbol.find('.') {
+            let type_name = &symbol[..dot];
+            let field_name = &symbol[dot + 1..];
+            let key = format!("{}::{}", type_name.to_lowercase(), field_name.to_lowercase());
+            let field_chunks = graph.find_field_access(&key);
+            if field_chunks.is_empty() {
+                println!("No field accesses found for {symbol}");
+                return Ok(());
+            }
+            let all_entries = impact::bfs_reverse(&graph, &field_chunks, effective_depth);
+            let (mut prod_count, mut test_count) = (0usize, 0usize);
+            for e in &all_entries {
+                if e.depth == 0 { continue; }
+                if e.is_test { test_count += 1; } else { prod_count += 1; }
+            }
+            let mut entries = filter_scope_entries(all_entries, &graph, &scope);
+            entries = filter_test_entries(entries, include_tests);
+            let mut tagged: Vec<TaggedEntry> = Vec::new();
+            for e in &entries {
+                let tag = if field_chunks.contains(&e.idx) {
+                    "field"
+                } else {
+                    match e.depth {
+                        0 => "target",
+                        1 => "d1",
+                        2 => "d2",
+                        _ => "d3+",
+                    }
+                };
+                tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
+            }
+            let scope_label = scope.as_ref().map_or(String::new(), |s| format!(" (scope: {s})"));
+            println!("=== context: {symbol}{scope_label} ({} field accessors, {} affected, {} prod, {} test) ===\n",
+                field_chunks.len(), prod_count + test_count, prod_count, test_count);
+            print_file_grouped(&graph, &tagged, false, &alias_map);
+            return Ok(());
+        }
+
+        let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
+        let all_entries = impact::bfs_reverse(&graph, &seeds, effective_depth);
+        let (mut prod_count, mut test_count) = (0usize, 0usize);
+        for e in &all_entries {
+            if e.depth == 0 { continue; }
+            if e.is_test { test_count += 1; } else { prod_count += 1; }
+        }
+        let mut entries = filter_scope_entries(all_entries, &graph, &scope);
+        entries = filter_test_entries(entries, include_tests);
+
+        let mut tagged: Vec<TaggedEntry> = Vec::new();
+        for e in &entries {
+            let tag = match e.depth {
+                0 => "target",
+                1 => "d1",
+                2 => "d2",
+                _ => "d3+",
+            };
+            tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
+        }
+
+        let scope_label = scope.as_ref().map_or(String::new(), |s| format!(" (scope: {s})"));
+        println!("=== context: {symbol}{scope_label} ({} affected, {} prod, {} test) ===\n",
+            prod_count + test_count, prod_count, test_count);
+        print_file_grouped(&graph, &tagged, false, &alias_map);
+        return Ok(());
     }
 
     use v_code_intel::context_cmd;
@@ -250,81 +324,6 @@ pub fn run_context(
     Ok(())
 }
 
-/// `v-code blast <db> <symbol> --depth N [--include-tests] [--scope <prefix>]`
-pub fn run_blast(
-    db: PathBuf,
-    symbol: String,
-    depth: u32,
-    include_tests: bool,
-    scope: Option<String>,
-) -> Result<()> {
-    use v_code_intel::blast;
-
-    let graph = load_or_build_graph(&db)?;
-    let (alias_map, _) = graph.global_aliases();
-
-    // Field-level blast: "Type.field" notation
-    if let Some(dot) = symbol.find('.') {
-        let type_name = &symbol[..dot];
-        let field_name = &symbol[dot + 1..];
-        let key = format!("{}::{}", type_name.to_lowercase(), field_name.to_lowercase());
-        let field_chunks = graph.find_field_access(&key);
-        if field_chunks.is_empty() {
-            println!("No field accesses found for {symbol}");
-            return Ok(());
-        }
-        // BFS reverse from field-accessing chunks
-        let all_entries = impact::bfs_reverse(&graph, &field_chunks, depth);
-        let summary = blast::summarize_blast(&graph, &all_entries);
-        let mut entries = filter_scope_entries(all_entries, &graph, &scope);
-        entries = filter_test_entries(entries, include_tests);
-        let mut tagged: Vec<TaggedEntry> = Vec::new();
-        for e in &entries {
-            let tag = if field_chunks.contains(&e.idx) {
-                "field"
-            } else {
-                match e.depth {
-                    0 => "target",
-                    1 => "d1",
-                    2 => "d2",
-                    _ => "d3+",
-                }
-            };
-            tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
-        }
-        let scope_label = scope.as_ref().map_or(String::new(), |s| format!(" (scope: {s})"));
-        println!("=== blast: {symbol}{scope_label} ({} field accessors, {} affected, {} prod, {} test) ===\n",
-            field_chunks.len(), summary.total_affected, summary.prod_count, summary.test_count);
-        print_file_grouped(&graph, &tagged, false, &alias_map);
-        return Ok(());
-    }
-
-    let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
-
-    let all_entries = impact::bfs_reverse(&graph, &seeds, depth);
-    let summary = blast::summarize_blast(&graph, &all_entries);
-    let mut entries = filter_scope_entries(all_entries, &graph, &scope);
-    entries = filter_test_entries(entries, include_tests);
-
-    // Build tagged entries with depth labels
-    let mut tagged: Vec<TaggedEntry> = Vec::new();
-    for e in &entries {
-        let tag = match e.depth {
-            0 => "target",
-            1 => "d1",
-            2 => "d2",
-            _ => "d3+",
-        };
-        tagged.push(TaggedEntry { idx: e.idx, tag, sig: false, call_line: 0 });
-    }
-
-    let scope_label = scope.as_ref().map_or(String::new(), |s| format!(" (scope: {s})"));
-    println!("=== blast: {symbol}{scope_label} ({} affected, {} prod, {} test) ===\n",
-        summary.total_affected, summary.prod_count, summary.test_count);
-    print_file_grouped(&graph, &tagged, false, &alias_map);
-
-    Ok(())
-}
 
 /// Shared tree-mode implementation used by both `context --tree` and `jump`.
 fn run_context_tree(db: &Path, symbol: &str, depth: u32, include_tests: bool) -> Result<()> {
