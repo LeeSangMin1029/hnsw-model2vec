@@ -44,24 +44,30 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         );
     }
 
-    // Build path → normalized source cache (one canonicalize per file, reused everywhere).
-    let source_cache: HashMap<std::path::PathBuf, String> = all_files
+    // current_sources: lightweight path normalization for deleted-file detection (no canonicalize).
+    let current_sources: std::collections::HashSet<String> = all_files
         .iter()
-        .map(|f| (f.clone(), v_hnsw_cli::commands::file_utils::normalize_source(f)))
+        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source_light(f))
         .collect();
-    let current_sources: std::collections::HashSet<String> = source_cache.values().cloned().collect();
 
-    // Filter to changed files only (mtime check)
+    // Filter to changed files only (mtime check).
+    // Use normalize_source_light for file_idx lookup (matches how file_idx keys are stored).
     let file_idx = file_index::load_file_index(&db_path)?;
     let code_files: Vec<_> = all_files
         .iter()
         .filter(|f| {
-            let source = source_cache.get(*f).map(String::as_str).unwrap_or("");
-            match file_idx.get_file(source) {
+            let source = v_hnsw_cli::commands::file_utils::normalize_source_light(f);
+            match file_idx.get_file(&source) {
                 Some(entry) => get_file_mtime(*f).is_none_or(|m| m != entry.mtime),
                 None => true,
             }
         })
+        .collect();
+
+    // source_cache: full canonicalize only for code_files (changed files, typically 1-5).
+    let source_cache: HashMap<std::path::PathBuf, String> = code_files
+        .iter()
+        .map(|f| ((*f).clone(), v_hnsw_cli::commands::file_utils::normalize_source(f)))
         .collect();
 
     if code_files.is_empty() {

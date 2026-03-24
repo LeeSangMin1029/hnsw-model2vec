@@ -112,7 +112,8 @@ impl MirEdgeMap {
 
                 // Skip crates not in the filter
                 if let Some(filter) = only_crates {
-                    if !filter.iter().any(|c| c.replace('-', "_") == crate_name) {
+                    let cn = crate_name.replace('-', "_");
+                    if !filter.iter().any(|c| c.replace('-', "_") == cn) {
                         continue;
                     }
                 }
@@ -976,7 +977,8 @@ pub fn load_mir_chunks_filtered(dir: &Path, only_crates: Option<&[&str]>) -> Res
                     .and_then(|s| s.to_str())
                     .and_then(|s| s.strip_suffix(".chunks"))
                     .unwrap_or("");
-                if !filter.iter().any(|c| c.replace('-', "_") == crate_name) {
+                let cn = crate_name.replace('-', "_");
+                if !filter.iter().any(|c| c.replace('-', "_") == cn) {
                     continue;
                 }
             }
