@@ -252,8 +252,17 @@ impl CallGraph {
         std::thread::spawn(move || {
             match bincode::encode_to_vec(&self, bincode::config::standard()) {
                 Ok(bytes) => {
-                    if let Err(e) = fs::write(&path, bytes) {
-                        eprintln!("[graph] background save failed: {e}");
+                    // Atomic write: write to temp file first, then rename.
+                    // If the process exits mid-write, only the tmp file is
+                    // left behind and graph.bin retains its previous version.
+                    let tmp_path = path.with_extension("tmp.bin");
+                    if let Err(e) = fs::write(&tmp_path, bytes) {
+                        eprintln!("[graph] background save write failed: {e}");
+                        return;
+                    }
+                    if let Err(e) = fs::rename(&tmp_path, &path) {
+                        eprintln!("[graph] background save rename failed: {e}");
+                        let _ = fs::remove_file(&tmp_path);
                     }
                 }
                 Err(e) => {
@@ -275,9 +284,12 @@ impl CallGraph {
 
     pub fn load(db: &Path) -> Option<Self> {
         let path = graph_cache_path(db);
-        let db_mtime = fs::metadata(db.join("payload.dat")).and_then(|m| m.modified()).ok()?;
-        let cache_mtime = fs::metadata(&path).and_then(|m| m.modified()).ok()?;
-        if cache_mtime < db_mtime { return None; }
+        // No mtime comparison — save_background is async so graph.bin's
+        // mtime may legitimately be older than payload.dat. Instead we
+        // rely on version hash (GRAPH_SOURCE_HASH) for validity. If the
+        // background save was interrupted, the tmp file won't have been
+        // renamed, so graph.bin either holds a valid previous version or
+        // doesn't exist → rebuild.
         let bytes = fs::read(&path).ok()?;
         let (graph, _): (Self, _) = bincode::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
         if graph.version != GRAPH_SOURCE_HASH { return None; }

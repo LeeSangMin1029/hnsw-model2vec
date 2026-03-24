@@ -384,22 +384,77 @@ fn kill_previous_test_bg(out_dir: &Path) {
         };
         kill_process_by_pid(pid);
     }
+
+    // Validate JSONL files — kill may have interrupted a write mid-line,
+    // leaving a corrupt (partial) last line. Remove corrupt files so the
+    // next build regenerates them cleanly.
+    validate_jsonl_files_after_kill(out_dir);
 }
 
-/// Best-effort process kill by PID. Silent on failure (process may have already exited).
+/// Check all `.edges.jsonl` and `.chunks.jsonl` files in `dir` for corrupt
+/// trailing lines (non-empty line that isn't valid JSON). Delete corrupt files.
+fn validate_jsonl_files_after_kill(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.to_string_lossy();
+        if !name.ends_with(".edges.jsonl") && !name.ends_with(".chunks.jsonl") {
+            continue;
+        }
+        if is_jsonl_corrupt(&path) {
+            eprintln!("  [mir] removing corrupt JSONL: {}", path.display());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Returns true if the file's last non-empty line is not valid JSON.
+fn is_jsonl_corrupt(path: &Path) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false, // can't read → not our problem
+    };
+    // Find last non-empty line
+    let last_line = content.lines().rev().find(|l| !l.trim().is_empty());
+    match last_line {
+        None => false, // empty file is fine
+        Some(line) => serde_json::from_str::<serde_json::Value>(line).is_err(),
+    }
+}
+
+/// Best-effort process kill by PID with image-name guard against PID reuse.
+/// On Windows, uses `taskkill /FI "IMAGENAME eq mir-callgraph.exe"` to avoid
+/// killing unrelated processes that inherited the same PID.
 #[cfg(windows)]
 fn kill_process_by_pid(pid: u32) {
-    // On Windows, use taskkill for reliable termination.
     let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
+        .args([
+            "/F",
+            "/PID", &pid.to_string(),
+            "/FI", "IMAGENAME eq mir-callgraph.exe",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
 }
 
-/// Best-effort process kill by PID. Silent on failure (process may have already exited).
+/// Best-effort process kill by PID with process-name guard against PID reuse.
+/// On Unix, reads `/proc/{pid}/comm` to verify the process is `mir-callgraph`
+/// before sending SIGKILL.
 #[cfg(not(windows))]
 fn kill_process_by_pid(pid: u32) {
+    // Guard: only kill if the process is actually mir-callgraph.
+    // If /proc is unavailable (e.g., macOS), fall through and kill anyway
+    // since macOS PID reuse is less aggressive and the risk is lower.
+    let comm_path = format!("/proc/{pid}/comm");
+    if let Ok(name) = std::fs::read_to_string(&comm_path) {
+        if !name.trim().starts_with("mir-callgraph") {
+            return; // PID reused by a different process — do not kill
+        }
+    }
     let _ = Command::new("kill")
         .args(["-9", &pid.to_string()])
         .stdout(std::process::Stdio::null())
@@ -643,7 +698,7 @@ fn is_args_cache_stale(project_root: &Path, args_dir: &Path) -> bool {
     // For single-crate projects, parse_workspace_members returns empty — the root
     // Cargo.toml is already checked above.
     if let Ok(root_content) = std::fs::read_to_string(&cargo_toml) {
-        for member_dir in parse_workspace_members(&root_content) {
+        for member_dir in parse_workspace_members(&root_content, project_root) {
             let member_toml = project_root.join(&member_dir).join("Cargo.toml");
             if let Ok(meta) = std::fs::metadata(&member_toml) {
                 if let Ok(mtime) = meta.modified() {
@@ -947,7 +1002,7 @@ pub fn detect_missing_edge_crates(project_root: &Path) -> Vec<String> {
 
     // Parse workspace members; for single-crate (non-workspace) projects,
     // treat the project root as the sole member.
-    let member_dirs = parse_workspace_members(&content);
+    let member_dirs = parse_workspace_members(&content, project_root);
     let is_single_crate = member_dirs.is_empty();
 
     let check_list: Vec<(std::path::PathBuf, std::path::PathBuf)> = if is_single_crate {
@@ -980,7 +1035,7 @@ pub fn detect_missing_edge_crates(project_root: &Path) -> Vec<String> {
 }
 
 /// Parse `[workspace] members = [...]` from a Cargo.toml string.
-fn parse_workspace_members(content: &str) -> Vec<String> {
+fn parse_workspace_members_raw(content: &str) -> Vec<String> {
     let mut members = Vec::new();
     let mut in_members = false;
     for line in content.lines() {
@@ -1023,6 +1078,37 @@ fn parse_workspace_members(content: &str) -> Vec<String> {
         }
     }
     members
+}
+
+/// Parse `[workspace] members = [...]` from a Cargo.toml string,
+/// expanding glob patterns like `crates/*` via directory listing.
+fn parse_workspace_members(content: &str, project_root: &Path) -> Vec<String> {
+    let raw = parse_workspace_members_raw(content);
+    let mut expanded = Vec::new();
+    for entry in raw {
+        if entry.contains('*') {
+            // Expand simple trailing `/*` glob: list child directories that contain Cargo.toml.
+            // Supports patterns like "crates/*" or "packages/*".
+            let prefix = entry.trim_end_matches('*').trim_end_matches('/');
+            let parent_dir = project_root.join(prefix);
+            if let Ok(read_dir) = std::fs::read_dir(&parent_dir) {
+                let mut children: Vec<String> = Vec::new();
+                for dir_entry in read_dir.flatten() {
+                    let path = dir_entry.path();
+                    if path.is_dir() && path.join("Cargo.toml").exists() {
+                        if let Ok(rel) = path.strip_prefix(project_root) {
+                            children.push(rel.to_string_lossy().replace('\\', "/"));
+                        }
+                    }
+                }
+                children.sort();
+                expanded.extend(children);
+            }
+        } else {
+            expanded.push(entry);
+        }
+    }
+    expanded
 }
 
 /// Extract `name = "..."` from the `[package]` section of a Cargo.toml.

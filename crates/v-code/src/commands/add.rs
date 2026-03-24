@@ -54,11 +54,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // Filter to changed files only (mtime check)
     let file_idx = file_index::load_file_index(&db_path)?;
     let code_files: Vec<_> = all_files
-        .into_iter()
+        .iter()
         .filter(|f| {
-            let source = source_cache.get(f).map(String::as_str).unwrap_or("");
+            let source = source_cache.get(*f).map(String::as_str).unwrap_or("");
             match file_idx.get_file(source) {
-                Some(entry) => get_file_mtime(f).is_none_or(|m| m != entry.mtime),
+                Some(entry) => get_file_mtime(*f).is_none_or(|m| m != entry.mtime),
                 None => true,
             }
         })
@@ -182,7 +182,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     }.context("failed to load MIR chunks")?;
 
     let changed_sources: std::collections::HashSet<String> = code_files.iter()
-        .filter_map(|f| source_cache.get(f).cloned())
+        .filter_map(|f| source_cache.get(*f).cloned())
         .collect();
 
     super::ingest::chunk_from_mir(&mir_chunks, &db_path, &mut entries, &mut file_metadata_map, Some(&changed_sources))?;
@@ -197,10 +197,10 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // === Record mtime for scanned files with 0 chunks (avoid re-detection) ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
     for f in &code_files {
-        let source = source_cache.get(f).cloned().unwrap_or_default();
+        let source = source_cache.get(*f).cloned().unwrap_or_default();
         if !file_metadata_map.contains_key(&source) {
-            if let Some(mtime) = get_file_mtime(f) {
-                let size = file_index::get_file_size(f).unwrap_or(0);
+            if let Some(mtime) = get_file_mtime(*f) {
+                let size = file_index::get_file_size(*f).unwrap_or(0);
                 let existing_chunk_ids = file_idx
                     .get_file(&source)
                     .map(|e| e.chunk_ids.clone())
@@ -270,7 +270,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             None
         };
 
-        prebuild_caches(&db_path, &entries, &current_sources, mir_edges.as_ref(), &mir_out_dir);
+        prebuild_caches(&db_path, &entries, &current_sources, &all_files, mir_edges.as_ref(), &mir_out_dir);
     }
 
     Ok(())
@@ -284,7 +284,8 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
 fn prebuild_caches(
     db_path: &std::path::Path,
     new_entries: &[CodeChunkEntry],
-    current_sources: &std::collections::HashSet<String>,
+    _current_sources: &std::collections::HashSet<String>,
+    all_files: &[PathBuf],
     mir_edges: Option<&v_code_intel::mir_edges::MirEdgeMap>,
     mir_edge_dir: &std::path::Path,
 ) {
@@ -305,18 +306,28 @@ fn prebuild_caches(
     if let Some(existing) = v_code_intel::loader::load_chunks_from_cache(db_path) {
         let mut kept = 0;
         let mut replaced = 0;
+        let mut pruned = 0;
         // Build set of new chunk files (ParsedChunk.file = relative path from normalize_path)
         let new_files: std::collections::HashSet<String> = chunks.iter()
             .map(|c| c.file.clone())
             .collect();
+        // Build set of all live file relative paths for deleted-file detection.
+        let live_rel_files: std::collections::HashSet<String> = all_files.iter()
+            .map(|f: &PathBuf| v_code_intel::parse::normalize_path(&f.to_string_lossy()))
+            .collect();
         for c in existing {
             if new_files.contains(c.file.as_str()) {
                 replaced += 1;
-            } else if !current_sources.is_empty() {
-                // Keep if file still exists (use file path directly, no canonicalize)
+            } else if live_rel_files.contains(c.file.as_str()) {
+                // Keep only if the file still exists in the project
                 chunks.push(c);
                 kept += 1;
+            } else {
+                pruned += 1;
             }
+        }
+        if pruned > 0 {
+            eprintln!("    [merge] pruned {pruned} chunks from deleted files");
         }
         // Sort by (file, name) for deterministic chunk order.
         chunks.sort_by(|a, b| {

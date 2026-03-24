@@ -326,6 +326,13 @@ pub(crate) fn resolve_incremental(
         Vec::new()
     };
     final_crates.extend(new_crates);
+    // Prune stale crates (deleted/renamed) to prevent unbounded cache growth.
+    let pre_prune = final_crates.len();
+    final_crates.retain(|(name, _)| all_crate_names.contains(&name.as_str()));
+    let pruned = pre_prune - final_crates.len();
+    if pruned > 0 {
+        eprintln!("      [edge-resolve] pruned {pruned} stale crate(s) from edge cache");
+    }
     let new_bundle = EdgeCacheBundle { chunks_hash, crates: final_crates };
     let _ = save_edge_bundle(db_path, &new_bundle);
 

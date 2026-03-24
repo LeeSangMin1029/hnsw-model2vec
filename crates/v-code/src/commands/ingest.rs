@@ -159,10 +159,32 @@ pub fn chunk_from_mir(
 
         let source = normalize_source(&file_path);
 
-        // Skip unchanged files if filter is provided
+        // Skip unchanged files if filter is provided.
+        // Match strategies (in order):
+        //   1. normalize_source (canonicalized absolute path)
+        //   2. root_str + file_key (non-canonicalized absolute from relative)
+        //   3. UNC-stripped file_path (handles canonicalize discrepancies)
+        //   4. suffix match — any changed_source ends with /file_key
+        //      (catches Python/JS extractors whose MIR chunks use relative paths)
         if let Some(changed) = changed_sources {
             if !changed.contains(&source) {
-                continue;
+                let abs_from_rel = format!("{}{}", root_str, file_key.replace('\\', "/"));
+                if !changed.contains(&abs_from_rel) {
+                    // Strategy 3: UNC-stripped, slash-normalized file_path without canonicalize
+                    let raw_abs = v_hnsw_core::strip_unc_prefix(
+                        &file_path.to_string_lossy(),
+                    )
+                    .replace('\\', "/");
+                    if !changed.contains(&raw_abs) {
+                        // Strategy 4: suffix match for relative file_key
+                        let rel_key = file_key.replace('\\', "/");
+                        let suffix = format!("/{rel_key}");
+                        let matched = changed.iter().any(|s| s.ends_with(&suffix));
+                        if !matched {
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
