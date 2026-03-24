@@ -62,7 +62,7 @@ fn run() -> anyhow::Result<()> {
         }
         Commands::Dead { db, include_pub, file } => intel::run_dead(db, include_pub, file),
         Commands::Stats { db } => intel::run_stats(db),
-        Commands::Coverage { db, depth, file, refresh } => intel::run_coverage(db, depth, file, refresh),
+        Commands::Coverage { db, file, refresh, .. } => intel::run_coverage(db, file, refresh),
         Commands::Add { db, input, exclude } => commands::add::run(db, input, &exclude),
         Commands::Embed { db } => commands::embed::run(db),
         Commands::Replace { db, symbol, file, body, body_file } => {

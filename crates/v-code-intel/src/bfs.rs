@@ -24,41 +24,6 @@ pub enum BfsDirection {
     Reverse,
 }
 
-/// For each function in the call graph, count how many distinct test functions
-/// can reach it via forward BFS within the given depth.
-///
-/// `depth == 0` means unlimited (full reachability).
-/// Returns a `Vec<u32>` of length `graph.len()` where `counts[i]` is the
-/// number of test functions that transitively call function `i`.
-pub fn test_reachability_counts(graph: &CallGraph, depth: u32) -> Vec<u32> {
-    let n = graph.len();
-    let max_depth = if depth == 0 { u32::MAX } else { depth };
-    let mut counts = vec![0u32; n];
-
-    let test_indices: Vec<u32> = (0..n)
-        .filter(|&i| graph.is_test[i])
-        .map(|i| i as u32)
-        .collect();
-
-    for &test_idx in &test_indices {
-        // Run a per-test BFS; collect reachable indices (excluding the seed).
-        let reached: Vec<u32> = bfs_generic(
-            graph,
-            &[test_idx],
-            max_depth,
-            BfsDirection::Forward,
-            |idx, _depth| {
-                if idx == test_idx { None } else { Some(idx) }
-            },
-        );
-        for idx in reached {
-            counts[idx as usize] += 1;
-        }
-    }
-
-    counts
-}
-
 /// Run a depth-limited BFS on the call graph.
 ///
 /// The `direction` parameter selects which adjacency list to follow.

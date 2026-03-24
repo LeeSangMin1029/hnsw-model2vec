@@ -620,12 +620,12 @@ pub fn run_dead(
                 continue;
             }
         }
-        // Skip trait impls (called via dynamic dispatch, not in MIR edges)
-        let name = &graph.names[i];
-        if name.contains(" as ") {
+        // Skip trait impls (called via dynamic dispatch)
+        if graph.fn_trait_impl[i].is_some() {
             continue;
         }
         // Skip main/entry points
+        let name = &graph.names[i];
         if name == "main" || name.ends_with("::main") || name.ends_with("::run") {
             continue;
         }
@@ -671,206 +671,69 @@ pub fn run_dead(
 /// `v-code coverage` — test coverage via `cargo llvm-cov` with call-graph supplement.
 pub fn run_coverage(
     db: PathBuf,
-    depth: u32,
-    file_filter: Option<String>,
+    _file_filter: Option<String>,
     refresh: bool,
 ) -> Result<()> {
     use std::collections::BTreeMap;
-    use v_code_intel::bfs::test_reachability_counts;
     use v_code_intel::helpers::extract_crate_name;
 
-    let graph = load_or_build_graph(&db)?;
-    let n = graph.names.len();
-
-    // BFS: for each function, count how many distinct test functions reach it.
-    let test_counts = test_reachability_counts(&graph, depth);
-
-    // Try llvm-cov first (actual execution-based coverage)
+    // Try llvm-cov (actual execution-based coverage)
     let llvm_cov_result = run_llvm_cov(&db, refresh);
 
-    if let Some(cov) = llvm_cov_result {
-        // ── llvm-cov succeeded: show per-crate summary + totals ──
-        println!("=== test coverage (cargo llvm-cov) ===\n");
+    let Some(cov) = llvm_cov_result else {
+        println!("cargo llvm-cov not available. Install with: cargo install cargo-llvm-cov");
+        return Ok(());
+    };
 
-        // Aggregate file-level data into per-crate buckets
-        let mut crate_cov: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
-        for fc in &cov.files {
-            let crate_name = extract_crate_name(&fc.filename);
-            let entry = crate_cov.entry(crate_name).or_default();
-            entry.0 += fc.fn_total;
-            entry.1 += fc.fn_covered;
-            entry.2 += fc.line_total;
-            entry.3 += fc.line_covered;
-        }
+    // ── llvm-cov succeeded: show per-crate summary + totals ──
+    println!("=== test coverage (cargo llvm-cov) ===\n");
 
-        println!(
-            "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
-            "crate", "prod_fn", "covered", "fn_cov", "lines", "ln_cov", "ln_%"
-        );
-        println!("{}", "-".repeat(84));
+    // Aggregate file-level data into per-crate buckets
+    let mut crate_cov: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
+    for fc in &cov.files {
+        let crate_name = extract_crate_name(&fc.filename);
+        let entry = crate_cov.entry(crate_name).or_default();
+        entry.0 += fc.fn_total;
+        entry.1 += fc.fn_covered;
+        entry.2 += fc.line_total;
+        entry.3 += fc.line_covered;
+    }
 
-        for (name, (fn_t, fn_c, ln_t, ln_c)) in &crate_cov {
-            let fn_pct = if *fn_t > 0 {
-                format!("{:.1}%", *fn_c as f64 / *fn_t as f64 * 100.0)
-            } else {
-                "N/A".to_owned()
-            };
-            let ln_pct = if *ln_t > 0 {
-                format!("{:.1}%", *ln_c as f64 / *ln_t as f64 * 100.0)
-            } else {
-                "N/A".to_owned()
-            };
-            println!(
-                "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
-                name, fn_t, fn_c, fn_pct, ln_t, ln_c, ln_pct
-            );
-        }
+    println!(
+        "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
+        "crate", "prod_fn", "covered", "fn_cov", "lines", "ln_cov", "ln_%"
+    );
+    println!("{}", "-".repeat(84));
 
-        println!("{}", "-".repeat(84));
-        println!(
-            "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
-            "total",
-            cov.fn_total,
-            cov.fn_covered,
-            format!("{:.1}%", cov.fn_percent),
-            cov.line_total,
-            cov.line_covered,
-            format!("{:.1}%", cov.line_percent),
-        );
-        println!();
-
-        // Show untested functions only when --file filter is active
-        if file_filter.is_some() {
-            let unreached: Vec<usize> = (0..n)
-                .filter(|&i| {
-                    if graph.is_test[i] || graph.kinds[i] != "function" {
-                        return false;
-                    }
-                    if is_derive_generated(&graph.names[i]) {
-                        return false;
-                    }
-                    if let Some(ref filter) = file_filter {
-                        if !graph.files[i].contains(filter.as_str()) {
-                            return false;
-                        }
-                    }
-                    test_counts[i] == 0
-                })
-                .collect();
-
-            if !unreached.is_empty() {
-                let (alias_map, _) = graph.global_aliases();
-                println!("--- {} functions with no test call path ---\n", unreached.len());
-                for &i in unreached.iter().take(30) {
-                    let loc = format_lines_opt(graph.lines[i]);
-                    let rel = super::relative_path(&graph.files[i]);
-                    let short = v_code_intel::helpers::apply_alias(rel, &alias_map);
-                    println!("  {short}{loc}  {}", graph.names[i]);
-                }
-                if unreached.len() > 30 {
-                    println!("  ... and {} more", unreached.len() - 30);
-                }
-                println!();
-            }
-        }
-    } else {
-        // ── Fallback: static reachability (no llvm-cov available) ──
-        eprintln!("  [coverage] cargo llvm-cov not available, using static reachability");
-
-        let mut crate_data: BTreeMap<String, CrateStats> = BTreeMap::new();
-
-        for i in 0..n {
-            if let Some(ref filter) = file_filter {
-                if !graph.files[i].contains(filter.as_str()) {
-                    continue;
-                }
-            }
-            let crate_name = extract_crate_name(&graph.files[i]);
-            let entry = crate_data.entry(crate_name).or_default();
-
-            if graph.is_test[i] && graph.kinds[i] == "function" {
-                entry.test_fn += 1;
-                continue;
-            }
-            if graph.kinds[i] != "function" {
-                continue;
-            }
-            if is_derive_generated(&graph.names[i]) {
-                continue;
-            }
-
-            entry.prod_fn += 1;
-            if test_counts[i] > 0 {
-                entry.tested += 1;
-            } else {
-                entry.untested += 1;
-            }
-            entry.functions.push(FnCoverage {
-                name: graph.names[i].clone(),
-                file: graph.files[i].clone(),
-                lines: graph.lines[i],
-                test_count: test_counts[i],
-            });
-        }
-
-        let depth_str = if depth == 0 { "unlimited".to_owned() } else { format!("{depth}") };
-        println!("=== static reachability (depth {depth_str}) ===\n");
-        println!(
-            "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
-            "crate", "prod_fn", "test_fn", "tested", "untested", "coverage"
-        );
-        println!("{}", "-".repeat(73));
-
-        let mut total = CrateStats::default();
-        for (name, stats) in &crate_data {
-            let pct = if stats.prod_fn > 0 {
-                format!("{:.1}%", stats.tested as f64 / stats.prod_fn as f64 * 100.0)
-            } else {
-                "N/A".to_owned()
-            };
-            println!(
-                "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
-                name, stats.prod_fn, stats.test_fn, stats.tested, stats.untested, pct
-            );
-            total.prod_fn += stats.prod_fn;
-            total.test_fn += stats.test_fn;
-            total.tested += stats.tested;
-            total.untested += stats.untested;
-        }
-        println!("{}", "-".repeat(73));
-        let total_pct = if total.prod_fn > 0 {
-            format!("{:.1}%", total.tested as f64 / total.prod_fn as f64 * 100.0)
+    for (name, (fn_t, fn_c, ln_t, ln_c)) in &crate_cov {
+        let fn_pct = if *fn_t > 0 {
+            format!("{:.1}%", *fn_c as f64 / *fn_t as f64 * 100.0)
+        } else {
+            "N/A".to_owned()
+        };
+        let ln_pct = if *ln_t > 0 {
+            format!("{:.1}%", *ln_c as f64 / *ln_t as f64 * 100.0)
         } else {
             "N/A".to_owned()
         };
         println!(
-            "{:<24} {:>8} {:>8} {:>8} {:>8} {:>9}",
-            "total", total.prod_fn, total.test_fn, total.tested, total.untested, total_pct
+            "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
+            name, fn_t, fn_c, fn_pct, ln_t, ln_c, ln_pct
         );
-
-        // Detail: untested functions grouped by crate
-        let any_untested = crate_data.values().any(|s| s.untested > 0);
-        if any_untested {
-            let (alias_map, _) = graph.global_aliases();
-            println!("\n--- untested functions ---\n");
-            for (crate_name, stats) in &crate_data {
-                let untested: Vec<&FnCoverage> = stats.functions.iter()
-                    .filter(|f| f.test_count == 0)
-                    .collect();
-                if untested.is_empty() {
-                    continue;
-                }
-                println!("[{}] {} untested:", crate_name, untested.len());
-                for f in &untested {
-                    let loc = format_lines_opt(f.lines);
-                    let rel = super::relative_path(&f.file);
-                    let short = v_code_intel::helpers::apply_alias(rel, &alias_map);
-                    println!("  {short}{loc}  {}", f.name);
-                }
-                println!();
-            }
-        }
     }
+
+    println!("{}", "-".repeat(84));
+    println!(
+        "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8} {:>10}",
+        "total",
+        cov.fn_total,
+        cov.fn_covered,
+        format!("{:.1}%", cov.fn_percent),
+        cov.line_total,
+        cov.line_covered,
+        format!("{:.1}%", cov.line_percent),
+    );
+    println!();
 
     Ok(())
 }
@@ -971,24 +834,6 @@ fn parse_llvm_cov_json(json: &serde_json::Value) -> Option<LlvmCovResult> {
         line_percent: lines.get("percent")?.as_f64()?,
         files,
     })
-}
-
-// ── Coverage helper types ────────────────────────────────────────────────
-
-#[derive(Default)]
-struct CrateStats {
-    prod_fn: usize,
-    test_fn: usize,
-    tested: usize,
-    untested: usize,
-    functions: Vec<FnCoverage>,
-}
-
-struct FnCoverage {
-    name: String,
-    file: String,
-    lines: Option<(usize, usize)>,
-    test_count: u32,
 }
 
 /// Returns `true` if the function name looks like it was generated by a derive macro.

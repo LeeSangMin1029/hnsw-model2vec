@@ -85,7 +85,6 @@ pub(crate) fn build_trait_impls(
             // "<type as trait::path>" → extract trait part after " as "
             lower.find(" as ").map(|pos| {
                 let after_as = &lower[pos + 4..];
-                // Strip trailing ">" if present
                 after_as.strip_suffix('>').unwrap_or(after_as)
             })
         } else {
@@ -94,7 +93,6 @@ pub(crate) fn build_trait_impls(
         if let Some(tname) = trait_name {
             let trait_idx = exact.get(tname).copied()
                 .or_else(|| {
-                    // Fallback: match by short name (last segment of path)
                     let leaf = tname.rsplit("::").next().unwrap_or(tname);
                     short.get(leaf).copied()
                 });
@@ -105,6 +103,38 @@ pub(crate) fn build_trait_impls(
     }
     for list in &mut trait_impls { list.sort_unstable(); list.dedup(); }
     trait_impls
+}
+
+/// For each function chunk, if its parent impl block is a trait impl,
+/// store that impl block's index. Otherwise `None`.
+pub(crate) fn build_fn_trait_impl(
+    names: &[String],
+    kinds: &[String],
+) -> Vec<Option<u32>> {
+    // Collect impl blocks that are trait impls (name contains " for ")
+    let mut trait_impl_set: HashMap<String, u32> = HashMap::new();
+    for (i, (name, kind)) in names.iter().zip(kinds.iter()).enumerate() {
+        if kind == "impl" {
+            let lower = name.to_lowercase();
+            if lower.contains(" for ") {
+                trait_impl_set.insert(lower, i as u32);
+            }
+        }
+    }
+
+    let mut result = vec![None; names.len()];
+    for (i, (name, kind)) in names.iter().zip(kinds.iter()).enumerate() {
+        if kind != "function" { continue; }
+        // Extract parent path: "foo::bar::method" → "foo::bar"
+        let lower = name.to_lowercase();
+        if let Some(pos) = lower.rfind("::") {
+            let parent = &lower[..pos];
+            if let Some(&impl_idx) = trait_impl_set.get(parent) {
+                result[i] = Some(impl_idx);
+            }
+        }
+    }
+    result
 }
 
 // ── Type utilities ──────────────────────────────────────────────────

@@ -38,6 +38,7 @@ pub fn build_context(
     depth: u32,
 ) -> ContextResult {
     let seeds = graph.resolve(symbol);
+    let seeds = crate::impact::expand_seeds_with_traits(graph, &seeds);
 
     // Callers: reverse BFS, exclude seeds and test chunks (tests shown separately).
     let callers = {
@@ -61,7 +62,7 @@ pub fn build_context(
     let types = collect_types(graph, chunks, &seeds);
 
     // Tests: find test chunks that call the symbol.
-    let tests = collect_tests(graph, &seeds);
+    let tests = collect_tests(graph, &seeds, depth);
 
     // Unresolved calls: calls from seed chunks that don't map to any graph callee.
     let unresolved_calls = collect_unresolved(graph, chunks, &seeds);
@@ -152,33 +153,14 @@ pub(crate) fn is_noise(call: &str) -> bool {
     ) || matches!(call, "Ok" | "Err" | "Some" | "None" | "format" | "println" | "eprintln" | "vec")
 }
 
-/// Find test chunks that directly call any seed.
-fn collect_tests(graph: &CallGraph, seeds: &[u32]) -> Vec<u32> {
-    let mut test_indices = Vec::new();
-    let mut seen = vec![false; graph.len()];
-
-    for &seed in seeds {
-        if (seed as usize) < seen.len() {
-            seen[seed as usize] = true;
+/// Find test chunks reachable via reverse BFS up to `depth` levels from seeds.
+fn collect_tests(graph: &CallGraph, seeds: &[u32], depth: u32) -> Vec<u32> {
+    let all = bfs_generic(graph, seeds, depth, BfsDirection::Reverse, |idx, d| {
+        if d > 0 && graph.is_test[idx as usize] {
+            Some(idx)
+        } else {
+            None
         }
-    }
-
-    for &seed in seeds {
-        let seed_usize = seed as usize;
-        if seed_usize >= graph.callers.len() {
-            continue;
-        }
-        for &caller_idx in &graph.callers[seed_usize] {
-            let caller_usize = caller_idx as usize;
-            if caller_usize < graph.is_test.len()
-                && graph.is_test[caller_usize]
-                && !seen[caller_usize]
-            {
-                seen[caller_usize] = true;
-                test_indices.push(caller_idx);
-            }
-        }
-    }
-
-    test_indices
+    });
+    all
 }

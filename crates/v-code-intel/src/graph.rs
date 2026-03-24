@@ -65,6 +65,8 @@ pub struct CallGraph {
     pub trait_impls: Vec<Vec<u32>>,
     /// Reverse of `trait_impls`: impl_idx → trait_idx (None if not a trait impl).
     pub impl_of_trait: Vec<Option<u32>>,
+    /// Per-function: parent trait impl block index (None if not in a trait impl).
+    pub fn_trait_impl: Vec<Option<u32>>,
     pub call_sites: Vec<Vec<(u32, u32)>>,
     pub field_access_index: Vec<(String, Vec<u32>)>,
 }
@@ -126,6 +128,7 @@ impl CallGraph {
                 impl_of_trait[impl_idx as usize] = Some(trait_idx as u32);
             }
         }
+        let fn_trait_impl = index_tables::build_fn_trait_impl(&names, &kinds);
 
         eprintln!("      [graph] assemble: {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
 
@@ -134,7 +137,7 @@ impl CallGraph {
             names, files, kinds,
             lines: lines_vec, signatures, name_index,
             callees: adj.callees, callers: adj.callers,
-            is_test, trait_impls, impl_of_trait,
+            is_test, trait_impls, impl_of_trait, fn_trait_impl,
             call_sites: adj.call_sites,
             field_access_index,
         }
