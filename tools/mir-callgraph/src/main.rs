@@ -304,9 +304,17 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
     if let Some(dir) = &out_dir {
         use std::io::Write;
 
-        // Write edges — append mode so lib + test results merge
+        // Write edges: truncate on lib build (first), append on test build (second).
+        // This way only crates actually rebuilt get fresh files; skipped crates keep their files.
         let edge_path = format!("{dir}/{crate_name}.edges.jsonl");
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&edge_path) {
+        let is_test_build = args.iter().any(|a| a == "--test")
+            || rustc_args.iter().any(|a| a == "--test");
+        let file_result = if is_test_build {
+            std::fs::OpenOptions::new().create(true).append(true).open(&edge_path)
+        } else {
+            std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&edge_path)
+        };
+        if let Ok(file) = file_result {
             let mut w = std::io::BufWriter::new(file);
             for edge in &edges {
                 if let Ok(s) = serde_json::to_string(edge) {
@@ -315,9 +323,14 @@ fn extract_all(tcx: TyCtxt<'_>, json: bool, is_test_target: bool) {
             }
         }
 
-        // Write chunks — append mode
+        // Write chunks: truncate on lib, append on test (same as edges)
         let chunk_path = format!("{dir}/{crate_name}.chunks.jsonl");
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&chunk_path) {
+        let chunk_result = if is_test_build {
+            std::fs::OpenOptions::new().create(true).append(true).open(&chunk_path)
+        } else {
+            std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&chunk_path)
+        };
+        if let Ok(file) = chunk_result {
             let mut w = std::io::BufWriter::new(file);
             for chunk in &chunks {
                 if let Ok(s) = serde_json::to_string(chunk) {

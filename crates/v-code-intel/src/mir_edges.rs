@@ -307,29 +307,8 @@ pub fn run_mir_callgraph_for(
     crates: &[&str],
 ) -> Result<MirEdgeMap> {
     let out_dir = project_root.join("target").join("mir-edges");
-    // Clear existing output files before run (append mode in mir-callgraph)
-    if out_dir.exists() {
-        for entry in std::fs::read_dir(&out_dir).into_iter().flatten().flatten() {
-            let p = entry.path();
-            let name = p.to_string_lossy();
-            if name.ends_with(".edges.jsonl") || name.ends_with(".chunks.jsonl") {
-                // Only clear files for crates we're about to re-analyze
-                let should_clear = crates.is_empty() || crates.iter().any(|c| {
-                    let crate_underscore = c.replace('-', "_");
-                    // Match exact crate name in filename: "{crate}.edges.jsonl"
-                    // Avoid substring match (e.g. "v_code" matching "v_code_intel")
-                    let file_stem = p.file_stem()
-                        .and_then(|s| s.to_str())
-                        .and_then(|s| s.strip_suffix(".edges").or_else(|| s.strip_suffix(".chunks")))
-                        .unwrap_or("");
-                    file_stem == crate_underscore
-                });
-                if should_clear {
-                    let _ = std::fs::remove_file(&p);
-                }
-            }
-        }
-    }
+    // No pre-deletion: RUSTC_WRAPPER now truncates on lib build and appends on test.
+    // Crates that cargo skips (already built) keep their existing edge files intact.
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create MIR edge dir: {}", out_dir.display()))?;
 
@@ -424,9 +403,7 @@ pub fn run_mir_direct(
     }
 
     // ── Phase 3: Direct mode ─────────────────────────────────────────
-    // Clear existing output files for re-analyzed crates
-    clear_edge_files(&out_dir, crates);
-
+    // No pre-deletion: --direct calls truncate on lib build, append on test.
     let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
     let mut cmd = Command::new(&bin);
     cmd.current_dir(project_root)
@@ -466,27 +443,8 @@ fn all_extern_paths_valid(crates: &[&str], args_dir: &Path) -> bool {
     true
 }
 
-/// Clear edge/chunk JSONL files for specific crates.
-fn clear_edge_files(out_dir: &Path, crates: &[&str]) {
-    if !out_dir.exists() { return; }
-    for entry in std::fs::read_dir(out_dir).into_iter().flatten().flatten() {
-        let p = entry.path();
-        let fname = p.to_string_lossy();
-        if fname.ends_with(".edges.jsonl") || fname.ends_with(".chunks.jsonl") {
-            let should_clear = crates.iter().any(|c| {
-                let crate_underscore = c.replace('-', "_");
-                let file_stem = p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.strip_suffix(".edges").or_else(|| s.strip_suffix(".chunks")))
-                    .unwrap_or("");
-                file_stem == crate_underscore
-            });
-            if should_clear {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
-}
+// Edge file cleanup removed: RUSTC_WRAPPER now truncates on lib build.
+// Crates skipped by cargo keep their existing (valid) edge files.
 
 /// Check if the rustc-args cache is stale.
 ///
