@@ -47,7 +47,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // current_sources: lightweight path normalization for deleted-file detection (no canonicalize).
     let current_sources: std::collections::HashSet<String> = all_files
         .iter()
-        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source_light(f))
+        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source(f))
         .collect();
 
     // Filter to changed files only (mtime check).
@@ -56,7 +56,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let code_files: Vec<_> = all_files
         .iter()
         .filter(|f| {
-            let source = v_hnsw_cli::commands::file_utils::normalize_source_light(f);
+            let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
             match file_idx.get_file(&source) {
                 Some(entry) => get_file_mtime(*f).is_none_or(|m| m != entry.mtime),
                 None => true,
