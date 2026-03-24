@@ -170,6 +170,29 @@ impl MirEdgeMap {
     }
 }
 
+/// Get the nightly sysroot bin path for rustc_driver DLL resolution.
+/// mir-callgraph dynamically links rustc_driver, which lives in the nightly bin dir.
+fn nightly_sysroot_bin() -> Option<String> {
+    Command::new("rustc")
+        .args(["+nightly", "--print", "sysroot"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| {
+            let sysroot = s.trim();
+            format!("{sysroot}/bin")
+        })
+}
+
+/// Append nightly sysroot/bin to a Command's PATH so rustc_driver DLL is found.
+fn add_nightly_path(cmd: &mut Command) {
+    if let Some(nightly_bin) = nightly_sysroot_bin() {
+        let current = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{current};{nightly_bin}"));
+    }
+}
+
 // Embedded mir-callgraph source files for auto-build.
 const MIR_CALLGRAPH_MAIN_RS: &str =
     include_str!("../../../tools/mir-callgraph/src/main.rs");
@@ -332,6 +355,7 @@ pub fn run_mir_callgraph_for(
     let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
 
     let mut cmd = Command::new(&bin);
+    add_nightly_path(&mut cmd);
     cmd.current_dir(project_root)
         .arg("--keep-going")
         .env("MIR_CALLGRAPH_OUT", &out_dir)
@@ -546,6 +570,7 @@ pub fn run_mir_direct(
 
     for args_file in &lib_files {
         let mut cmd = Command::new(&bin);
+        add_nightly_path(&mut cmd);
         cmd.current_dir(project_root)
             .arg("--direct")
             .arg("--args-file").arg(args_file)
@@ -583,6 +608,7 @@ pub fn run_mir_direct(
         let mut test_pids: Vec<u32> = Vec::new();
         for args_file in &test_files {
             let mut cmd = Command::new(&bin);
+            add_nightly_path(&mut cmd);
             cmd.current_dir(project_root)
                 .arg("--direct")
                 .arg("--args-file").arg(args_file)
