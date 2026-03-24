@@ -219,15 +219,48 @@ impl CallGraph {
         mir_edges: Option<&MirEdgeMap>,
         incremental: Option<IncrementalArgs<'_>>,
     ) -> Result<Self> {
-        let graph = match (mir_edges, incremental) {
+        let graph = Self::build_only(chunks, mir_edges, incremental, db);
+        graph.save(db)?;
+        Ok(graph)
+    }
+
+    /// Build graph without saving — caller decides when/how to persist.
+    pub fn build_only(
+        chunks: &[ParsedChunk],
+        mir_edges: Option<&MirEdgeMap>,
+        incremental: Option<IncrementalArgs<'_>>,
+        db: &Path,
+    ) -> Self {
+        match (mir_edges, incremental) {
             (Some(mir), Some(inc)) if mir.total > 0 => {
                 Self::build_with_mir_incremental(chunks, mir, inc.changed_crates, db, inc.mir_edge_dir)
             }
             (Some(mir), _) if mir.total > 0 => Self::build_with_mir(chunks, mir),
             _ => Self::build(chunks),
-        };
-        graph.save(db)?;
-        Ok(graph)
+        }
+    }
+
+    /// Encode and write graph to disk in a background thread.
+    ///
+    /// Both encoding and file I/O happen off the critical path.
+    /// The graph is moved into the thread (no clone needed).
+    /// If the process exits before the thread completes, the next run
+    /// will detect a stale/missing graph.bin and rebuild.
+    pub fn save_background(self, db: &Path) {
+        let path = graph_cache_path(db);
+        let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+        std::thread::spawn(move || {
+            match bincode::encode_to_vec(&self, bincode::config::standard()) {
+                Ok(bytes) => {
+                    if let Err(e) = fs::write(&path, bytes) {
+                        eprintln!("[graph] background save failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[graph] encode failed, skipping save: {e}");
+                }
+            }
+        });
     }
 
     // ── Persistence ─────────────────────────────────────────────────

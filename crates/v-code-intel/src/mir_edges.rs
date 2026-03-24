@@ -351,6 +351,49 @@ pub fn run_mir_callgraph_for(
     MirEdgeMap::from_dir(&out_dir)
 }
 
+/// Kill any background test processes from a previous `run_mir_direct` call.
+///
+/// Reads PIDs from `.test-bg.pid`, checks if they are still running, and
+/// terminates them. The PID file is always removed afterwards.
+fn kill_previous_test_bg(out_dir: &Path) {
+    let pid_file = out_dir.join(".test-bg.pid");
+    let content = match std::fs::read_to_string(&pid_file) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Always remove the PID file first — even if kill fails, we don't want stale entries.
+    let _ = std::fs::remove_file(&pid_file);
+
+    for line in content.lines() {
+        let pid: u32 = match line.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        kill_process_by_pid(pid);
+    }
+}
+
+/// Best-effort process kill by PID. Silent on failure (process may have already exited).
+#[cfg(windows)]
+fn kill_process_by_pid(pid: u32) {
+    // On Windows, use taskkill for reliable termination.
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Best-effort process kill by PID. Silent on failure (process may have already exited).
+#[cfg(not(windows))]
+fn kill_process_by_pid(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Run mir-callgraph in direct mode — always.
 ///
 /// If prerequisites are missing (no cache, stale cache, missing artifacts),
@@ -358,6 +401,9 @@ pub fn run_mir_callgraph_for(
 /// Cargo is never used for MIR extraction itself, only for preparation.
 /// When `rust_only` is true, Python/TypeScript extractors are skipped entirely,
 /// saving ~0.3s of directory-walk overhead.
+/// Test targets are spawned in the background (fire-and-forget) and their PIDs
+/// are recorded in `target/mir-edges/.test-bg.pid`. Only lib edges are included
+/// in the returned `MirEdgeMap`.
 pub fn run_mir_direct(
     project_root: &Path,
     mir_callgraph_bin: Option<&Path>,
@@ -385,20 +431,20 @@ pub fn run_mir_direct(
         // to ensure consistent extraction path.
     }
 
-    // ── Phase 2: Collect args files ──────────────────────────────────
-    // Collect both lib and test args files per crate for parallel execution.
-    let mut args_files = Vec::new();
+    // ── Phase 2: Collect args files (lib vs test separated) ─────────
+    let mut lib_files = Vec::new();
+    let mut test_files = Vec::new();
     for krate in crates {
         let crate_underscore = krate.replace('-', "_");
         let lib_file = args_dir.join(format!("{crate_underscore}.lib.rustc-args.json"));
         let test_file = args_dir.join(format!("{crate_underscore}.test.rustc-args.json"));
-        if lib_file.exists() { args_files.push(lib_file); }
-        if test_file.exists() { args_files.push(test_file); }
+        if lib_file.exists() { lib_files.push(lib_file); }
+        if test_file.exists() { test_files.push(test_file); }
     }
 
     // If cargo just ran (Phase 1) and we still have no args, there's nothing
     // more we can do — the crate might not be a local crate.
-    if args_files.is_empty() {
+    if lib_files.is_empty() && test_files.is_empty() {
         return MirEdgeMap::from_dir(&out_dir);
     }
 
@@ -409,8 +455,11 @@ pub fn run_mir_direct(
         return MirEdgeMap::from_dir(&out_dir);
     }
 
-    // ── Phase 3: Direct mode — lib and test in parallel per crate ──────
+    // ── Phase 3: Direct mode — lib sync, test fire-and-forget ──────
     let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
+
+    // Kill any leftover background test process from a previous run.
+    kill_previous_test_bg(&out_dir);
 
     // Pre-truncate edge/chunk files for crates we're about to rebuild.
     // This allows RUSTC_WRAPPER to use append mode for both lib and test.
@@ -422,11 +471,11 @@ pub fn run_mir_direct(
         }
     }
 
-    let mut children: Vec<(std::path::PathBuf, std::process::Child)> = Vec::new();
+    // ── Phase 3a: Launch lib builds synchronously ──────────────────
+    let mut lib_children: Vec<(PathBuf, std::process::Child)> = Vec::new();
     let mut had_error = false;
 
-    // Launch all builds (lib + test) in parallel
-    for args_file in &args_files {
+    for args_file in &lib_files {
         let mut cmd = Command::new(&bin);
         cmd.current_dir(project_root)
             .arg("--direct")
@@ -434,15 +483,15 @@ pub fn run_mir_direct(
             .env("MIR_CALLGRAPH_OUT", &out_dir)
             .env("MIR_CALLGRAPH_JSON", "1");
         match cmd.spawn() {
-            Ok(child) => children.push((args_file.clone(), child)),
+            Ok(child) => lib_children.push((args_file.clone(), child)),
             Err(e) => {
-                eprintln!("  [mir] failed to spawn direct: {e}");
+                eprintln!("  [mir] failed to spawn direct (lib): {e}");
                 had_error = true;
             }
         }
     }
 
-    for (path, mut child) in children {
+    for (path, mut child) in lib_children {
         if let Ok(status) = child.wait() {
             if !status.success() {
                 eprintln!("  [mir] direct failed for {}: {status}", path.display());
@@ -452,8 +501,44 @@ pub fn run_mir_direct(
     }
 
     if had_error {
-        eprintln!("  [mir] some direct builds failed, refreshing via cargo...");
+        eprintln!("  [mir] some lib builds failed, refreshing via cargo...");
         run_mir_callgraph_for(project_root, mir_callgraph_bin, crates, rust_only)?;
+        run_language_extractors(project_root, &out_dir, rust_only);
+        return MirEdgeMap::from_dir(&out_dir);
+    }
+
+    // ── Phase 3b: Fire-and-forget test builds ──────────────────────
+    // Test processes append to the same JSONL files after lib is done.
+    // We record their PIDs so the next `add` can wait/kill if needed.
+    if !test_files.is_empty() {
+        let mut test_pids: Vec<u32> = Vec::new();
+        for args_file in &test_files {
+            let mut cmd = Command::new(&bin);
+            cmd.current_dir(project_root)
+                .arg("--direct")
+                .arg("--args-file").arg(args_file)
+                .env("MIR_CALLGRAPH_OUT", &out_dir)
+                .env("MIR_CALLGRAPH_JSON", "1");
+            match cmd.spawn() {
+                Ok(child) => {
+                    test_pids.push(child.id());
+                    // Intentionally leak the Child handle — the OS will reap
+                    // the process when it exits. We track it via PID file.
+                    std::mem::forget(child);
+                }
+                Err(e) => {
+                    eprintln!("  [mir] failed to spawn direct (test): {e}");
+                    // Non-fatal: lib edges are enough for now.
+                }
+            }
+        }
+        if !test_pids.is_empty() {
+            let pid_file = out_dir.join(".test-bg.pid");
+            let content = test_pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n");
+            let _ = std::fs::write(&pid_file, content);
+            eprintln!("  [mir] test builds spawned in background (PIDs: {})",
+                test_pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "));
+        }
     }
 
     run_language_extractors(project_root, &out_dir, rust_only);

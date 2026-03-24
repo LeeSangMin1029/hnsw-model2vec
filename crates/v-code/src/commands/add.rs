@@ -326,14 +326,17 @@ fn prebuild_caches(
         let _ = file.set_modified(std::time::SystemTime::now());
     }
 
-    // Build + save graph via shared rebuild helper.
-    // Use incremental edge resolve: changed crates are determined by
-    // per-crate cache staleness (edge file mtime vs cache mtime).
+    // Build graph, then save asynchronously in background thread.
+    // Encoding happens synchronously (current thread), only file I/O is async.
+    // This shaves ~30-50ms off the critical path for large graph.bin (~11MB).
     let incremental = mir_edges.map(|_| v_code_intel::graph::IncrementalArgs {
         changed_crates: &[],  // empty → staleness-based detection
         mir_edge_dir,
     });
-    let _ = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, mir_edges, incremental);
+    let graph = v_code_intel::graph::CallGraph::build_only(
+        &chunks, mir_edges, incremental, db_path,
+    );
+    graph.save_background(db_path);
 }
 
 /// Zero-copy ingest: CodeChunkEntry → Payload bincode → disk.
