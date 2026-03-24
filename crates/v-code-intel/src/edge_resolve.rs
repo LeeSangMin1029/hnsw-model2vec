@@ -183,18 +183,20 @@ fn resolve_crate_edges(
     mir_edges: &MirEdgeMap,
     loc_to_idx: &HashMap<(&str, usize), u32>,
     name_to_idx: &HashMap<String, u32>,
+    suffix_to_idx: &HashMap<String, u32>,
+    file_suffix_to_normalized: &HashMap<String, Vec<String>>,
     chunks: &[ParsedChunk],
 ) -> Vec<(u32, u32, u32)> {
     let mut edges = Vec::new();
     let callers = mir_edges.callers_for_crate(crate_name);
 
     for caller_name in &callers {
-        let src = resolve_by_loc_or_name(caller_name, loc_to_idx, name_to_idx, chunks);
+        let src = resolve_by_loc_or_name(caller_name, loc_to_idx, name_to_idx, suffix_to_idx, chunks);
         let Some(callees) = mir_edges.by_caller.get(*caller_name) else { continue };
 
         for callee in callees {
             let tgt = if !callee.file.is_empty() && callee.start_line > 0 {
-                resolve_by_location(&callee.file, callee.start_line, loc_to_idx, chunks)
+                resolve_by_location(&callee.file, callee.start_line, loc_to_idx, file_suffix_to_normalized, chunks)
             } else {
                 None
             }.or_else(|| {
@@ -236,9 +238,26 @@ pub(crate) fn resolve_incremental(
         }
     }
     let mut name_to_idx: HashMap<String, u32> = HashMap::new();
+    let mut suffix_to_idx: HashMap<String, u32> = HashMap::new();
+    // file path → normalized file names (for resolve_by_location O(1) lookup)
+    let mut file_suffix_to_normalized: HashMap<String, Vec<String>> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
         let clean = strip_visibility_prefix(&c.name);
-        name_to_idx.insert(clean.to_lowercase(), i as u32);
+        let lower = clean.to_lowercase();
+        name_to_idx.insert(lower.clone(), i as u32);
+        if let Some(last) = lower.rsplit("::").next() {
+            suffix_to_idx.entry(last.to_owned()).or_insert(i as u32);
+        }
+        // Index file paths for location-based resolve
+        let file_lower = c.file.to_lowercase();
+        file_suffix_to_normalized.entry(file_lower.clone())
+            .or_default()
+            .push(c.file.clone());
+    }
+    // Dedup normalized file entries
+    for v in file_suffix_to_normalized.values_mut() {
+        v.sort();
+        v.dedup();
     }
 
     let t_start = std::time::Instant::now();
@@ -273,7 +292,7 @@ pub(crate) fn resolve_incremental(
             || is_crate_cache_stale(db_path, mir_edge_dir, crate_name, bundle_mtime);
 
         if needs_resolve {
-            let idx_edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
+            let idx_edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, &suffix_to_idx, &file_suffix_to_normalized, chunks);
             re_resolved_crates += 1;
             mir_resolved += idx_edges.len();
             new_crates.insert(crate_name.to_string(), CrateEdgeCache { idx_edges: idx_edges.clone() });
@@ -286,7 +305,7 @@ pub(crate) fn resolve_incremental(
                 adj.add_edge(s as usize, t, line);
             }
         } else {
-            let edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
+            let edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, &suffix_to_idx, &file_suffix_to_normalized, chunks);
             re_resolved_crates += 1;
             mir_resolved += edges.len();
             new_crates.insert(crate_name.to_string(), CrateEdgeCache { idx_edges: edges.clone() });
@@ -382,22 +401,29 @@ pub(crate) fn resolve_with_mir(
         }
     }
 
-    // Secondary: name → chunk index (fallback for edges without location).
-    // Strip visibility prefixes (e.g. "pub(in foo) bar::baz" → "bar::baz")
-    // so MIR names like "bar::baz" match chunks whose name includes visibility.
     let mut name_to_idx: HashMap<String, u32> = HashMap::new();
+    let mut suffix_to_idx: HashMap<String, u32> = HashMap::new();
+    let mut file_suffix_to_normalized: HashMap<String, Vec<String>> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
         let clean = strip_visibility_prefix(&c.name);
-        name_to_idx.insert(clean.to_lowercase(), i as u32);
+        let lower = clean.to_lowercase();
+        name_to_idx.insert(lower.clone(), i as u32);
+        if let Some(last) = lower.rsplit("::").next() {
+            suffix_to_idx.entry(last.to_owned()).or_insert(i as u32);
+        }
+        let file_lower = c.file.to_lowercase();
+        file_suffix_to_normalized.entry(file_lower)
+            .or_default()
+            .push(c.file.clone());
     }
+    for v in file_suffix_to_normalized.values_mut() { v.sort(); v.dedup(); }
 
     for (caller_name, callees) in &mir_edges.by_caller {
-        let src = resolve_by_loc_or_name(caller_name, &loc_to_idx, &name_to_idx, chunks);
+        let src = resolve_by_loc_or_name(caller_name, &loc_to_idx, &name_to_idx, &suffix_to_idx, chunks);
 
         for callee in callees {
             let tgt = if !callee.file.is_empty() && callee.start_line > 0 {
-                // Primary: exact file + start_line match
-                resolve_by_location(&callee.file, callee.start_line, &loc_to_idx, chunks)
+                resolve_by_location(&callee.file, callee.start_line, &loc_to_idx, &file_suffix_to_normalized, chunks)
             } else {
                 None
             }.or_else(|| {
@@ -437,20 +463,27 @@ fn resolve_by_location(
     file: &str,
     start_line: usize,
     loc_to_idx: &HashMap<(&str, usize), u32>,
-    chunks: &[ParsedChunk],
+    file_suffix_to_normalized: &HashMap<String, Vec<String>>,
+    _chunks: &[ParsedChunk],
 ) -> Option<u32> {
-    // Find chunk whose file ends with the MIR file path (handles relative vs absolute)
-    for c in chunks {
-        if let Some((chunk_start, _)) = c.lines {
-            let file_match = c.file.ends_with(file)
-                || file.ends_with(&c.file)
-                || c.file == file;
-            if file_match && (chunk_start == start_line
-                || chunk_start + 1 == start_line
-                || (chunk_start > 0 && chunk_start - 1 == start_line))
-            {
-                // Found — look up index
-                return loc_to_idx.get(&(c.file.as_str(), chunk_start)).copied();
+    // Resolve file path to normalized forms, then look up by (file, line) in HashMap.
+    // Try exact match first, then suffix match, with line ±1 tolerance.
+    let file_lower = file.to_lowercase();
+    let candidates: Vec<&str> = file_suffix_to_normalized.get(&file_lower)
+        .map(|v| v.iter().map(String::as_str).collect())
+        .unwrap_or_else(|| {
+            // Try suffix match: find normalized files that end with this path
+            file_suffix_to_normalized.iter()
+                .filter(|(_, norms)| norms.iter().any(|n| n.ends_with(file) || file.ends_with(n.as_str())))
+                .flat_map(|(_, norms)| norms.iter().map(String::as_str))
+                .collect()
+        });
+
+    for norm_file in &candidates {
+        for delta in [0isize, 1, -1] {
+            let line = (start_line as isize + delta) as usize;
+            if let Some(&idx) = loc_to_idx.get(&(*norm_file, line)) {
+                return Some(idx);
             }
         }
     }
@@ -463,22 +496,15 @@ fn resolve_by_loc_or_name(
     caller_name: &str,
     _loc_to_idx: &HashMap<(&str, usize), u32>,
     name_to_idx: &HashMap<String, u32>,
-    chunks: &[ParsedChunk],
+    suffix_to_idx: &HashMap<String, u32>,
+    _chunks: &[ParsedChunk],
 ) -> Option<u32> {
     let lower = caller_name.to_lowercase();
-    // Name match first (callers are always from local crate, names are consistent)
     resolve_mir_name(&lower, name_to_idx)
         .or_else(|| {
-            // Fallback: find by name suffix in chunks
+            // Fallback: suffix match via pre-built HashMap (O(1) instead of O(N))
             let stripped = strip_closure_suffix(&lower);
-            chunks.iter().enumerate().find_map(|(i, c)| {
-                let cl = c.name.to_lowercase();
-                if cl == stripped || cl.ends_with(&format!("::{stripped}")) {
-                    Some(i as u32)
-                } else {
-                    None
-                }
-            })
+            suffix_to_idx.get(stripped).copied()
         })
 }
 
