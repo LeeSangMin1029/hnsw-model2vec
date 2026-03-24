@@ -2,7 +2,7 @@
 
 Rust로 작성된 로컬 벡터 데이터베이스 + 코드 인텔리전스 플랫폼.
 
-12개 크레이트, 259개 파일, 35,000+ 라인. 971개 프로덕션 함수, 1,351개 테스트.
+10개 크레이트, 240개 파일, 40,000+ 라인 (프로덕션 24K + 테스트 17K). 1,548개 프로덕션 함수, 1,128개 테스트.
 
 ## 설치
 
@@ -34,7 +34,6 @@ cargo build --release -p v-hnsw
 
 # 코드 인텔리전스 CLI
 cargo build --release -p v-code
-
 ```
 
 빌드된 바이너리: `target/release/v-hnsw`, `target/release/v-code`
@@ -62,11 +61,12 @@ cargo build --release -p v-code
 
 ### 코드 인텔리전스
 
-- **tree-sitter 기반 심볼 추출** — 10개 언어 (Rust, TS, JS, Python, Go, Java, C, C++, C#, Ruby)
-- **호출 그래프** — callee/caller BFS, import 기반 모듈 해석, trait impl 연결
+- **MIR 기반 호출 그래프** — rustc MIR에서 call edges 추출 (100% 정확, name-resolve fallback 없음)
 - **영향 분석 (blast radius)** — 심볼 변경 시 전파 범위 + prod/test 분리
 - **클론 감지** — AST 해시 + MinHash Jaccard + sub-block 비교
-- **문자열 흐름 추적** — 함수 간 string literal 전파 경로 분석
+- **dead code 탐지** — caller 없는 함수 자동 검출
+- **테스트 커버리지** — `cargo llvm-cov` 기반 실제 커버리지 + 정적 reachability fallback
+- **심볼 기반 편집** — replace, insert, delete를 심볼 단위로 수행 (file lock으로 동시성 안전)
 
 ### 데몬 + 파일 감시
 
@@ -107,20 +107,37 @@ v-hnsw update my-db
 
 ### v-code 서브커맨드 (코드 인텔리전스)
 
+#### 분석
+
 | 커맨드 | 별칭 | 설명 |
 |--------|------|------|
-| `add` | | 코드 파일 인덱싱 (tree-sitter 청킹 + 임베딩) |
+| `add` | | MIR 기반 코드 인덱싱 (nightly 필요) |
 | `context` | `ctx` | 통합 컨텍스트 (정의 + callers + callees + types + tests) |
 | `blast` | `bl` | 영향 분석 (transitive callers + prod/test 분리) |
-| `jump` | `j` | 실행 흐름 트리 (DFS callee 탐색) |
 | `trace` | `tr` | 두 심볼 간 최단 호출 경로 |
-| `symbols` | | 심볼 목록 (함수, 구조체, enum 등) |
-| `deps` | | 파일 의존성 그래프 |
-| `detail` | `dt` | 설계 판단/이력 조회·관리 |
 | `dupes` | `dup` | 중복 코드 감지 (AST hash + MinHash + sub-block) |
-| `strings` | `str` | 문자열 리터럴 검색 |
-| `flow` | `fl` | 함수 간 문자열 흐름 추적 |
+| `dead` | | caller 없는 함수 탐지 (unreachable code) |
+| `coverage` | `cov` | 테스트 커버리지 (llvm-cov 기반) |
+| `symbols` | | 심볼 목록 (함수, 구조체, enum 등) |
 | `stats` | | 크레이트별 코드 통계 |
+| `aliases` | | 경로 별칭 매핑 |
+| `watch` | | 파일 변경 자동 감시 + 증분 업데이트 |
+| `embed` | | 시맨틱 검색용 벡터 임베딩 |
+
+#### 편집 (심볼 기반, 동시성 안전)
+
+| 커맨드 | 별칭 | 설명 |
+|--------|------|------|
+| `replace` | `rep` | 심볼 본체 교체 |
+| `insert-after` | | 심볼 뒤에 삽입 |
+| `insert-before` | | 심볼 앞에 삽입 |
+| `delete-symbol` | `del` | 심볼 삭제 |
+| `insert-at` | `ia` | 특정 라인에 삽입 |
+| `replace-lines` | `rl` | 라인 범위 교체 |
+| `delete-lines` | `dl` | 라인 범위 삭제 |
+| `create-file` | `cf` | 새 파일 생성 |
+
+모든 편집 커맨드는 `.lock` sidecar file 기반 exclusive lock으로 동시 편집 안전.
 
 ### find — 검색
 
@@ -147,7 +164,7 @@ v-hnsw find my-db "검색어" --min-score 0.5
 # 마크다운 폴더
 v-hnsw add my-db ./notes/
 
-# 소스코드 폴더 (tree-sitter 기반 청킹)
+# 소스코드 폴더
 v-hnsw add my-code.db ./src/
 
 # JSONL / Parquet 파일
@@ -162,37 +179,37 @@ v-hnsw add my-db ./project/ --exclude node_modules --exclude .git
 ### v-code — 코드 인텔리전스
 
 ```bash
-# 코드 인덱싱
-v-code add my-code.db ./src/ --exclude target
+# 코드 인덱싱 (nightly rustc 필요)
+v-code add .code.db .
 
 # 통합 컨텍스트 (정의 + callers + callees + types + tests)
-v-code context my-code.db search_layer
-v-code context my-code.db search_layer --depth 2
+v-code context .code.db search_layer
+v-code context .code.db search_layer -s          # 소스 코드 인라인
+v-code context .code.db search_layer --tree       # DFS callee 트리
 
 # 영향 분석 (변경 시 전파 범위)
-v-code blast my-code.db HnswGraph --depth 3
-v-code blast my-code.db HnswGraph --include-tests
-
-# 실행 흐름 트리
-v-code jump my-code.db main --depth 3
+v-code blast .code.db HnswGraph --depth 3
+v-code blast .code.db HnswGraph --include-tests
 
 # 두 심볼 간 호출 경로
-v-code trace my-code.db main search_layer
+v-code trace .code.db main search_layer
 
-# 심볼 검색
-v-code symbols my-code.db --kind function
-v-code symbols my-code.db -n search
+# dead code 탐지
+v-code dead .code.db
+
+# 테스트 커버리지
+v-code coverage .code.db
 
 # 중복 코드 감지 + 분석
-v-code dupes my-code.db --all --exclude-tests
-v-code dupes my-code.db --all --analyze    # callee/blast 교차 분석 포함
+v-code dupes .code.db --all --analyze
 
-# 문자열 흐름 추적
-v-code strings my-code.db "error"
-v-code flow my-code.db "connection refused"
+# 심볼 기반 편집
+v-code replace .code.db my_function --body-file /tmp/new_body.rs
+v-code insert-after .code.db my_function --body-file /tmp/code.rs
+v-code delete-symbol .code.db unused_function
 
-# 설계 판단 기록
-v-code detail my-code.db HnswGraph --decision "mmap snapshot for zero-copy"
+# 파일 변경 자동 감시
+v-code watch .code.db .
 ```
 
 ### bench — 벤치마크
@@ -270,18 +287,24 @@ v-hnsw find my-db "아키텍처" --tag project-structure
 - **자동 재인덱싱** — 변경 감지 2초 debounce 후 `v-code add` 백그라운드 실행
 - **바이너리 갱신 감지** — `cargo install` 후 데몬 자동 재시작
 
+## 동시성
+
+여러 에이전트(프로세스)가 v-code를 동시에 사용할 수 있습니다:
+
+- **읽기 커맨드** (context, blast, trace, symbols 등) — 동시 실행 안전
+- **편집 커맨드** (replace, insert-*, delete-*) — `.lock` sidecar file 기반 exclusive lock으로 같은 파일 동시 편집 안전
+- **DB 쓰기** (add) — 단일 프로세스 권장
+
+10개 에이전트 동시 편집 × 50 라운드 스트레스 테스트 통과.
+
 ## 지원 입력 포맷
 
 | 포맷 | 확장자 | 설명 |
 |------|--------|------|
 | **마크다운 폴더** | `*.md` | 시맨틱 청킹, 프론트매터 태그 파싱 |
-| **소스코드 폴더** | `*.rs`, `*.ts`, `*.py` 등 | tree-sitter 함수/구조체 단위 청킹 (10개 언어) |
+| **소스코드 폴더** | `*.rs` 등 | MIR 기반 함수/구조체 단위 인덱싱 |
 | JSONL | `.jsonl`, `.ndjson` | `{"text": "...", "tags": [...], "source": "..."}` |
 | Parquet | `.parquet` | text/content 컬럼 자동 감지 |
-
-### 지원 언어 (소스코드)
-
-Rust, TypeScript, JavaScript, Python, Go, Java, C, C++, C#, Ruby
 
 ## Low-level 명령어
 
@@ -311,11 +334,10 @@ crates/
 ├── v-hnsw-search    # 하이브리드 검색 (BM25 + Convex Fusion + MaxScore)
 ├── v-hnsw-storage   # mmap 벡터 저장소 + WAL + SQ8 양자화 + 데몬 클라이언트
 ├── v-hnsw-embed     # model2vec 임베딩
-├── v-hnsw-rerank    # cross-encoder reranking (ms-marco-TinyBERT)
-├── v-hnsw-cli       # 공유 인프라 (lib) + v-hnsw 문서 검색 바이너리
-├── v-code-chunk     # tree-sitter 코드 청킹 (10개 언어)
-├── v-code-intel     # 호출 그래프, 영향 분석, 클론 감지, 문자열 흐름
-├── v-code           # v-code 코드 인텔리전스 바이너리
+├── v-hnsw-cli       # CLI 공유 인프라 (lib) + 문서 검색 커맨드
+├── v-hnsw           # v-hnsw 문서 검색 바이너리 (thin wrapper)
+├── v-code-intel     # 호출 그래프, 영향 분석, 클론 감지, 동시성 테스트
+├── v-code           # v-code 코드 인텔리전스 바이너리 + 심볼 기반 편집
 └── v-daemon         # 백그라운드 데몬 (mmap 캐시 + 파일 감시 + 자동 재인덱싱)
 ```
 
@@ -329,6 +351,15 @@ Query → Embedding (model2vec, 256d)
      └─ Convex Fusion (alpha * dense + (1-alpha) * sparse)
          → Tag filtering (Roaring Bitmap)
          → Results
+```
+
+### 코드 인텔리전스 파이프라인
+
+```
+Source → cargo +nightly check (RUSTC_WRAPPER=mir-callgraph)
+     → MIR call edges + chunk 정보 추출
+     → CallGraph (callee/caller/trait_impl 양방향 인접 리스트)
+     → context / blast / trace / dead / coverage / dupes
 ```
 
 ### SQ8 양자화
