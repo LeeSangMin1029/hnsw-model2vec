@@ -58,6 +58,8 @@ v-code context .code.db YourFunction --blast
 
 > `mir-callgraph` 바이너리는 첫 `v-code add` 실행 시 **자동 빌드**됩니다 (~10초, 1회).
 
+**주의**: `v-code add`는 내부적으로 `cargo +nightly check --tests`를 실행합니다. 프로젝트에 외부 빌드 의존성(protobuf, OpenSSL, CMake 등)이 있으면 해당 도구가 설치되어야 합니다. 빌드 실패한 crate는 스킵되고 나머지는 정상 인덱싱됩니다.
+
 ### 첫 실행 시 자동 다운로드
 
 첫 `add` 또는 `find` 실행 시 아래 항목이 자동 다운로드됩니다:
