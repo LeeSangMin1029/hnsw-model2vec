@@ -23,7 +23,8 @@ echo "[v-code] Installed to $DEST"
 # Install nightly
 echo "[v-code] Installing nightly rustc..."
 if command -v rustup &>/dev/null; then
-    rustup toolchain install nightly --component rust-src rustc-dev llvm-tools-preview
+    rustup toolchain install nightly
+    rustup component add rust-src rustc-dev llvm-tools-preview --toolchain nightly
 else
     echo "[v-code] rustup not found. Install Rust first: https://rustup.rs"
     exit 1

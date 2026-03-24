@@ -17,7 +17,8 @@ echo [v-code] Installed to %USERPROFILE%\.cargo\bin\v-code.exe
 
 :: Install nightly
 echo [v-code] Installing nightly rustc...
-rustup toolchain install nightly --component rust-src rustc-dev llvm-tools-preview
+rustup toolchain install nightly
+rustup component add rust-src rustc-dev llvm-tools-preview --toolchain nightly
 if errorlevel 1 (
     echo [v-code] rustup not found. Install Rust first: https://rustup.rs
     exit /b 1
