@@ -208,6 +208,7 @@ pub fn run_context(
         }
 
         let Some(seeds) = resolve_symbol(&graph, &symbol) else { return Ok(()) };
+        let seeds = impact::expand_seeds_with_traits(&graph, &seeds);
         let all_entries = impact::bfs_reverse(&graph, &seeds, effective_depth);
         let (mut prod_count, mut test_count) = (0usize, 0usize);
         for e in &all_entries {

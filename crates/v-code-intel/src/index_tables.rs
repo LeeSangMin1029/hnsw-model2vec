@@ -78,9 +78,26 @@ pub(crate) fn build_trait_impls(
     for (i, (name, kind)) in names.iter().zip(kinds.iter()).enumerate() {
         if kind != "impl" { continue; }
         let lower = name.to_lowercase();
-        if let Some(pos) = lower.find(" for ") {
-            let trait_idx = exact.get(&lower[..pos]).copied()
-                .or_else(|| short.get(&lower[..pos]).copied());
+        // Match both "impl Trait for Type" and "<Type as Trait>" naming conventions
+        let trait_name = if let Some(pos) = lower.find(" for ") {
+            Some(&lower[..pos])
+        } else if lower.starts_with('<') {
+            // "<type as trait::path>" → extract trait part after " as "
+            lower.find(" as ").map(|pos| {
+                let after_as = &lower[pos + 4..];
+                // Strip trailing ">" if present
+                after_as.strip_suffix('>').unwrap_or(after_as)
+            })
+        } else {
+            None
+        };
+        if let Some(tname) = trait_name {
+            let trait_idx = exact.get(tname).copied()
+                .or_else(|| {
+                    // Fallback: match by short name (last segment of path)
+                    let leaf = tname.rsplit("::").next().unwrap_or(tname);
+                    short.get(leaf).copied()
+                });
             if let Some(tidx) = trait_idx {
                 trait_impls[tidx as usize].push(i as u32);
             }
