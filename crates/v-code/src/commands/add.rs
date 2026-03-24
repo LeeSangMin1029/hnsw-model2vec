@@ -121,7 +121,6 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     }
 
     // === Pass 1: Extract chunks via MIR (no daemon needed) ===
-    eprintln!("  [rss] start: {:.0}MB", v_code_intel::graph::current_rss_mb());
     let t0 = std::time::Instant::now();
     let mut entries: Vec<CodeChunkEntry> = Vec::new();
     let mut file_metadata_map: HashMap<String, (u64, u64, Vec<u64>)> = HashMap::new();
@@ -156,7 +155,11 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         if !changed_crates.is_empty() {
             let crate_refs: Vec<&str> = changed_crates.iter().map(|s| s.as_str()).collect();
             eprintln!("  [mir] incremental: {} crate(s) — {}", crate_refs.len(), crate_refs.join(", "));
-            v_code_intel::mir_edges::run_mir_direct(&input_path, None, &crate_refs)
+            // Skip py/ts extractors when only .rs files changed (~0.3s saving)
+            let rust_only = code_files.iter().all(|f| {
+                f.extension().and_then(|e| e.to_str()) == Some("rs")
+            });
+            v_code_intel::mir_edges::run_mir_direct(&input_path, None, &crate_refs, rust_only)
                 .context("mir-callgraph incremental failed")?;
         }
     } else {
@@ -165,35 +168,21 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
     }
 
-    let t_mir = t0.elapsed();
-
     // Load MIR chunks and create CodeChunkEntries — only for changed files
-    let t_load = std::time::Instant::now();
     let mir_chunks = v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)
         .context("failed to load MIR chunks")?;
-    let t_load_done = t_load.elapsed();
 
     let changed_sources: std::collections::HashSet<String> = code_files.iter()
         .filter_map(|f| source_cache.get(f).cloned())
         .collect();
 
-    let t_parse = std::time::Instant::now();
     super::ingest::chunk_from_mir(&mir_chunks, &db_path, &mut entries, &mut file_metadata_map, Some(&changed_sources))?;
-    let t_parse_done = t_parse.elapsed();
 
-    eprintln!("  chunk: {:.1}s ({} chunks)  [mir={:.0}ms load={:.0}ms parse={:.0}ms]  RSS: {:.0}MB",
-        t0.elapsed().as_secs_f64(), entries.len(),
-        t_mir.as_secs_f64() * 1000.0,
-        t_load_done.as_secs_f64() * 1000.0,
-        t_parse_done.as_secs_f64() * 1000.0,
-        v_code_intel::graph::current_rss_mb());
+    eprintln!("  chunk: {:.1}s ({} chunks)", t0.elapsed().as_secs_f64(), entries.len());
 
     // === Build called_by + direct bulk write (zero-copy path) ===
     println!("Symbols: {} (functions, structs, enums, ...)", entries.len());
-    let t1 = std::time::Instant::now();
     let inserted = direct_bulk_write(&db_path, &entries, &mut engine, &file_metadata_map)?;
-    eprintln!("  ingest: {:.1}s  RSS: {:.0}MB",
-        t1.elapsed().as_secs_f64(), v_code_intel::graph::current_rss_mb());
 
 
     // === Record mtime for scanned files with 0 chunks (avoid re-detection) ===
@@ -272,9 +261,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             None
         };
 
-        let t_cache = std::time::Instant::now();
         prebuild_caches(&db_path, &entries, &current_sources, mir_edges.as_ref(), &mir_out_dir);
-        eprintln!("  cache: {:.1}s", t_cache.elapsed().as_secs_f64());
     }
 
     Ok(())
@@ -294,30 +281,19 @@ fn prebuild_caches(
 ) {
     use v_code_intel::parse::ParsedChunk;
 
-    let t_total = std::time::Instant::now();
-
     let cache = v_code_intel::loader::cache_path(db_path);
     if let Some(parent) = cache.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
     // Convert new entries to ParsedChunks.
-    let _t0 = std::time::Instant::now();
-
     let mut chunks: Vec<ParsedChunk> = new_entries.iter()
         .map(|e| ParsedChunk::from_code_chunk(&e.chunk, &e.file_path_str, e.chunk.imports.clone()))
         .collect();
 
-    // Collect files that were re-chunked (use source paths for matching).
-    let changed_sources: std::collections::HashSet<&str> = new_entries.iter()
-        .map(|e| e.source.as_str())
-        .collect();
-
     // Merge: keep existing chunks from unchanged files, skip deleted files.
     // Use cache-only load (no mtime check) to avoid DB reload after direct_bulk_write.
-    let t_merge = std::time::Instant::now();
     if let Some(existing) = v_code_intel::loader::load_chunks_from_cache(db_path) {
-        let t_loaded = t_merge.elapsed();
         let mut kept = 0;
         let mut replaced = 0;
         // Build set of new chunk files (ParsedChunk.file = relative path from normalize_path)
@@ -333,35 +309,24 @@ fn prebuild_caches(
                 kept += 1;
             }
         }
-        let t_merged = t_merge.elapsed();
         // Sort by (file, name) for deterministic chunk order.
         chunks.sort_by(|a, b| {
             a.file.cmp(&b.file).then_with(|| a.lines.cmp(&b.lines))
         });
-        let t_sorted = t_merge.elapsed();
 
         if kept > 0 || replaced > 0 {
-            eprintln!("    [merge] kept={kept}, replaced={replaced} [load={:.0}ms merge={:.0}ms sort={:.0}ms]",
-                t_loaded.as_secs_f64() * 1000.0,
-                (t_merged - t_loaded).as_secs_f64() * 1000.0,
-                (t_sorted - t_merged).as_secs_f64() * 1000.0);
+            eprintln!("    [merge] kept={kept}, replaced={replaced}");
         }
     }
     eprintln!("    [cache] {} chunks ({} new + existing)", chunks.len(), new_entries.len());
 
     // Save chunks.bin
-    let t1 = std::time::Instant::now();
     v_code_intel::loader::save_chunks_cache(&cache, &chunks);
     if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&cache) {
         let _ = file.set_modified(std::time::SystemTime::now());
     }
-    eprintln!("    [cache] chunks.bin save: {:.1}ms", t1.elapsed().as_secs_f64() * 1000.0);
 
     // Build + save graph via shared rebuild helper.
-    let t3 = std::time::Instant::now();
-    if let Some(mir) = mir_edges {
-        eprintln!("    [cache] MIR edges: {} total", mir.total);
-    }
     // Use incremental edge resolve: changed crates are determined by
     // per-crate cache staleness (edge file mtime vs cache mtime).
     let incremental = mir_edges.map(|_| v_code_intel::graph::IncrementalArgs {
@@ -369,8 +334,6 @@ fn prebuild_caches(
         mir_edge_dir,
     });
     let _ = v_code_intel::graph::CallGraph::rebuild(db_path, &chunks, mir_edges, incremental);
-    eprintln!("    [cache] graph build+save: {:.1}ms ({} chunks)", t3.elapsed().as_secs_f64() * 1000.0, chunks.len());
-    eprintln!("    [cache] total: {:.1}ms", t_total.elapsed().as_secs_f64() * 1000.0);
 }
 
 /// Zero-copy ingest: CodeChunkEntry → Payload bincode → disk.
@@ -402,7 +365,6 @@ fn direct_bulk_write(
     let start = std::time::Instant::now();
 
     // Build called_by reverse index (needed for embed_text + tags).
-    let t_idx = std::time::Instant::now();
     let reverse_index = super::ingest::build_called_by_index(entries);
     let chunk_total_map: HashMap<&str, usize> = {
         let mut m: HashMap<&str, usize> = HashMap::new();
@@ -411,11 +373,9 @@ fn direct_bulk_write(
         }
         m
     };
-    let idx_ms = t_idx.elapsed().as_secs_f64() * 1000.0;
 
     // Encode payloads + texts directly into contiguous buffers (zero-copy path).
     // No IngestRecord or intermediate Payload allocation per record.
-    let t_enc = std::time::Instant::now();
     let config = bincode::config::standard();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -487,26 +447,20 @@ fn direct_bulk_write(
 
         ids.push(*id);
     }
-    let enc_ms = t_enc.elapsed().as_secs_f64() * 1000.0;
 
     // Write to engine using raw bulk API.
-    let t_write = std::time::Instant::now();
     engine.bulk_load_raw(&ids, &payload_buf, &payload_offsets, &text_buf, &text_offsets)
         .context("Failed to bulk load")?;
-    let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
 
     // Update file index.
-    let t_fi = std::time::Instant::now();
     let mut file_idx = file_index::load_file_index(db_path)?;
     for (path, (mtime, size, chunk_ids)) in file_metadata_map {
         file_idx.update_file(path.to_string(), *mtime, *size, chunk_ids.clone());
     }
     file_index::save_file_index(db_path, &file_idx)?;
-    let fi_ms = t_fi.elapsed().as_secs_f64() * 1000.0;
 
     let inserted = entries.len() as u64;
-    println!("\nInserted {inserted} chunks in {:.2}s (idx={:.0}ms enc={:.0}ms write={:.0}ms fidx={:.0}ms)",
-        start.elapsed().as_secs_f64(), idx_ms, enc_ms, write_ms, fi_ms);
+    println!("\nInserted {inserted} chunks in {:.2}s", start.elapsed().as_secs_f64());
 
     Ok(inserted)
 }

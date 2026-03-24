@@ -111,7 +111,7 @@ fn process_changes(changed: &[PathBuf], db_path: &Path, input_path: &Path) {
     // 2. Run mir-callgraph for changed crates only
     let crate_refs: Vec<&str> = crates.iter().map(|s| s.as_str()).collect();
     let mir_edge_map =
-        match v_code_intel::mir_edges::run_mir_direct(input_path, None, &crate_refs) {
+        match v_code_intel::mir_edges::run_mir_direct(input_path, None, &crate_refs, true) {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("[watch] mir-callgraph failed: {e}");
