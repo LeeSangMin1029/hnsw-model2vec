@@ -163,15 +163,28 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
     }
 
+    let t_mir = t0.elapsed();
+
     // Load MIR chunks and create CodeChunkEntries — only for changed files
+    let t_load = std::time::Instant::now();
     let mir_chunks = v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)
         .context("failed to load MIR chunks")?;
+    let t_load_done = t_load.elapsed();
+
     let changed_sources: std::collections::HashSet<String> = code_files.iter()
         .map(|f| v_hnsw_cli::commands::file_utils::normalize_source(f))
         .collect();
+
+    let t_parse = std::time::Instant::now();
     super::ingest::chunk_from_mir(&mir_chunks, &db_path, &mut entries, &mut file_metadata_map, Some(&changed_sources))?;
-    eprintln!("  chunk: {:.1}s ({} chunks)  RSS: {:.0}MB",
-        t0.elapsed().as_secs_f64(), entries.len(), v_code_intel::graph::current_rss_mb());
+    let t_parse_done = t_parse.elapsed();
+
+    eprintln!("  chunk: {:.1}s ({} chunks)  [mir={:.0}ms load={:.0}ms parse={:.0}ms]  RSS: {:.0}MB",
+        t0.elapsed().as_secs_f64(), entries.len(),
+        t_mir.as_secs_f64() * 1000.0,
+        t_load_done.as_secs_f64() * 1000.0,
+        t_parse_done.as_secs_f64() * 1000.0,
+        v_code_intel::graph::current_rss_mb());
 
     // === Build called_by + direct bulk write (zero-copy path) ===
     println!("Symbols: {} (functions, structs, enums, ...)", entries.len());

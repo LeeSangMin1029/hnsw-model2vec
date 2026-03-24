@@ -107,80 +107,73 @@ impl ResolvedEdges {
 
 /// Cached resolved edges for a single crate.
 ///
-/// Stores edges as `(src_key, tgt_key, call_line)` where keys are
-/// `"file:start_line"` strings — independent of chunk array ordering.
-/// This allows caches to survive chunk additions/removals/reordering.
+/// Per-crate edge cache: index-based only, validated by chunks_hash.
 #[derive(bincode::Encode, bincode::Decode)]
 pub(crate) struct CrateEdgeCache {
-    /// Resolved edges: (src_key, tgt_key, call_line).
-    /// Keys are "file:start_line" for stable identity across index changes.
-    pub edges: Vec<(String, String, u32)>,
+    /// Index-based edges: (src_idx, tgt_idx, call_line).
+    pub idx_edges: Vec<(u32, u32, u32)>,
 }
 
-/// Build a chunk identity key from file + start_line.
-fn chunk_key(c: &ParsedChunk) -> String {
-    match c.lines {
-        Some((start, _)) => format!("{}:{start}", c.file),
-        None => c.name.clone(),
+/// All per-crate caches in a single file.
+/// When `chunks_hash` doesn't match current chunks, entire cache is
+/// invalidated and re-resolved (chunk order changed = rare event).
+#[derive(bincode::Encode, bincode::Decode)]
+pub(crate) struct EdgeCacheBundle {
+    /// Hash of chunk ordering at save time.
+    pub chunks_hash: u64,
+    /// Crate name → cache mapping.
+    pub crates: Vec<(String, CrateEdgeCache)>,
+}
+
+/// Compute a fingerprint of chunk ordering.
+fn compute_chunks_hash(chunks: &[ParsedChunk]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    chunks.len().hash(&mut hasher);
+    for c in chunks {
+        c.file.hash(&mut hasher);
+        c.lines.hash(&mut hasher);
     }
+    hasher.finish()
 }
 
-/// Build a reverse lookup: key → chunk index (for applying cached edges).
-fn build_key_to_idx(chunks: &[ParsedChunk]) -> HashMap<String, u32> {
-    let mut map = HashMap::with_capacity(chunks.len());
-    for (i, c) in chunks.iter().enumerate() {
-        map.insert(chunk_key(c), i as u32);
+/// Path to the single edge cache bundle file.
+fn edge_bundle_path(db_path: &Path) -> std::path::PathBuf {
+    db_path.join("cache").join("edge-cache.bin")
+}
+
+/// Save the entire edge cache bundle (single file I/O).
+fn save_edge_bundle(db_path: &Path, bundle: &EdgeCacheBundle) -> Result<()> {
+    let path = edge_bundle_path(db_path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    map
-}
-
-/// Directory for per-crate edge caches.
-fn edge_cache_dir(db_path: &Path) -> std::path::PathBuf {
-    db_path.join("cache").join("graph-edges")
-}
-
-/// Path to a specific crate's edge cache file.
-fn crate_cache_path(db_path: &Path, crate_name: &str) -> std::path::PathBuf {
-    edge_cache_dir(db_path).join(format!("{crate_name}.bin"))
-}
-
-/// Save per-crate resolved edges to cache.
-fn save_crate_cache(db_path: &Path, crate_name: &str, cache: &CrateEdgeCache) -> Result<()> {
-    let dir = edge_cache_dir(db_path);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create edge cache dir: {}", dir.display()))?;
-    let path = crate_cache_path(db_path, crate_name);
-    let bytes = bincode::encode_to_vec(cache, bincode::config::standard())
-        .context("failed to encode crate edge cache")?;
+    let bytes = bincode::encode_to_vec(bundle, bincode::config::standard())
+        .context("failed to encode edge cache bundle")?;
     std::fs::write(&path, bytes)
         .with_context(|| format!("failed to write edge cache: {}", path.display()))
 }
 
-/// Load per-crate resolved edges from cache.
-fn load_crate_cache(db_path: &Path, crate_name: &str) -> Option<CrateEdgeCache> {
-    let path = crate_cache_path(db_path, crate_name);
-    let bytes = std::fs::read(&path).ok()?;
-    let (cache, _): (CrateEdgeCache, _) =
+/// Load the edge cache bundle (single file read).
+fn load_edge_bundle(db_path: &Path) -> Option<EdgeCacheBundle> {
+    let bytes = std::fs::read(edge_bundle_path(db_path)).ok()?;
+    let (bundle, _): (EdgeCacheBundle, _) =
         bincode::decode_from_slice(&bytes, bincode::config::standard()).ok()?;
-    Some(cache)
+    Some(bundle)
 }
 
-/// Check if a crate's edge cache is stale by comparing mtime of
-/// the edge JSONL source file against the cache file.
-fn is_crate_cache_stale(db_path: &Path, mir_edge_dir: &Path, crate_name: &str) -> bool {
-    let cache_path = crate_cache_path(db_path, crate_name);
+/// Check if a crate's edges are stale by comparing edge JSONL mtime
+/// against the bundle file mtime.
+fn is_crate_cache_stale(_db_path: &Path, mir_edge_dir: &Path, crate_name: &str, bundle_mtime: Option<std::time::SystemTime>) -> bool {
     let edge_file = mir_edge_dir.join(format!("{crate_name}.edges.jsonl"));
-
-    let cache_mtime = match std::fs::metadata(&cache_path).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return true, // no cache file → stale
+    let cache_mtime = match bundle_mtime {
+        Some(t) => t,
+        None => return true,
     };
-
     let edge_mtime = match std::fs::metadata(&edge_file).and_then(|m| m.modified()) {
         Ok(t) => t,
-        Err(_) => return false, // no edge file → cache is still valid (crate wasn't re-analyzed)
+        Err(_) => return false,
     };
-
     edge_mtime > cache_mtime
 }
 
@@ -248,71 +241,71 @@ pub(crate) fn resolve_incremental(
         name_to_idx.insert(clean.to_lowercase(), i as u32);
     }
 
-    // Key-to-index map for applying cached edges (stable across reordering)
-    let key_to_idx = build_key_to_idx(chunks);
+    let chunks_hash = compute_chunks_hash(chunks);
 
-    // Collect all crate names from MIR edges
+    // Load entire bundle in one I/O operation
+    let bundle = load_edge_bundle(db_path);
+    let bundle_mtime = std::fs::metadata(edge_bundle_path(db_path))
+        .and_then(|m| m.modified()).ok();
+    let hash_matches = bundle.as_ref().is_some_and(|b| b.chunks_hash == chunks_hash);
+
+    // If hash doesn't match (chunk order changed), discard entire cache.
+    // This is rare (only on file add/remove) and ensures correctness.
+    let cached: HashMap<&str, &CrateEdgeCache> = if hash_matches {
+        bundle.as_ref()
+            .map(|b| b.crates.iter().map(|(name, cache)| (name.as_str(), cache)).collect())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
     let all_crate_names = mir_edges.crate_names();
     let changed_set: std::collections::HashSet<&str> =
         changed_crates.iter().map(String::as_str).collect();
 
+    let mut new_crates: HashMap<String, CrateEdgeCache> = HashMap::new();
+
     for crate_name in &all_crate_names {
         let needs_resolve = changed_set.contains(crate_name)
-            || is_crate_cache_stale(db_path, mir_edge_dir, crate_name);
+            || !hash_matches
+            || is_crate_cache_stale(db_path, mir_edge_dir, crate_name, bundle_mtime);
 
         if needs_resolve {
-            // Re-resolve this crate's edges
             let idx_edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
             re_resolved_crates += 1;
             mir_resolved += idx_edges.len();
-
-            // Convert to key-based edges for cache
-            let key_edges: Vec<(String, String, u32)> = idx_edges.iter()
-                .map(|&(s, t, line)| {
-                    let sk = chunks.get(s as usize).map(chunk_key).unwrap_or_default();
-                    let tk = chunks.get(t as usize).map(chunk_key).unwrap_or_default();
-                    (sk, tk, line)
-                })
-                .collect();
-            let cache = CrateEdgeCache { edges: key_edges };
-            let _ = save_crate_cache(db_path, crate_name, &cache);
-
-            // Apply edges (use current indices)
+            new_crates.insert(crate_name.to_string(), CrateEdgeCache { idx_edges: idx_edges.clone() });
             for &(s, t, line) in &idx_edges {
                 adj.add_edge(s as usize, t, line);
             }
+        } else if let Some(cache) = cached.get(crate_name) {
+            cache_loaded += cache.idx_edges.len();
+            for &(s, t, line) in &cache.idx_edges {
+                adj.add_edge(s as usize, t, line);
+            }
         } else {
-            // Load key-based cache and resolve to current indices
-            match load_crate_cache(db_path, crate_name) {
-                Some(cache) => {
-                    for (sk, tk, line) in &cache.edges {
-                        if let (Some(&s), Some(&t)) = (key_to_idx.get(sk.as_str()), key_to_idx.get(tk.as_str())) {
-                            adj.add_edge(s as usize, t, *line);
-                            cache_loaded += 1;
-                        }
-                        // Silently skip edges whose chunks no longer exist
-                    }
-                }
-                None => {
-                    // No cache — resolve fresh
-                    let edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
-                    re_resolved_crates += 1;
-                    mir_resolved += edges.len();
-                    let key_edges: Vec<(String, String, u32)> = edges.iter()
-                        .map(|&(s, t, line)| {
-                            let sk = chunks.get(s as usize).map(chunk_key).unwrap_or_default();
-                            let tk = chunks.get(t as usize).map(chunk_key).unwrap_or_default();
-                            (sk, tk, line)
-                        })
-                        .collect();
-                    let _ = save_crate_cache(db_path, crate_name, &CrateEdgeCache { edges: key_edges });
-                    for &(s, t, line) in &edges {
-                        adj.add_edge(s as usize, t, line);
-                    }
-                }
+            let edges = resolve_crate_edges(crate_name, mir_edges, &loc_to_idx, &name_to_idx, chunks);
+            re_resolved_crates += 1;
+            mir_resolved += edges.len();
+            new_crates.insert(crate_name.to_string(), CrateEdgeCache { idx_edges: edges.clone() });
+            for &(s, t, line) in &edges {
+                adj.add_edge(s as usize, t, line);
             }
         }
     }
+
+    // Merge and save (single write)
+    let mut final_crates: Vec<(String, CrateEdgeCache)> = if hash_matches {
+        bundle.map(|b| b.crates).unwrap_or_default()
+            .into_iter()
+            .filter(|(name, _)| !new_crates.contains_key(name))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    final_crates.extend(new_crates);
+    let new_bundle = EdgeCacheBundle { chunks_hash, crates: final_crates };
+    let _ = save_edge_bundle(db_path, &new_bundle);
 
     // Type ref edges from chunks (always re-resolved, cheap)
     for (src, chunk) in chunks.iter().enumerate() {
