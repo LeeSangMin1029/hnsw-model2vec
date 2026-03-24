@@ -359,10 +359,11 @@ pub fn run_mir_callgraph_for(
     MirEdgeMap::from_dir(&out_dir)
 }
 
-/// Run mir-callgraph in direct mode, bypassing cargo entirely.
+/// Run mir-callgraph in direct mode — always.
 ///
-/// Uses cached `rustc-args.json` files from a previous RUSTC_WRAPPER run.
-/// Falls back to `run_mir_callgraph_for` if the cache is stale or missing.
+/// If prerequisites are missing (no cache, stale cache, missing artifacts),
+/// runs cargo once to satisfy them, then executes direct mode.
+/// Cargo is never used for MIR extraction itself, only for preparation.
 pub fn run_mir_direct(
     project_root: &Path,
     mir_callgraph_bin: Option<&Path>,
@@ -371,85 +372,52 @@ pub fn run_mir_direct(
     let out_dir = project_root.join("target").join("mir-edges");
     let args_dir = out_dir.join("rustc-args");
 
-    // Check if cache exists at all
-    if !args_dir.exists() {
-        eprintln!("  [mir] no rustc-args cache, falling back to cargo");
-        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
+    // ── Phase 1: Ensure args cache is fresh ──────────────────────────
+    let needs_cache_refresh = !args_dir.exists() || is_args_cache_stale(project_root, &args_dir);
+    let needs_deps_rebuild = needs_cache_refresh || !all_extern_paths_valid(crates, &args_dir);
+
+    if needs_deps_rebuild {
+        if needs_cache_refresh {
+            eprintln!("  [mir] refreshing rustc-args cache via cargo...");
+        } else {
+            eprintln!("  [mir] rebuilding deps (stale --extern artifacts)...");
+        }
+        // Run cargo with RUSTC_WRAPPER to (re)generate args cache + build deps.
+        // This is preparation only — MIR extraction still happens via direct.
+        run_mir_callgraph_for(project_root, mir_callgraph_bin, crates)?;
+
+        // After cargo run, args cache is fresh. Continue to direct mode below
+        // to ensure consistent extraction path.
     }
 
-    // Check staleness: Cargo.toml or Cargo.lock newer than cache?
-    if is_args_cache_stale(project_root, &args_dir) {
-        eprintln!("  [mir] rustc-args cache is stale, falling back to cargo");
-        return run_mir_callgraph_for(project_root, mir_callgraph_bin, crates);
-    }
-
-    // Collect args files for the requested crates
+    // ── Phase 2: Collect args files ──────────────────────────────────
     let mut args_files = Vec::new();
-    let mut missing_crates = Vec::new();
-
     for krate in crates {
         let crate_underscore = krate.replace('-', "_");
-        // Load both lib and test args files (cargo builds both with --tests)
         let lib_file = args_dir.join(format!("{crate_underscore}.lib.rustc-args.json"));
         let test_file = args_dir.join(format!("{crate_underscore}.test.rustc-args.json"));
-        if lib_file.exists() || test_file.exists() {
-            // Validate --extern artifact paths exist (proc-macro .dll/.so etc.)
-            let files_valid = [&lib_file, &test_file].iter()
-                .filter(|f| f.exists())
-                .all(|f| validate_extern_paths(f));
-            if files_valid {
-                if lib_file.exists() { args_files.push(lib_file); }
-                if test_file.exists() { args_files.push(test_file); }
-            } else {
-                eprintln!("  [mir] stale --extern paths for {krate}, falling back to cargo");
-                missing_crates.push(*krate);
-            }
-        } else {
-            missing_crates.push(*krate);
-        }
+        if lib_file.exists() { args_files.push(lib_file); }
+        if test_file.exists() { args_files.push(test_file); }
     }
 
-    // If some crates are missing from cache, run them via cargo; run the rest direct.
-    if !missing_crates.is_empty() {
-        eprintln!(
-            "  [mir] missing rustc-args for: {} — running via cargo",
-            missing_crates.join(", ")
-        );
-        run_mir_callgraph_for(project_root, mir_callgraph_bin, &missing_crates)?;
-    }
-
-    // Direct mode for crates with cached args
+    // If cargo just ran (Phase 1) and we still have no args, there's nothing
+    // more we can do — the crate might not be a local crate.
     if args_files.is_empty() {
         return MirEdgeMap::from_dir(&out_dir);
     }
 
-    // Clear existing output files for the crates we're about to re-analyze (direct)
-    let direct_crates: Vec<&str> = crates.iter()
-        .filter(|c| !missing_crates.contains(c))
-        .copied()
-        .collect();
-    if out_dir.exists() {
-        for entry in std::fs::read_dir(&out_dir).into_iter().flatten().flatten() {
-            let p = entry.path();
-            let fname = p.to_string_lossy();
-            if fname.ends_with(".edges.jsonl") || fname.ends_with(".chunks.jsonl") {
-                let should_clear = direct_crates.iter().any(|c| {
-                    let crate_underscore = c.replace('-', "_");
-                    let file_stem = p.file_stem()
-                        .and_then(|s| s.to_str())
-                        .and_then(|s| s.strip_suffix(".edges").or_else(|| s.strip_suffix(".chunks")))
-                        .unwrap_or("");
-                    file_stem == crate_underscore
-                });
-                if should_clear {
-                    let _ = std::fs::remove_file(&p);
-                }
-            }
-        }
+    // If deps were just rebuilt via cargo (Phase 1), the edge files are already
+    // generated by RUSTC_WRAPPER. Skip redundant direct extraction.
+    if needs_deps_rebuild {
+        run_language_extractors(project_root, &out_dir);
+        return MirEdgeMap::from_dir(&out_dir);
     }
 
-    let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
+    // ── Phase 3: Direct mode ─────────────────────────────────────────
+    // Clear existing output files for re-analyzed crates
+    clear_edge_files(&out_dir, crates);
 
+    let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
     let mut cmd = Command::new(&bin);
     cmd.current_dir(project_root)
         .arg("--direct")
@@ -464,14 +432,50 @@ pub fn run_mir_direct(
         .with_context(|| format!("failed to run mir-callgraph --direct: {}", bin.display()))?;
 
     if !status.success() {
-        eprintln!("  [mir] mir-callgraph --direct exited with {status}, falling back to cargo");
-        return run_mir_callgraph_for(project_root, mir_callgraph_bin, &direct_crates);
+        // Direct failed unexpectedly — refresh cache and retry once.
+        eprintln!("  [mir] direct failed (exit {status}), refreshing cache and retrying...");
+        run_mir_callgraph_for(project_root, mir_callgraph_bin, crates)?;
+        // After cargo re-run, edges are already extracted. No need to retry direct.
     }
 
-    // Run language-specific extractors (Python, TypeScript)
     run_language_extractors(project_root, &out_dir);
-
     MirEdgeMap::from_dir(&out_dir)
+}
+
+/// Check if all requested crates have valid --extern artifact paths.
+fn all_extern_paths_valid(crates: &[&str], args_dir: &Path) -> bool {
+    for krate in crates {
+        let crate_underscore = krate.replace('-', "_");
+        for suffix in [".lib", ".test"] {
+            let f = args_dir.join(format!("{crate_underscore}{suffix}.rustc-args.json"));
+            if f.exists() && !validate_extern_paths(&f) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Clear edge/chunk JSONL files for specific crates.
+fn clear_edge_files(out_dir: &Path, crates: &[&str]) {
+    if !out_dir.exists() { return; }
+    for entry in std::fs::read_dir(out_dir).into_iter().flatten().flatten() {
+        let p = entry.path();
+        let fname = p.to_string_lossy();
+        if fname.ends_with(".edges.jsonl") || fname.ends_with(".chunks.jsonl") {
+            let should_clear = crates.iter().any(|c| {
+                let crate_underscore = c.replace('-', "_");
+                let file_stem = p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_suffix(".edges").or_else(|| s.strip_suffix(".chunks")))
+                    .unwrap_or("");
+                file_stem == crate_underscore
+            });
+            if should_clear {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
 }
 
 /// Check if the rustc-args cache is stale.
@@ -486,20 +490,24 @@ fn validate_extern_paths(args_file: &Path) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    // Quick scan for --extern values without full JSON parse
-    for line in content.lines() {
-        // Match patterns like "target/mir-check/debug/deps/libfoo-xxx.rlib"
-        let trimmed = line.trim().trim_matches('"').trim_end_matches(',');
-        if (trimmed.ends_with(".rlib") || trimmed.ends_with(".rmeta")
-            || trimmed.ends_with(".dll") || trimmed.ends_with(".so")
-            || trimmed.ends_with(".dylib"))
-            && trimmed.contains("target")
-        {
-            // Extract the path after "=" if it's an extern spec like "name=path"
-            let path_str = trimmed.rsplit('=').next().unwrap_or(trimmed);
-            if !std::path::Path::new(path_str).exists() {
-                return false;
-            }
+    // Parse JSON to get the args array with proper string unescaping.
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
+    let args = match parsed {
+        Ok(v) => v.get("args")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        Err(_) => return false,
+    };
+    for arg in &args {
+        let Some(s) = arg.as_str() else { continue };
+        let is_artifact = s.ends_with(".rlib") || s.ends_with(".rmeta")
+            || s.ends_with(".dll") || s.ends_with(".so") || s.ends_with(".dylib");
+        if !is_artifact { continue; }
+        // --extern name=path or just a path
+        let path_str = s.rsplit('=').next().unwrap_or(s);
+        if !std::path::Path::new(path_str).exists() {
+            return false;
         }
     }
     true
