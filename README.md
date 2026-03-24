@@ -40,6 +40,33 @@ cargo build --release -p v-code
 
 > `v-daemon`은 자동으로 시작/관리되므로 별도 빌드 불필요. 필요 시 `cargo build --release -p v-daemon`.
 
+### v-code 환경 요구사항
+
+`v-code add`는 MIR 기반 호출 그래프 추출을 위해 **nightly Rust**가 필요합니다.
+
+```bash
+# nightly 설치 (필수 컴포넌트 포함)
+rustup toolchain install nightly --component rust-src rustc-dev llvm-tools-preview
+
+# 확인
+rustc +nightly --version
+```
+
+`mir-callgraph` 바이너리는 첫 `v-code add` 실행 시 **자동 빌드**됩니다 (~10초, 1회).
+
+v-code 설치 후 다른 프로젝트에서 사용:
+```bash
+# 1. 빌드 + PATH에 설치
+cargo build --release -p v-code
+cp target/release/v-code ~/.cargo/bin/   # 또는 원하는 PATH 위치
+
+# 2. 아무 Rust 프로젝트에서 사용
+cd /path/to/your/project
+v-code add .code.db .
+v-code context .code.db YourFunction -s
+v-code context .code.db YourFunction --blast
+```
+
 ### 첫 실행 시 자동 다운로드
 
 첫 `add` 또는 `find` 실행 시 아래 항목이 자동 다운로드됩니다:
@@ -61,7 +88,9 @@ cargo build --release -p v-code
 
 ### 코드 인텔리전스
 
-- **MIR 기반 호출 그래프** — rustc MIR에서 call edges 추출 (100% 정확, name-resolve fallback 없음)
+- **MIR 기반 호출 그래프** — rustc MIR에서 call edges 추출 (100% 정확, trait dispatch/generic/closure 해소)
+- **Direct 모드** — rustc args 캐싱 + cargo 우회로 증분 업데이트 ~1초 (44K LOC), ~4.5초 (549K LOC)
+- **비동기 test** — lib만 대기 후 즉시 반환, test는 백그라운드 실행 (100% 정확도 유지)
 - **영향 분석 (blast radius)** — 심볼 변경 시 전파 범위 + prod/test 분리
 - **클론 감지** — AST 해시 + MinHash Jaccard + sub-block 비교
 - **dead code 탐지** — caller 없는 함수 자동 검출
@@ -111,9 +140,8 @@ v-hnsw update my-db
 
 | 커맨드 | 별칭 | 설명 |
 |--------|------|------|
-| `add` | | MIR 기반 코드 인덱싱 (nightly 필요) |
-| `context` | `ctx` | 통합 컨텍스트 (정의 + callers + callees + types + tests) |
-| `blast` | `bl` | 영향 분석 (transitive callers + prod/test 분리) |
+| `add` | | MIR 기반 코드 인덱싱 (nightly 필요, 증분 지원) |
+| `context` | `ctx` | 통합 컨텍스트 (정의 + callers + callees + types + tests, `--blast`로 영향 분석) |
 | `trace` | `tr` | 두 심볼 간 최단 호출 경로 |
 | `dupes` | `dup` | 중복 코드 감지 (AST hash + MinHash + sub-block) |
 | `dead` | | caller 없는 함수 탐지 (unreachable code) |
@@ -188,8 +216,8 @@ v-code context .code.db search_layer -s          # 소스 코드 인라인
 v-code context .code.db search_layer --tree       # DFS callee 트리
 
 # 영향 분석 (변경 시 전파 범위)
-v-code blast .code.db HnswGraph --depth 3
-v-code blast .code.db HnswGraph --include-tests
+v-code context .code.db HnswGraph --blast --depth 3
+v-code context .code.db HnswGraph --blast --include-tests
 
 # 두 심볼 간 호출 경로
 v-code trace .code.db main search_layer
@@ -361,6 +389,20 @@ Source → cargo +nightly check (RUSTC_WRAPPER=mir-callgraph)
      → CallGraph (callee/caller/trait_impl 양방향 인접 리스트)
      → context / blast / trace / dead / coverage / dupes
 ```
+
+증분 업데이트 (direct 모드):
+```
+파일 변경 → detect_changed_crates → rustc_driver 직접 호출 (cargo 우회)
+         → lib 동기 완료 → graph 즉시 업데이트 → 사용 가능
+         → test 백그라운드 완료 → graph 보강 (자동)
+```
+
+#### 성능 (실측)
+
+| 프로젝트 | LOC | Cold start | 증분 | No-op |
+|---------|-----|-----------|------|-------|
+| v-code | 44K | 44s | **0.95s** | 0.12s |
+| rust-analyzer | 549K | 77s | **4.5s** | 0.22s |
 
 ### SQ8 양자화
 
