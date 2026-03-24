@@ -314,26 +314,36 @@ fn prebuild_caches(
 
     // Merge: keep existing chunks from unchanged files, skip deleted files.
     // Use cache-only load (no mtime check) to avoid DB reload after direct_bulk_write.
+    let t_merge = std::time::Instant::now();
     if let Some(existing) = v_code_intel::loader::load_chunks_from_cache(db_path) {
+        let t_loaded = t_merge.elapsed();
         let mut kept = 0;
         let mut replaced = 0;
+        // Build set of new chunk files (ParsedChunk.file = relative path from normalize_path)
+        let new_files: std::collections::HashSet<String> = chunks.iter()
+            .map(|c| c.file.clone())
+            .collect();
         for c in existing {
-            let source = v_hnsw_cli::commands::file_utils::normalize_source(std::path::Path::new(&c.file));
-            if changed_sources.contains(source.as_str()) {
+            if new_files.contains(c.file.as_str()) {
                 replaced += 1;
-            } else if current_sources.contains(&source) {
+            } else if !current_sources.is_empty() {
+                // Keep if file still exists (use file path directly, no canonicalize)
                 chunks.push(c);
                 kept += 1;
             }
         }
-        // Sort by (file, start_line) for deterministic chunk order.
-        // Edge caches use chunk indices — unstable order breaks cached edges.
+        let t_merged = t_merge.elapsed();
+        // Sort by (file, name) for deterministic chunk order.
         chunks.sort_by(|a, b| {
             a.file.cmp(&b.file).then_with(|| a.lines.cmp(&b.lines))
         });
+        let t_sorted = t_merge.elapsed();
 
         if kept > 0 || replaced > 0 {
-            eprintln!("    [merge] kept={kept}, replaced={replaced}");
+            eprintln!("    [merge] kept={kept}, replaced={replaced} [load={:.0}ms merge={:.0}ms sort={:.0}ms]",
+                t_loaded.as_secs_f64() * 1000.0,
+                (t_merged - t_loaded).as_secs_f64() * 1000.0,
+                (t_sorted - t_merged).as_secs_f64() * 1000.0);
         }
     }
     eprintln!("    [cache] {} chunks ({} new + existing)", chunks.len(), new_entries.len());

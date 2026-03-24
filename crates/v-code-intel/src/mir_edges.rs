@@ -380,6 +380,7 @@ pub fn run_mir_direct(
     }
 
     // ── Phase 2: Collect args files ──────────────────────────────────
+    // Collect both lib and test args files per crate for parallel execution.
     let mut args_files = Vec::new();
     for krate in crates {
         let crate_underscore = krate.replace('-', "_");
@@ -402,27 +403,51 @@ pub fn run_mir_direct(
         return MirEdgeMap::from_dir(&out_dir);
     }
 
-    // ── Phase 3: Direct mode ─────────────────────────────────────────
-    // No pre-deletion: --direct calls truncate on lib build, append on test.
+    // ── Phase 3: Direct mode — lib and test in parallel per crate ──────
     let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
-    let mut cmd = Command::new(&bin);
-    cmd.current_dir(project_root)
-        .arg("--direct")
-        .env("MIR_CALLGRAPH_OUT", &out_dir)
-        .env("MIR_CALLGRAPH_JSON", "1");
 
-    for args_file in &args_files {
-        cmd.arg("--args-file").arg(args_file);
+    // Pre-truncate edge/chunk files for crates we're about to rebuild.
+    // This allows RUSTC_WRAPPER to use append mode for both lib and test.
+    for krate in crates {
+        let u = krate.replace('-', "_");
+        for ext in [".edges.jsonl", ".chunks.jsonl"] {
+            let p = out_dir.join(format!("{u}{ext}"));
+            if p.exists() { let _ = std::fs::write(&p, ""); }
+        }
     }
 
-    let status = cmd.status()
-        .with_context(|| format!("failed to run mir-callgraph --direct: {}", bin.display()))?;
+    let mut children: Vec<(std::path::PathBuf, std::process::Child)> = Vec::new();
+    let mut had_error = false;
 
-    if !status.success() {
-        // Direct failed unexpectedly — refresh cache and retry once.
-        eprintln!("  [mir] direct failed (exit {status}), refreshing cache and retrying...");
+    // Launch all builds (lib + test) in parallel
+    for args_file in &args_files {
+        let mut cmd = Command::new(&bin);
+        cmd.current_dir(project_root)
+            .arg("--direct")
+            .arg("--args-file").arg(args_file)
+            .env("MIR_CALLGRAPH_OUT", &out_dir)
+            .env("MIR_CALLGRAPH_JSON", "1");
+        match cmd.spawn() {
+            Ok(child) => children.push((args_file.clone(), child)),
+            Err(e) => {
+                eprintln!("  [mir] failed to spawn direct: {e}");
+                had_error = true;
+            }
+        }
+    }
+
+    for (path, mut child) in children {
+        if let Ok(status) = child.wait() {
+            if !status.success() {
+                eprintln!("  [mir] direct failed for {}: {status}", path.display());
+                had_error = true;
+            }
+        }
+    }
+
+    if had_error {
+        eprintln!("  [mir] some direct builds failed, refreshing via cargo...");
         run_mir_callgraph_for(project_root, mir_callgraph_bin, crates)?;
-        // After cargo re-run, edges are already extracted. No need to retry direct.
     }
 
     run_language_extractors(project_root, &out_dir);
