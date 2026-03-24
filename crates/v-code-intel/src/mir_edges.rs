@@ -345,6 +345,17 @@ pub fn run_mir_callgraph_for(
     // Run language-specific extractors (Python, TypeScript)
     run_language_extractors(project_root, &out_dir);
 
+    // Ensure rustc-args nightly version is saved so next run isn't stale.
+    let args_dir = out_dir.join("rustc-args");
+    if args_dir.exists() {
+        let ver_file = args_dir.join(".nightly-version");
+        if !ver_file.exists() {
+            if let Some(ver) = nightly_rustc_version() {
+                let _ = std::fs::write(&ver_file, &ver);
+            }
+        }
+    }
+
     MirEdgeMap::from_dir(&out_dir)
 }
 
@@ -378,9 +389,12 @@ pub fn run_mir_direct(
 
     for krate in crates {
         let crate_underscore = krate.replace('-', "_");
-        let args_file = args_dir.join(format!("{crate_underscore}.rustc-args.json"));
-        if args_file.exists() {
-            args_files.push(args_file);
+        // Load both lib and test args files (cargo builds both with --tests)
+        let lib_file = args_dir.join(format!("{crate_underscore}.lib.rustc-args.json"));
+        let test_file = args_dir.join(format!("{crate_underscore}.test.rustc-args.json"));
+        if lib_file.exists() || test_file.exists() {
+            if lib_file.exists() { args_files.push(lib_file); }
+            if test_file.exists() { args_files.push(test_file); }
         } else {
             missing_crates.push(*krate);
         }

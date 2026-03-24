@@ -406,8 +406,11 @@ fn main() {
                         crate_name: crate_name.clone(),
                         sysroot,
                     };
+                    // Save per target: lib and test get separate files
+                    let is_test = rustc_args.iter().any(|a| a == "--test");
+                    let suffix = if is_test { ".test" } else { ".lib" };
                     if let Ok(json_str) = serde_json::to_string_pretty(&cached) {
-                        let path = format!("{args_dir}/{crate_name}.rustc-args.json");
+                        let path = format!("{args_dir}/{crate_name}{suffix}.rustc-args.json");
                         let _ = std::fs::write(&path, json_str);
                     }
                 }
@@ -463,8 +466,8 @@ fn main() {
 
             eprintln!("[mir-callgraph] direct: compiling crate '{}'", cached.crate_name);
 
-            // Set CARGO_PKG_* env vars that cargo normally provides.
-            // Without these, proc macros like clap's `#[command(author)]` fail.
+            // Set env vars that cargo/build.rs normally provides.
+            // Without these, compile-time env!() macros and proc macros fail.
             for (key, default) in [
                 ("CARGO_PKG_AUTHORS", ""),
                 ("CARGO_PKG_NAME", cached.crate_name.as_str()),
@@ -472,6 +475,10 @@ fn main() {
                 ("CARGO_PKG_DESCRIPTION", ""),
                 ("CARGO_PKG_HOMEPAGE", ""),
                 ("CARGO_PKG_REPOSITORY", ""),
+                ("CARGO_PKG_LICENSE", ""),
+                ("CARGO_PKG_RUST_VERSION", ""),
+                // build.rs generated env vars (dummy values for MIR extraction)
+                ("GRAPH_SOURCE_HASH", "0000000000000000"),
             ] {
                 if env::var(key).is_err() {
                     // SAFETY: single-threaded at this point (before rustc_driver).
