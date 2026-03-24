@@ -87,7 +87,14 @@ impl MirEdgeMap {
     }
 
     /// Load all `.edges.jsonl` files from a directory.
+    /// Load all edge JSONL files from a directory.
     pub fn from_dir(dir: &Path) -> Result<Self> {
+        Self::from_dir_filtered(dir, None)
+    }
+
+    /// Load edge JSONL files, optionally filtering to specific crates only.
+    /// When `only_crates` is Some, only loads JSONL for those crate names.
+    pub fn from_dir_filtered(dir: &Path, only_crates: Option<&[&str]>) -> Result<Self> {
         let mut combined = Self::default();
         let entries = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read MIR edge dir: {}", dir.display()))?;
@@ -97,12 +104,18 @@ impl MirEdgeMap {
             let path = entry.path();
             let name = path.to_string_lossy();
             if name.ends_with(".edges.jsonl") {
-                // Extract crate name from filename: e.g. "v_hnsw_cli.edges.jsonl" → "v_hnsw_cli"
                 let crate_name = path.file_stem()
                     .and_then(|s| s.to_str())
                     .and_then(|s| s.strip_suffix(".edges"))
                     .unwrap_or("")
                     .to_owned();
+
+                // Skip crates not in the filter
+                if let Some(filter) = only_crates {
+                    if !filter.iter().any(|c| c.replace('-', "_") == crate_name) {
+                        continue;
+                    }
+                }
 
                 let partial = Self::from_jsonl(&path)?;
                 for (k, v) in partial.by_location {
@@ -542,7 +555,9 @@ pub fn run_mir_direct(
     }
 
     run_language_extractors(project_root, &out_dir, rust_only);
-    MirEdgeMap::from_dir(&out_dir)
+    // Load only changed crates' JSONL (not all 65+ files).
+    // Edge cache handles the rest via cached resolved edges.
+    MirEdgeMap::from_dir_filtered(&out_dir, Some(crates))
 }
 
 /// Check if all requested crates have valid --extern artifact paths.
@@ -890,12 +905,26 @@ pub fn load_mir_chunks(path: &Path) -> Result<Vec<MirChunk>> {
 
 /// Load all chunks from `.chunks.jsonl` files in a directory.
 pub fn load_all_mir_chunks(dir: &Path) -> Result<Vec<MirChunk>> {
+    load_mir_chunks_filtered(dir, None)
+}
+
+/// Load MIR chunks, optionally filtering to specific crates only.
+pub fn load_mir_chunks_filtered(dir: &Path, only_crates: Option<&[&str]>) -> Result<Vec<MirChunk>> {
     let mut all = Vec::new();
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("failed to read MIR chunks dir: {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
         if path.to_string_lossy().ends_with(".chunks.jsonl") {
+            if let Some(filter) = only_crates {
+                let crate_name = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_suffix(".chunks"))
+                    .unwrap_or("");
+                if !filter.iter().any(|c| c.replace('-', "_") == crate_name) {
+                    continue;
+                }
+            }
             all.extend(load_mir_chunks(&path)?);
         }
     }

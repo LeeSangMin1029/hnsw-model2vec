@@ -134,6 +134,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             e.is_ok_and(|e| e.path().to_string_lossy().ends_with(".edges.jsonl"))
         }));
 
+    let mut incremental_crates: Vec<String> = Vec::new();
     if has_cached_edges {
         // Incremental: re-analyze crates with changed OR new Rust files
         let rust_changed: Vec<_> = code_files.iter()
@@ -161,6 +162,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             });
             v_code_intel::mir_edges::run_mir_direct(&input_path, None, &crate_refs, rust_only)
                 .context("mir-callgraph incremental failed")?;
+            incremental_crates = changed_crates;
         }
     } else {
         // Initial: analyze entire workspace
@@ -168,9 +170,13 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             .context("mir-callgraph failed — ensure nightly rustc and mir-callgraph are installed")?;
     }
 
-    // Load MIR chunks and create CodeChunkEntries — only for changed files
-    let mir_chunks = v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)
-        .context("failed to load MIR chunks")?;
+    // Load MIR chunks — only for changed crates (skip 94MB full parse on incremental)
+    let mir_chunks = if incremental_crates.is_empty() {
+        v_code_intel::mir_edges::load_all_mir_chunks(&mir_out_dir)
+    } else {
+        let refs: Vec<&str> = incremental_crates.iter().map(|s| s.as_str()).collect();
+        v_code_intel::mir_edges::load_mir_chunks_filtered(&mir_out_dir, Some(&refs))
+    }.context("failed to load MIR chunks")?;
 
     let changed_sources: std::collections::HashSet<String> = code_files.iter()
         .filter_map(|f| source_cache.get(f).cloned())
