@@ -44,19 +44,20 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         );
     }
 
-    // Build set of current source paths for deleted-file detection.
-    let current_sources: std::collections::HashSet<String> = all_files
+    // Build path → normalized source cache (one canonicalize per file, reused everywhere).
+    let source_cache: HashMap<std::path::PathBuf, String> = all_files
         .iter()
-        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source(f))
+        .map(|f| (f.clone(), v_hnsw_cli::commands::file_utils::normalize_source(f)))
         .collect();
+    let current_sources: std::collections::HashSet<String> = source_cache.values().cloned().collect();
 
     // Filter to changed files only (mtime check)
     let file_idx = file_index::load_file_index(&db_path)?;
     let code_files: Vec<_> = all_files
         .into_iter()
         .filter(|f| {
-            let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
-            match file_idx.get_file(&source) {
+            let source = source_cache.get(f).map(String::as_str).unwrap_or("");
+            match file_idx.get_file(source) {
                 Some(entry) => get_file_mtime(f).is_none_or(|m| m != entry.mtime),
                 None => true,
             }
@@ -173,7 +174,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     let t_load_done = t_load.elapsed();
 
     let changed_sources: std::collections::HashSet<String> = code_files.iter()
-        .map(|f| v_hnsw_cli::commands::file_utils::normalize_source(f))
+        .filter_map(|f| source_cache.get(f).cloned())
         .collect();
 
     let t_parse = std::time::Instant::now();
@@ -198,7 +199,7 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
     // === Record mtime for scanned files with 0 chunks (avoid re-detection) ===
     let mut file_idx = file_index::load_file_index(&db_path)?;
     for f in &code_files {
-        let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
+        let source = source_cache.get(f).cloned().unwrap_or_default();
         if !file_metadata_map.contains_key(&source) {
             if let Some(mtime) = get_file_mtime(f) {
                 let size = file_index::get_file_size(f).unwrap_or(0);
