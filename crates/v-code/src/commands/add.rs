@@ -130,13 +130,9 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
         }));
 
     if has_cached_edges {
-        // Incremental: only re-analyze crates with changed Rust files that are in file_index
+        // Incremental: re-analyze crates with changed OR new Rust files
         let rust_changed: Vec<_> = code_files.iter()
             .filter(|f| f.extension().and_then(|e| e.to_str()) == Some("rs"))
-            .filter(|f| {
-                let source = v_hnsw_cli::commands::file_utils::normalize_source(f);
-                file_idx.get_file(&source).is_some()
-            })
             .collect();
         let mut changed_crates = v_code_intel::mir_edges::detect_changed_crates(&input_path, &rust_changed);
 

@@ -36,6 +36,8 @@ pub struct MirEdgeMap {
     pub total: usize,
     /// caller_name → crate_name (tracks which crate each caller belongs to)
     pub caller_crate: HashMap<String, String>,
+    /// Reverse index: crate_name → Vec<caller_name> (for O(1) crate lookup)
+    pub crate_to_callers: HashMap<String, Vec<String>>,
 }
 
 /// Callee information from a MIR edge.
@@ -118,6 +120,14 @@ impl MirEdgeMap {
             }
         }
 
+        // Build reverse index: crate → callers
+        for (caller, crate_name) in &combined.caller_crate {
+            combined.crate_to_callers
+                .entry(crate_name.clone())
+                .or_default()
+                .push(caller.clone());
+        }
+
         Ok(combined)
     }
 
@@ -138,11 +148,11 @@ impl MirEdgeMap {
     }
 
     /// Get callers belonging to a specific crate.
+    /// Uses a pre-built reverse index for O(1) lookup instead of O(N) scan.
     pub fn callers_for_crate<'a>(&'a self, crate_name: &str) -> Vec<&'a str> {
-        self.caller_crate.iter()
-            .filter(|(_, v)| v.as_str() == crate_name)
-            .map(|(k, _)| k.as_str())
-            .collect()
+        self.crate_to_callers.get(crate_name)
+            .map(|callers| callers.iter().map(String::as_str).collect())
+            .unwrap_or_default()
     }
 }
 

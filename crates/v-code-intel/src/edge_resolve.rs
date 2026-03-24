@@ -241,10 +241,12 @@ pub(crate) fn resolve_incremental(
         name_to_idx.insert(clean.to_lowercase(), i as u32);
     }
 
+    let t_start = std::time::Instant::now();
     let chunks_hash = compute_chunks_hash(chunks);
 
     // Load entire bundle in one I/O operation
     let bundle = load_edge_bundle(db_path);
+    let t_load = t_start.elapsed();
     let bundle_mtime = std::fs::metadata(edge_bundle_path(db_path))
         .and_then(|m| m.modified()).ok();
     let hash_matches = bundle.as_ref().is_some_and(|b| b.chunks_hash == chunks_hash);
@@ -294,6 +296,8 @@ pub(crate) fn resolve_incremental(
         }
     }
 
+    let t_resolve = t_start.elapsed();
+
     // Merge and save (single write)
     let mut final_crates: Vec<(String, CrateEdgeCache)> = if hash_matches {
         bundle.map(|b| b.crates).unwrap_or_default()
@@ -307,16 +311,30 @@ pub(crate) fn resolve_incremental(
     let new_bundle = EdgeCacheBundle { chunks_hash, crates: final_crates };
     let _ = save_edge_bundle(db_path, &new_bundle);
 
+    let t_save = t_start.elapsed();
+
     // Type ref edges from chunks (always re-resolved, cheap)
     for (src, chunk) in chunks.iter().enumerate() {
         resolve_type_refs(src, chunk, index, &mut adj);
     }
+    let t_typerefs = t_start.elapsed();
+
+    adj.dedup();
+    let t_dedup = t_start.elapsed();
 
     eprintln!(
         "      [edge-resolve] incremental: resolved={mir_resolved} cached={cache_loaded} re-resolved_crates={re_resolved_crates}/{}",
         all_crate_names.len()
     );
-    adj.dedup();
+    eprintln!(
+        "      [edge-resolve] timing: load={:.0}ms resolve={:.0}ms save={:.0}ms typerefs={:.0}ms dedup={:.0}ms total={:.0}ms",
+        t_load.as_secs_f64() * 1000.0,
+        (t_resolve - t_load).as_secs_f64() * 1000.0,
+        (t_save - t_resolve).as_secs_f64() * 1000.0,
+        (t_typerefs - t_save).as_secs_f64() * 1000.0,
+        (t_dedup - t_typerefs).as_secs_f64() * 1000.0,
+        t_dedup.as_secs_f64() * 1000.0,
+    );
     adj
 }
 
