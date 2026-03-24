@@ -411,3 +411,125 @@ fn locked_concurrent_edits_preserve_data() {
     assert!(final_content.contains("fn beta()"), "beta function lost with locking");
     eprintln!("locked edits: both functions preserved after {iterations} concurrent iterations");
 }
+
+// ── Test 7: 10 agents editing the same file simultaneously ──────────
+
+/// Simulates 10 agents each owning a unique function in one file,
+/// all performing locked edits concurrently for multiple rounds.
+#[test]
+fn ten_agents_locked_edits_same_file() {
+    use std::fs::File;
+    use fs2::FileExt;
+
+    let agent_count = 10;
+    let iterations = 50;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_file = dir.path().join("shared.rs");
+    let lock_path = dir.path().join("shared.lock");
+
+    // Build initial file: 10 functions, one per agent
+    let mut initial = String::new();
+    for i in 0..agent_count {
+        if i > 0 { initial.push('\n'); }
+        initial.push_str(&format!(
+            "fn agent_{i}() {{\n    println!(\"agent-{i}-v0\");\n}}\n"
+        ));
+    }
+    std::fs::write(&src_file, &initial).unwrap();
+
+    let barrier = Arc::new(Barrier::new(agent_count));
+
+    let handles: Vec<_> = (0..agent_count)
+        .map(|agent_id| {
+            let file = src_file.clone();
+            let lock = lock_path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for round in 0..iterations {
+                    let lf = File::create(&lock).unwrap();
+                    lf.lock_exclusive().unwrap();
+
+                    let content = std::fs::read_to_string(&file).unwrap();
+                    let search = format!("agent-{agent_id}-v");
+                    // Find the current version marker and replace it
+                    let new_content = if let Some(pos) = content.find(&search) {
+                        // Replace from marker to closing ")
+                        let rest = &content[pos..];
+                        if let Some(end) = rest.find("\")") {
+                            let old = &content[pos..pos + end];
+                            content.replacen(old, &format!("agent-{agent_id}-v{round}"), 1)
+                        } else {
+                            content
+                        }
+                    } else {
+                        content
+                    };
+                    std::fs::write(&file, &new_content).unwrap();
+
+                    lf.unlock().unwrap();
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Verify: all 10 functions must still exist with valid version markers
+    let final_content = std::fs::read_to_string(&src_file).unwrap();
+    for i in 0..agent_count {
+        assert!(
+            final_content.contains(&format!("fn agent_{i}()")),
+            "agent_{i} function lost after 10-agent concurrent edits"
+        );
+        // Version marker must exist (some round number)
+        assert!(
+            final_content.contains(&format!("agent-{i}-v")),
+            "agent_{i} version marker lost"
+        );
+    }
+    eprintln!(
+        "10-agent test: all {} functions preserved after {} rounds each",
+        agent_count, iterations
+    );
+}
+
+// ── Test 8: 10 agents concurrent reads ──────────────────────────────
+
+/// 10 agents all reading chunks + graph simultaneously — no stale or partial data.
+#[test]
+fn ten_agents_concurrent_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path();
+    let expected_chunks = setup_test_db(db);
+    let expected_count = expected_chunks.len();
+
+    let agent_count = 10;
+    let barrier = Arc::new(Barrier::new(agent_count));
+
+    let handles: Vec<_> = (0..agent_count)
+        .map(|_| {
+            let db = db.to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                // Each agent does multiple reads
+                for _ in 0..20 {
+                    let chunks = load_chunks(&db).unwrap();
+                    assert_eq!(chunks.len(), expected_count);
+
+                    let graph = CallGraph::load(&db).unwrap();
+                    let seeds = graph.resolve("mod_a::foo");
+                    assert!(!seeds.is_empty());
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+}
