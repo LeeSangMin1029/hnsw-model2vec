@@ -40,32 +40,23 @@ cargo build --release -p v-code
 
 > `v-daemon`은 자동으로 시작/관리되므로 별도 빌드 불필요. 필요 시 `cargo build --release -p v-daemon`.
 
-### v-code 환경 요구사항
-
-`v-code add`는 MIR 기반 호출 그래프 추출을 위해 **nightly Rust**가 필요합니다.
+### v-code 한 줄 설치
 
 ```bash
-# nightly 설치 (필수 컴포넌트 포함)
-rustup toolchain install nightly --component rust-src rustc-dev llvm-tools-preview
-
-# 확인
-rustc +nightly --version
+curl -sL https://raw.githubusercontent.com/LeeSangMin1029/hnsw-model2vec/main/install-vcode.sh | bash
 ```
 
-`mir-callgraph` 바이너리는 첫 `v-code add` 실행 시 **자동 빌드**됩니다 (~10초, 1회).
+바이너리 다운로드 + nightly Rust 설치를 자동 처리합니다. clone/빌드 불필요.
 
-v-code 설치 후 다른 프로젝트에서 사용:
+설치 후 아무 Rust 프로젝트에서:
 ```bash
-# 1. 빌드 + PATH에 설치
-cargo build --release -p v-code
-cp target/release/v-code ~/.cargo/bin/   # 또는 원하는 PATH 위치
-
-# 2. 아무 Rust 프로젝트에서 사용
 cd /path/to/your/project
 v-code add .code.db .
 v-code context .code.db YourFunction -s
 v-code context .code.db YourFunction --blast
 ```
+
+> `mir-callgraph` 바이너리는 첫 `v-code add` 실행 시 **자동 빌드**됩니다 (~10초, 1회).
 
 ### 첫 실행 시 자동 다운로드
 
