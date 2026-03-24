@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// A single call edge extracted from MIR.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -118,18 +118,143 @@ impl MirEdgeMap {
     }
 }
 
+// Embedded mir-callgraph source files for auto-build.
+const MIR_CALLGRAPH_MAIN_RS: &str =
+    include_str!("../../../tools/mir-callgraph/src/main.rs");
+const MIR_CALLGRAPH_CARGO_TOML: &str =
+    include_str!("../../../tools/mir-callgraph/Cargo.toml");
+const MIR_CALLGRAPH_RUST_TOOLCHAIN: &str =
+    include_str!("../../../tools/mir-callgraph/rust-toolchain.toml");
+
+/// Binary name for mir-callgraph (platform-dependent).
+fn mir_callgraph_bin_name() -> &'static str {
+    if cfg!(windows) { "mir-callgraph.exe" } else { "mir-callgraph" }
+}
+
+/// Base directory for v-code data: `~/.v-code/`.
+fn v_code_home() -> Result<PathBuf> {
+    let home = v_hnsw_core::home_dir()
+        .context("cannot determine home directory")?;
+    Ok(home.join(".v-code"))
+}
+
+/// Get the current nightly rustc version string, or None if nightly is not installed.
+fn nightly_rustc_version() -> Option<String> {
+    Command::new("rustc")
+        .args(["+nightly", "--version"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+}
+
+/// Extract embedded mir-callgraph source to the build directory.
+fn extract_mir_callgraph_source(build_dir: &Path) -> Result<()> {
+    let src_dir = build_dir.join("src");
+    std::fs::create_dir_all(&src_dir)
+        .with_context(|| format!("failed to create build dir: {}", src_dir.display()))?;
+
+    std::fs::write(build_dir.join("Cargo.toml"), MIR_CALLGRAPH_CARGO_TOML)
+        .context("failed to write Cargo.toml")?;
+    std::fs::write(build_dir.join("rust-toolchain.toml"), MIR_CALLGRAPH_RUST_TOOLCHAIN)
+        .context("failed to write rust-toolchain.toml")?;
+    std::fs::write(src_dir.join("main.rs"), MIR_CALLGRAPH_MAIN_RS)
+        .context("failed to write main.rs")?;
+
+    Ok(())
+}
+
+/// Build mir-callgraph from embedded source using nightly toolchain.
+fn build_mir_callgraph(base: &Path) -> Result<PathBuf> {
+    let nightly_ver = nightly_rustc_version().ok_or_else(|| {
+        anyhow::anyhow!(
+            "nightly Rust toolchain required for v-code add.\n\
+             Run: rustup toolchain install nightly --component rust-src rustc-dev llvm-tools-preview"
+        )
+    })?;
+
+    let bin_dir = base.join("bin");
+    let cached_bin = bin_dir.join(mir_callgraph_bin_name());
+    let version_file = bin_dir.join(".nightly-version");
+
+    // Check if cached binary exists and nightly version matches
+    if cached_bin.exists() {
+        if let Ok(saved_ver) = std::fs::read_to_string(&version_file) {
+            if saved_ver.trim() == nightly_ver {
+                return Ok(cached_bin);
+            }
+            eprintln!("  [mir] nightly version changed, rebuilding mir-callgraph...");
+        }
+    } else {
+        eprintln!("  [mir] building mir-callgraph (first run)...");
+    }
+
+    // Extract source
+    let build_dir = base.join("build").join("mir-callgraph");
+    extract_mir_callgraph_source(&build_dir)?;
+
+    // Build with nightly
+    eprintln!("  [mir] cargo +nightly build --release (this may take a minute)...");
+    let status = Command::new("cargo")
+        .args(["+nightly", "build", "--release"])
+        .current_dir(&build_dir)
+        .status()
+        .context("failed to run cargo +nightly build")?;
+
+    if !status.success() {
+        bail!("mir-callgraph build failed (exit code: {status})");
+    }
+
+    // Copy built binary to bin/
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create bin dir: {}", bin_dir.display()))?;
+
+    let built_bin = build_dir
+        .join("target")
+        .join("release")
+        .join(mir_callgraph_bin_name());
+
+    std::fs::copy(&built_bin, &cached_bin).with_context(|| {
+        format!(
+            "failed to copy built binary from {} to {}",
+            built_bin.display(),
+            cached_bin.display()
+        )
+    })?;
+
+    // Save nightly version
+    std::fs::write(&version_file, &nightly_ver)
+        .context("failed to save nightly version")?;
+
+    eprintln!("  [mir] mir-callgraph ready: {}", cached_bin.display());
+    Ok(cached_bin)
+}
+
 /// Find the mir-callgraph binary.
-fn find_mir_callgraph_bin(override_path: Option<&Path>) -> std::path::PathBuf {
-    override_path
-        .map(|p| p.to_path_buf())
-        .or_else(|| {
-            std::env::current_exe().ok()
-                .and_then(|exe| {
-                    let sibling = exe.with_file_name(if cfg!(windows) { "mir-callgraph.exe" } else { "mir-callgraph" });
-                    sibling.exists().then_some(sibling)
-                })
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("mir-callgraph"))
+///
+/// Search order:
+/// 1. Override path (explicit)
+/// 2. Sibling to current exe
+/// 3. Cached build in `~/.v-code/bin/`
+/// 4. Auto-build from embedded source
+fn find_mir_callgraph_bin(override_path: Option<&Path>) -> Result<PathBuf> {
+    // 1. Explicit override
+    if let Some(p) = override_path {
+        return Ok(p.to_path_buf());
+    }
+
+    // 2. Sibling to current exe
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name(mir_callgraph_bin_name());
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+    }
+
+    // 3 & 4. Cached build or auto-build
+    let base = v_code_home()?;
+    build_mir_callgraph(&base)
 }
 
 /// Run mir-callgraph on the entire workspace.
@@ -164,7 +289,7 @@ pub fn run_mir_callgraph_for(
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create MIR edge dir: {}", out_dir.display()))?;
 
-    let bin = find_mir_callgraph_bin(mir_callgraph_bin);
+    let bin = find_mir_callgraph_bin(mir_callgraph_bin)?;
 
     let mut cmd = Command::new(&bin);
     cmd.current_dir(project_root)
