@@ -400,6 +400,9 @@ fn main() {
     cmd.arg("+nightly")
         .arg("check")
         .arg("--tests")
+        // Use a separate target dir so cargo doesn't skip crates already
+        // compiled by a normal `cargo build` (different RUSTC_WRAPPER fingerprint).
+        .arg("--target-dir").arg("target/mir-check")
         .env("RUSTC_WRAPPER", &exe);
     if keep_going {
         cmd.arg("--keep-going");
