@@ -87,11 +87,14 @@ pub fn run(db_path: PathBuf, input_path: PathBuf, exclude: &[String]) -> Result<
             .with_context(|| format!("Failed to open database at {}", db_path.display()))?
     } else {
         println!("New database: {} (dim={TEXT_ONLY_DIM})", db_path.display());
-        // Clear stale MIR caches so fresh DB gets a clean full build.
+        // Clear stale edge/chunk JSONL + cargo fingerprints for local crates.
+        // Keep target/mir-check/debug/deps/ (compiled deps) and incremental/ (rustc cache).
         let mir_edges = input_path.join("target").join("mir-edges");
-        let mir_check = input_path.join("target").join("mir-check");
         if mir_edges.exists() { let _ = std::fs::remove_dir_all(&mir_edges); }
-        if mir_check.exists() { let _ = std::fs::remove_dir_all(&mir_check); }
+        // Remove cargo fingerprint dir to force RUSTC_WRAPPER re-invocation.
+        // Keeps deps/ and incremental/ intact for fast recompilation.
+        let fingerprint = input_path.join("target/mir-check/debug/.fingerprint");
+        if fingerprint.exists() { let _ = std::fs::remove_dir_all(&fingerprint); }
         let config = StorageConfig {
             dim: TEXT_ONLY_DIM,
             initial_capacity: 10_000,
